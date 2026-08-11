@@ -10,6 +10,7 @@ karantinaya almaz veya ağ üzerinden veri göndermez. Electron ile standart
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
@@ -26,6 +27,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
+
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 try:
     import yara
@@ -52,6 +58,7 @@ MAX_PROTON_RULE_BYTES = 2 * 1024 * 1024
 MAX_PROTON_TOTAL_RULE_BYTES = 16 * 1024 * 1024
 PROGRESS_INTERVAL = 25
 WATCH_INTERVAL_SECONDS = 5.0
+BEHAVIOR_INTERVAL_SECONDS = 3.0
 WATCH_DEBOUNCE_SECONDS = 0.9
 WATCH_SETTLE_SECONDS = 0.65
 SIGNATURE_DATABASE_NAME = "Proton"
@@ -171,7 +178,10 @@ def open_database() -> Iterator[sqlite3.Connection]:
           finding_kind TEXT,
           severity TEXT,
           reason TEXT,
-          sha256 TEXT
+          sha256 TEXT,
+          disposition TEXT NOT NULL DEFAULT 'pending',
+          disposition_at TEXT,
+          quarantine_item_id INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS protection_events_occurred_at_idx
@@ -235,6 +245,23 @@ def open_database() -> Iterator[sqlite3.Connection]:
           ON exclusion_events(occurred_at DESC);
         """
     )
+    protection_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(protection_events)").fetchall()
+    }
+    if "disposition" not in protection_columns:
+        connection.execute(
+            "ALTER TABLE protection_events ADD COLUMN disposition TEXT NOT NULL DEFAULT 'pending'"
+        )
+        connection.execute(
+            "UPDATE protection_events SET disposition = 'ignored' WHERE disposition = 'pending'"
+        )
+    if "disposition_at" not in protection_columns:
+        connection.execute("ALTER TABLE protection_events ADD COLUMN disposition_at TEXT")
+        connection.execute(
+            "UPDATE protection_events SET disposition_at = occurred_at WHERE disposition = 'ignored'"
+        )
+    if "quarantine_item_id" not in protection_columns:
+        connection.execute("ALTER TABLE protection_events ADD COLUMN quarantine_item_id INTEGER")
     eicar_sha256 = hashlib.sha256(EICAR_MARKER).hexdigest()
     updated_at = datetime.now(timezone.utc).isoformat()
     connection.execute(
@@ -908,9 +935,9 @@ def snapshot_targets(
     return snapshot
 
 
-def save_protection_event(event_kind: str, finding: Finding) -> None:
+def save_protection_event(event_kind: str, finding: Finding) -> int:
     with open_database() as connection:
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO protection_events (
               occurred_at, event_kind, file_path, finding_kind, severity,
@@ -927,6 +954,7 @@ def save_protection_event(event_kind: str, finding: Finding) -> None:
                 finding.sha256,
             ),
         )
+        return int(cursor.lastrowid)
 
 
 def read_protection_history(limit: int) -> list[dict[str, Any]]:
@@ -937,14 +965,88 @@ def read_protection_history(limit: int) -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT id, occurred_at, event_kind, file_path, finding_kind,
-                   severity, reason, sha256
+                   severity, reason, sha256, disposition, disposition_at,
+                   quarantine_item_id
             FROM protection_events
-            ORDER BY occurred_at DESC, id DESC
+            ORDER BY CASE WHEN disposition = 'pending' THEN 0 ELSE 1 END,
+                     occurred_at DESC, id DESC
             LIMIT ?
             """,
             (max(1, min(limit, 100)),),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def protection_event_action(item_id: int, action: str) -> int:
+    if action not in {"quarantine", "trust", "ignore"}:
+        emit("error", code="PROTECTION_ACTION_INVALID", message="Desteklenmeyen tehdit işlemi.")
+        return 2
+    try:
+        with open_database() as connection:
+            connection.row_factory = sqlite3.Row
+            event = connection.execute(
+                """
+                SELECT id, file_path, reason, sha256, disposition
+                FROM protection_events WHERE id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        if event is None:
+            raise ValueError("Koruma olayı bulunamadı")
+        if event["disposition"] != "pending":
+            emit(
+                "protection-action",
+                event_id=item_id,
+                action=str(event["disposition"]),
+                already_resolved=True,
+            )
+            return 0
+
+        disposition = {"quarantine": "quarantined", "trust": "trusted", "ignore": "ignored"}[action]
+        quarantine_item_id: int | None = None
+        if action == "trust":
+            digest = str(event["sha256"] or "")
+            if not PROTON_SHA256_PATTERN.fullmatch(digest):
+                raise ValueError("Bu bulgunun güvenilir olarak kaydedilebilecek SHA-256 özeti yok")
+            current = load_exclusion_set()
+            if digest not in current.hashes:
+                add_exclusion("hash", digest, str(event["file_path"]))
+        elif action == "quarantine":
+            result = quarantine_file(str(event["file_path"]), str(event["reason"] or "Gerçek zamanlı koruma bulgusu"))
+            if result != 0:
+                return result
+            with open_database() as connection:
+                row = connection.execute(
+                    """
+                    SELECT id FROM quarantine_items
+                    WHERE original_path = ? AND state = 'active'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (str(event["file_path"]),),
+                ).fetchone()
+            quarantine_item_id = int(row[0]) if row else None
+
+        resolved_at = datetime.now(timezone.utc).isoformat()
+        with open_database() as connection:
+            connection.execute(
+                """
+                UPDATE protection_events
+                SET disposition = ?, disposition_at = ?, quarantine_item_id = ?
+                WHERE id = ? AND disposition = 'pending'
+                """,
+                (disposition, resolved_at, quarantine_item_id, item_id),
+            )
+        emit(
+            "protection-action",
+            event_id=item_id,
+            action=disposition,
+            disposition_at=resolved_at,
+            quarantine_item_id=quarantine_item_id,
+        )
+        return 0
+    except (OSError, sqlite3.Error, ValueError) as error:
+        emit("error", code="PROTECTION_ACTION_FAILED", message=f"Tehdit işlemi tamamlanamadı: {error}")
+        return 2
 
 
 def sha256_for(path: Path, size: int) -> str | None:
@@ -1072,6 +1174,218 @@ def inspect_file(
     return findings
 
 
+def windows_process_snapshot() -> dict[int, str]:
+    """Return readable Windows process image paths without admin privileges."""
+    if os.name != "nt":
+        return {}
+    from ctypes import wintypes
+
+    process_ids = (wintypes.DWORD * 8192)()
+    bytes_returned = wintypes.DWORD()
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi.EnumProcesses.argtypes = [
+        ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+    ]
+    psapi.EnumProcesses.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    if not psapi.EnumProcesses(
+        process_ids, ctypes.sizeof(process_ids), ctypes.byref(bytes_returned)
+    ):
+        return {}
+
+    result: dict[int, str] = {}
+    count = bytes_returned.value // ctypes.sizeof(wintypes.DWORD)
+    for process_id in process_ids[:count]:
+        if not process_id:
+            continue
+        handle = kernel32.OpenProcess(0x1000, False, process_id)
+        if not handle:
+            continue
+        try:
+            capacity = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(capacity.value)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(capacity)):
+                result[int(process_id)] = buffer.value
+        finally:
+            kernel32.CloseHandle(handle)
+    return result
+
+
+def persistence_snapshot() -> dict[str, str]:
+    """Read common Windows Run keys and Startup folders without modifying them."""
+    if os.name != "nt":
+        return {}
+    snapshot: dict[str, str] = {}
+    if winreg is not None:
+        registry_locations = (
+            (winreg.HKEY_CURRENT_USER, "HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_CURRENT_USER, "HKCU", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+            (winreg.HKEY_LOCAL_MACHINE, "HKLM", r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_LOCAL_MACHINE, "HKLM", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+        )
+        views = [0]
+        for view_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+            view = getattr(winreg, view_name, 0)
+            if view and view not in views:
+                views.append(view)
+        for hive, hive_name, key_path in registry_locations:
+            for view in views:
+                try:
+                    with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
+                        index = 0
+                        while True:
+                            try:
+                                name, value, _value_type = winreg.EnumValue(key, index)
+                            except OSError:
+                                break
+                            identity = f"registry://{hive_name}/{key_path}/{view}/{name}"
+                            snapshot[identity] = str(value)
+                            index += 1
+                except (OSError, PermissionError):
+                    continue
+
+    startup_directories = []
+    app_data = os.environ.get("APPDATA")
+    program_data = os.environ.get("ProgramData")
+    if app_data:
+        startup_directories.append(Path(app_data) / "Microsoft/Windows/Start Menu/Programs/Startup")
+    if program_data:
+        startup_directories.append(Path(program_data) / "Microsoft/Windows/Start Menu/Programs/StartUp")
+    for directory in startup_directories:
+        try:
+            for entry in directory.iterdir():
+                if not entry.is_file() or entry.is_symlink():
+                    continue
+                stat = entry.stat()
+                snapshot[f"startup://{entry}"] = f"{stat.st_mtime_ns}:{stat.st_size}"
+        except (OSError, PermissionError):
+            continue
+    return snapshot
+
+
+def suspicious_process_finding(path: Path) -> Finding | None:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not resolved.is_file():
+        return None
+    writable_roots: list[tuple[str, Path]] = []
+    for label, raw_root in (
+        ("geçici klasör", os.environ.get("TEMP")),
+        ("geçici klasör", os.environ.get("TMP")),
+        ("İndirilenler", str(Path.home() / "Downloads")),
+    ):
+        if not raw_root:
+            continue
+        try:
+            writable_roots.append((label, Path(raw_root).resolve()))
+        except (OSError, RuntimeError):
+            continue
+    location = next(
+        (label for label, root in writable_roots if path_is_inside(resolved, root)),
+        None,
+    )
+    if location is None:
+        return None
+    executable_suffixes = {".exe", ".com", ".scr", ".bat", ".cmd", ".ps1", ".vbs", ".js"}
+    if resolved.suffix.casefold() not in executable_suffixes:
+        return None
+    parts = resolved.name.casefold().split(".")
+    double_extension = len(parts) >= 3 and f".{parts[-2]}" in DOCUMENT_EXTENSIONS
+    severity = "high" if double_extension else "medium"
+    reason = (
+        "Belge uzantısını taklit eden yeni süreç çalıştırıldı"
+        if double_extension
+        else f"{location} içinden yeni bir çalıştırılabilir süreç başlatıldı"
+    )
+    size = resolved.stat().st_size
+    return Finding(
+        path=str(resolved),
+        kind="behavior",
+        severity=severity,
+        reason=reason,
+        sha256=sha256_for(resolved, size),
+    )
+
+
+def watch_behavior() -> int:
+    """Monitor process starts and common persistence points in read-only mode."""
+    if os.name != "nt":
+        emit("behavior-error", code="UNSUPPORTED_PLATFORM", message="Davranış izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+    processes = windows_process_snapshot()
+    persistence = persistence_snapshot()
+    exclusions = load_exclusion_set()
+    emit(
+        "behavior-ready",
+        backend="windows-native",
+        process_count=len(processes),
+        persistence_points=len(persistence),
+        interval_seconds=BEHAVIOR_INTERVAL_SECONDS,
+    )
+    try:
+        while True:
+            time.sleep(BEHAVIOR_INTERVAL_SECONDS)
+            current_processes = windows_process_snapshot()
+            for process_id, raw_path in current_processes.items():
+                if process_id in processes:
+                    continue
+                finding = suspicious_process_finding(Path(raw_path))
+                if finding is None:
+                    continue
+                if is_path_excluded(Path(finding.path), exclusions):
+                    continue
+                if finding.sha256 and finding.sha256 in exclusions.hashes:
+                    continue
+                try:
+                    event_id = save_protection_event("process-started", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit(
+                    "behavior-finding",
+                    event_id=event_id,
+                    process_id=process_id,
+                    file_name=Path(raw_path).name,
+                    finding=asdict(finding),
+                )
+            processes = current_processes
+
+            current_persistence = persistence_snapshot()
+            for identity, value in current_persistence.items():
+                if identity in persistence and persistence[identity] == value:
+                    continue
+                finding = Finding(
+                    path=identity,
+                    kind="persistence",
+                    severity="medium",
+                    reason="Windows otomatik başlangıç noktasında yeni veya değiştirilmiş kalıcılık kaydı",
+                    sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("persistence-changed", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit(
+                    "behavior-finding",
+                    event_id=event_id,
+                    file_name=identity.rsplit("/", 1)[-1],
+                    finding=asdict(finding),
+                )
+            persistence = current_persistence
+    except KeyboardInterrupt:
+        emit("behavior-stopped")
+        return 0
+
+
 def watch_targets_polling_fallback() -> int:
     """Poll the user's common download locations without changing any files."""
     settings = read_app_settings()
@@ -1119,12 +1433,13 @@ def watch_targets_polling_fallback() -> int:
 
                 for finding in findings:
                     try:
-                        save_protection_event(event_kind, finding)
+                        event_id = save_protection_event(event_kind, finding)
                     except (OSError, sqlite3.Error):
-                        pass
+                        event_id = None
                     emit(
                         "watch-finding",
                         event_kind=event_kind,
+                        event_id=event_id,
                         file_name=path.name,
                         finding=asdict(finding),
                     )
@@ -1158,12 +1473,13 @@ def emit_watch_result(
         return
     for finding in findings:
         try:
-            save_protection_event(event_kind, finding)
+            event_id = save_protection_event(event_kind, finding)
         except (OSError, sqlite3.Error):
-            pass
+            event_id = None
         emit(
             "watch-finding",
             event_kind=event_kind,
+            event_id=event_id,
             file_name=path.name,
             finding=asdict(finding),
         )
@@ -1628,7 +1944,9 @@ def main() -> int:
     action.add_argument("--scan-path", metavar="KLASOR", help="Kullanıcının seçtiği tek klasörü tara")
     action.add_argument("--history", action="store_true", help="Yerel tarama geçmişini oku")
     action.add_argument("--watch", action="store_true", help="Yeni ve değişen dosyaları izle")
+    action.add_argument("--watch-behavior", action="store_true", help="Süreçleri ve kalıcılık noktalarını izle")
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
+    action.add_argument("--protection-action", metavar="ID", type=int, help="Gerçek zamanlı koruma olayına işlem uygula")
     action.add_argument("--signature-status", action="store_true", help="Yerel imza veritabanı durumunu oku")
     action.add_argument("--signature-update", action="store_true", help="Paketle gelen yerel imzaları yükle")
     action.add_argument("--install-proton-stdin", action="store_true", help="Doğrulanmış Proton yükünü standart girdiden kur")
@@ -1645,6 +1963,7 @@ def main() -> int:
     action.add_argument("--restore", metavar="ID", type=int, help="Karantinadaki dosyayı geri yükle")
     action.add_argument("--delete-quarantine", metavar="ID", type=int, help="Karantinadaki dosyayı kalıcı sil")
     parser.add_argument("--reason", default="Kullanıcı onaylı tarama bulgusu", help="Karantina nedeni")
+    parser.add_argument("--disposition", choices=("quarantine", "trust", "ignore"), help="Koruma olayı işlemi")
     parser.add_argument("--label", default=None, help="İstisna açıklaması")
     parser.add_argument("--limit", type=int, default=5, help="Döndürülecek en fazla geçmiş kaydı")
     parser.add_argument("--value-json", default="null", help="Ayar için JSON değeri")
@@ -1655,6 +1974,10 @@ def main() -> int:
         return history(args.limit)
     if args.protection_history:
         return protection_history(args.limit)
+    if args.protection_action is not None:
+        if not args.disposition:
+            parser.error("--protection-action ile --disposition gereklidir")
+        return protection_event_action(args.protection_action, args.disposition)
     if args.signature_status:
         return signature_status()
     if args.signature_update:
@@ -1679,6 +2002,8 @@ def main() -> int:
         return exclusion_remove(args.exclusion_remove)
     if args.watch:
         return watch_targets()
+    if args.watch_behavior:
+        return watch_behavior()
     if args.scan_path:
         return custom_scan(args.scan_path)
     if args.quarantine:

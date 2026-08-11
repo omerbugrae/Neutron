@@ -18,8 +18,10 @@
   const textTargets = (role) => [...document.querySelectorAll(`[data-role="${role}"]`)];
   let scanning = false;
   let protectionEnabled = null;
+  let behaviorReady = null;
   let signatureLabel = 'Proton hazırlanıyor';
   let currentSettings = null;
+  let pendingProtectionEventId = null;
 
   const setText = (role, value) => textTargets(role).forEach((element) => {
     element.textContent = value;
@@ -124,6 +126,20 @@
       ? 'Yeni ve değişen dosyalar Neutron tarafından yerel olarak denetleniyor.'
       : 'Yeni ve değişen dosyalar izlenmiyor. Koruma sayfasından korumayı açın.');
     setText('overview-file-protection-state', enabled ? 'Koruma etkin' : 'Koruma kapalı');
+    if (!enabled) {
+      behaviorReady = false;
+      setText('overview-behavior-state', 'Koruma kapalı');
+      setText('behavior-protection-state', 'Koruma kapalı');
+      setText('behavior-protection-detail', 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.');
+    } else if (behaviorReady === true) {
+      setText('overview-behavior-state', 'Davranış izleme etkin');
+      setText('behavior-protection-state', 'Etkin');
+      setText('behavior-protection-detail', 'Yeni süreçler ve Windows otomatik başlangıç noktaları izleniyor.');
+    } else {
+      setText('overview-behavior-state', 'Başlatılıyor');
+      setText('behavior-protection-state', 'Başlatılıyor');
+      setText('behavior-protection-detail', 'Süreç ve kalıcılık başlangıç görüntüsü hazırlanıyor.');
+    }
     setText('protection-label', enabled ? 'KORUMA ETKİN' : 'KORUMA KAPALI');
     setText('scan-heading', enabled ? 'Neutron seni koruyor.' : 'Korumayı açın.');
     setText('scan-summary', enabled
@@ -200,7 +216,20 @@
     const count = document.querySelector('[data-role="protection-event-count"]');
     if (!list || !count) return;
     list.replaceChildren();
-    count.textContent = `${events.length} olay`;
+    const pendingEvents = events.filter((event) => (event.disposition || 'pending') === 'pending');
+    const criticalPending = pendingEvents.some((event) => ['high', 'critical'].includes(event.severity));
+    const hadThreatAlert = document.body.classList.contains('threat-alert');
+    document.body.classList.toggle('threat-alert', criticalPending);
+    if (criticalPending) {
+      setText('engine-state', 'Tehdit müdahalesi gerekiyor');
+      setText('protection-label', 'TEHDİT BULUNDU');
+      setText('file-protection-detail', `${pendingEvents.length} gerçek zamanlı koruma olayı işlem bekliyor.`);
+    } else if (hadThreatAlert && !scanning) {
+      setReadyState();
+    }
+    count.textContent = pendingEvents.length
+      ? `${pendingEvents.length} müdahale bekliyor · ${events.length} olay`
+      : `${events.length} olay`;
 
     if (!events.length) {
       const empty = document.createElement('p');
@@ -213,6 +242,10 @@
     events.forEach((event) => {
       const row = document.createElement('article');
       row.className = 'protection-event-row';
+      row.dataset.protectionEventId = String(event.id);
+      const disposition = event.disposition || 'pending';
+      row.classList.toggle('is-resolved', disposition !== 'pending');
+      row.classList.toggle('is-critical', disposition === 'pending' && ['high', 'critical'].includes(event.severity));
       const content = document.createElement('div');
       const title = document.createElement('h3');
       title.textContent = event.file_path || 'Bilinmeyen dosya';
@@ -224,13 +257,71 @@
       const badge = document.createElement('span');
       badge.textContent = event.finding_kind === 'test-signature'
         ? 'EICAR TEST'
-        : event.finding_kind === 'signature' ? 'İMZA' : event.finding_kind === 'yara' ? 'YARA' : 'İNCELEME';
+        : event.finding_kind === 'signature' ? 'İMZA'
+          : event.finding_kind === 'yara' ? 'YARA'
+            : event.finding_kind === 'behavior' ? 'DAVRANIŞ'
+              : event.finding_kind === 'persistence' ? 'KALICILIK' : 'İNCELEME';
       const stamp = document.createElement('time');
       stamp.textContent = formatScanDate(event.occurred_at);
-      meta.append(badge, stamp);
-      row.append(content, meta);
+      const dispositionLabel = document.createElement('strong');
+      dispositionLabel.className = `protection-disposition protection-disposition--${disposition}`;
+      dispositionLabel.textContent = ({
+        pending: 'MÜDAHALE BEKLİYOR',
+        quarantined: 'KARANTİNADA',
+        trusted: 'GÜVENİLİR',
+        ignored: 'YOK SAYILDI',
+      }[disposition] || disposition.toLocaleUpperCase('tr-TR'));
+      meta.append(badge, dispositionLabel, stamp);
+      const actions = document.createElement('div');
+      actions.className = 'protection-event-row__actions';
+      if (disposition === 'pending') {
+        const actionDefinitions = [
+          ['quarantine', 'Karantinaya al'],
+          ['trust', 'Güvenilir say'],
+          ['ignore', 'Yoksay'],
+        ];
+        actionDefinitions.forEach(([actionName, label]) => {
+          if (event.finding_kind === 'persistence' && actionName !== 'ignore') return;
+          if (actionName === 'trust' && !/^[a-f0-9]{64}$/i.test(event.sha256 || '')) return;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.dataset.protectionAction = actionName;
+          button.textContent = label;
+          button.addEventListener('click', async () => {
+            const confirmations = {
+              quarantine: `“${event.file_path}” karantinaya taşınsın mı? Dosya silinmez.`,
+              trust: `Bu dosyanın mevcut SHA-256 özeti güvenilir sayılsın mı? Dosya değişirse yeniden taranır.`,
+              ignore: `“${event.file_path}” için bu uyarı yoksayılsın mı? Dosyada değişiklik yapılmaz.`,
+            };
+            if (!window.confirm(confirmations[actionName])) return;
+            actions.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+            button.textContent = 'İşleniyor…';
+            const result = await engine?.applyProtectionAction?.(Number(event.id), actionName);
+            if (!result?.ok) {
+              actions.querySelectorAll('button').forEach((item) => { item.disabled = false; });
+              button.textContent = result?.message || 'Tekrar dene';
+              return;
+            }
+            if (actionName === 'quarantine') applyQuarantine();
+            if (actionName === 'trust') applyExclusions();
+            applyProtectionHistory();
+          });
+          actions.append(button);
+        });
+      }
+      row.append(content, actions, meta);
       list.append(row);
     });
+
+    if (pendingProtectionEventId) {
+      const target = list.querySelector(`[data-protection-event-id="${pendingProtectionEventId}"]`);
+      if (target) {
+        target.classList.add('is-focused');
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        window.setTimeout(() => target.classList.remove('is-focused'), 2400);
+        pendingProtectionEventId = null;
+      }
+    }
   };
 
   const applyProtectionHistory = async () => {
@@ -596,6 +687,40 @@
       return;
     }
 
+    if (event.type === 'behavior-ready') {
+      behaviorReady = true;
+      setText('overview-behavior-state', 'Davranış izleme etkin');
+      setText('behavior-protection-state', 'Etkin');
+      setText('behavior-protection-detail', `${Number(event.process_count) || 0} çalışan süreç ve ${Number(event.persistence_points) || 0} otomatik başlangıç noktası izleniyor.`);
+      return;
+    }
+
+    if (event.type === 'behavior-finding') {
+      const finding = event.finding || {};
+      setText('activity-title', `${event.file_name || 'Bir davranış'} işaretlendi`);
+      setText('activity-detail', `${finding.reason || 'Şüpheli davranış incelenmeli'}; otomatik işlem uygulanmadı.`);
+      setText('overview-behavior-state', 'İnceleme gerekiyor');
+      setText('behavior-protection-detail', finding.reason || 'Şüpheli davranış yerel geçmişe kaydedildi.');
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'behavior-stopped') {
+      behaviorReady = false;
+      setText('overview-behavior-state', 'Koruma kapalı');
+      setText('behavior-protection-state', 'Koruma kapalı');
+      setText('behavior-protection-detail', 'Davranış izleme durduruldu.');
+      return;
+    }
+
+    if (event.type === 'behavior-error') {
+      behaviorReady = false;
+      setText('overview-behavior-state', 'Kullanılamıyor');
+      setText('behavior-protection-state', 'Kullanılamıyor');
+      setText('behavior-protection-detail', event.message || 'Davranış izleme motoru başlatılamadı.');
+      return;
+    }
+
     if (event.type === 'watch-stopped') {
       setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
       setText('engine-state', 'Gerçek zamanlı koruma kapalı');
@@ -606,6 +731,12 @@
       setProtectionState(false, 'Koruma başlatılamadı', event.message || 'Koruma motoru kullanılamıyor.');
       setText('engine-state', 'Koruma motoru kullanılamıyor');
     }
+  });
+
+  engine?.onOpenProtectionEvent?.((payload) => {
+    pendingProtectionEventId = Number.isInteger(payload?.eventId) ? payload.eventId : null;
+    showPage('activity');
+    applyProtectionHistory();
   });
 
   engine?.onProtonUpdateEvent?.((event) => {
@@ -838,10 +969,12 @@
   applyExclusions();
   engine?.getProtectionStatus?.().then((status) => {
     if (status?.enabled) {
+      behaviorReady = Boolean(status.behaviorReady);
       setProtectionState(true, status.ready ? 'Koruma etkin' : 'Koruma başlatılıyor', status.ready
         ? 'Masaüstü ve İndirilenler klasörleri izleniyor.'
         : 'İzlenecek klasörlerin ilk görüntüsü hazırlanıyor.');
     } else {
+      behaviorReady = false;
       setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
     }
   }).catch(() => {

@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   stopProtection: () => ipcRenderer.invoke('protection:stop'),
   getProtectionStatus: () => ipcRenderer.invoke('protection:status'),
   getProtectionHistory: () => ipcRenderer.invoke('protection:history'),
+  applyProtectionAction: (itemId, action) => ipcRenderer.invoke('protection:action', itemId, action),
   getSignatureStatus: () => ipcRenderer.invoke('signature:status'),
   getYaraStatus: () => ipcRenderer.invoke('yara:status'),
   updateSignatures: () => ipcRenderer.invoke('signature:update'),
@@ -38,6 +39,11 @@ contextBridge.exposeInMainWorld('neutronEngine', {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('protection:event', listener);
     return () => ipcRenderer.removeListener('protection:event', listener);
+  },
+  onOpenProtectionEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('protection:open-event', listener);
+    return () => ipcRenderer.removeListener('protection:open-event', listener);
   },
   onProtonUpdateEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);

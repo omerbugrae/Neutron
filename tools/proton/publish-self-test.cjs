@@ -38,12 +38,12 @@ try {
     repository: 'omerbugrae/NeutronProton',
   }, { runGh });
 
-  assert.equal(result.tag, 'proton-v1.00.002');
+  assert.equal(result.tag, 'proton-v1.00.004');
   assert.equal(fs.existsSync(result.packagePath), true);
   assert.equal(fs.existsSync(result.signaturePath), true);
   const createCall = calls.find((call) => call[0] === 'release' && call[1] === 'create');
   assert.ok(createCall, 'Release oluşturma çağrısı yapılmalıydı.');
-  assert.ok(createCall.includes('proton-v1.00.002'));
+  assert.ok(createCall.includes('proton-v1.00.004'));
   assert.ok(createCall.includes('--repo'));
   assert.equal(calls.some((call) => call.join(' ').includes('proton-signing-private.pem')), false);
   assert.equal(calls.some((call) => call.join(' ').includes('proton-encryption.key')), false);

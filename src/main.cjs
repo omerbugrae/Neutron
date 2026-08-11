@@ -26,6 +26,7 @@ if (!hasSingleInstanceLock) {
 
 let activeScan = null;
 let protectionWatcher = null;
+let behaviorWatcher = null;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -79,6 +80,34 @@ function showMainWindow() {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+function openProtectionEvent(eventId) {
+  showMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const sendTarget = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('protection:open-event', { eventId: eventId || null });
+    }
+  };
+  if (mainWindow.webContents.isLoadingMainFrame()) {
+    mainWindow.webContents.once('did-finish-load', sendTarget);
+  } else {
+    sendTarget();
+  }
+}
+
+function showFindingNotification(event, title = 'Neutron bir dosyayı işaretledi') {
+  if (!appSettings.notifications_enabled || !Notification.isSupported()) return;
+  const finding = event.finding || {};
+  const notification = new Notification({
+    title,
+    body: `${event.file_name || 'Öğe'}: ${finding.reason || 'İnceleme gerekiyor'}`,
+    icon: neutronImage(64),
+    silent: false,
+  });
+  notification.on('click', () => openProtectionEvent(event.event_id));
+  notification.show();
 }
 
 function updateTrayMenu() {
@@ -416,11 +445,75 @@ function protectionStatus() {
     ok: true,
     enabled: Boolean(protectionWatcher),
     ready: Boolean(protectionWatcher?.ready),
+    behaviorEnabled: Boolean(behaviorWatcher),
+    behaviorReady: Boolean(behaviorWatcher?.ready),
   };
 }
 
+function startBehaviorWatcher() {
+  if (behaviorWatcher) return protectionStatus();
+  const enginePath = path.join(__dirname, 'engine.py');
+  const child = spawn(resolvePython(), [enginePath, '--watch-behavior', '--json-lines'], {
+    cwd: path.dirname(enginePath),
+    windowsHide: true,
+    shell: false,
+    env: engineEnvironment(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
+  behaviorWatcher = watcher;
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    watcher.pending += chunk;
+    const lines = watcher.pending.split(/\r?\n/);
+    watcher.pending = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'behavior-ready') watcher.ready = true;
+        sendProtectionEvent(event);
+        if (event.type === 'behavior-finding') {
+          showFindingNotification(event, 'Neutron şüpheli davranış algıladı');
+        }
+      } catch {
+        sendProtectionEvent({ type: 'behavior-error', message: 'Davranış motorundan geçersiz yanıt alındı.' });
+      }
+    }
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { watcher.stderr = `${watcher.stderr}${chunk}`.slice(-2_000); });
+  child.once('error', () => {
+    if (behaviorWatcher === watcher) behaviorWatcher = null;
+    sendProtectionEvent({ type: 'behavior-error', message: 'Davranış izleme motoru başlatılamadı.' });
+  });
+  child.once('close', (code) => {
+    if (behaviorWatcher === watcher) behaviorWatcher = null;
+    if (!watcher.stopping && code !== 0) {
+      sendProtectionEvent({
+        type: 'behavior-error',
+        message: watcher.stderr.trim() || 'Davranış izleme beklenmeyen şekilde durdu.',
+      });
+    } else if (!watcher.silent) {
+      sendProtectionEvent({ type: 'behavior-stopped' });
+    }
+  });
+  return protectionStatus();
+}
+
+function stopBehaviorWatcher(options = {}) {
+  if (!behaviorWatcher) return;
+  behaviorWatcher.stopping = true;
+  behaviorWatcher.silent = Boolean(options.silent);
+  behaviorWatcher.child.kill();
+  behaviorWatcher = null;
+}
+
 function startProtectionWatcher() {
-  if (protectionWatcher) return protectionStatus();
+  if (protectionWatcher) {
+    if (!behaviorWatcher) startBehaviorWatcher();
+    return protectionStatus();
+  }
 
   const enginePath = path.join(__dirname, 'engine.py');
   const child = spawn(resolvePython(), [enginePath, '--watch', '--json-lines'], {
@@ -432,6 +525,7 @@ function startProtectionWatcher() {
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   protectionWatcher = watcher;
+  startBehaviorWatcher();
   updateTrayMenu();
 
   child.stdout.setEncoding('utf8');
@@ -448,15 +542,7 @@ function startProtectionWatcher() {
           updateTrayMenu();
         }
         sendProtectionEvent(event);
-        if (event.type === 'watch-finding' && appSettings.notifications_enabled && Notification.isSupported()) {
-          const finding = event.finding || {};
-          new Notification({
-            title: 'Neutron bir dosyayı işaretledi',
-            body: `${event.file_name || 'Dosya'}: ${finding.reason || 'İnceleme gerekiyor'}`,
-            icon: neutronImage(64),
-            silent: false,
-          }).show();
-        }
+        if (event.type === 'watch-finding') showFindingNotification(event);
       } catch {
         sendProtectionEvent({ type: 'watch-error', message: 'Koruma motorundan geçersiz yanıt alındı.' });
       }
@@ -489,6 +575,7 @@ function startProtectionWatcher() {
 }
 
 function stopProtectionWatcher(options = {}) {
+  stopBehaviorWatcher(options);
   if (!protectionWatcher) return { ok: true, enabled: false, ready: false };
   protectionWatcher.stopping = true;
   protectionWatcher.silent = Boolean(options.silent);
@@ -620,6 +707,21 @@ ipcMain.handle('protection:stop', async () => {
 });
 ipcMain.handle('protection:status', () => protectionStatus());
 ipcMain.handle('protection:history', () => runEngineAction(['--protection-history', '--limit', '20'], 'protection-history'));
+ipcMain.handle('protection:action', async (_event, itemId, action) => {
+  if (!Number.isInteger(itemId) || itemId < 1 || !['quarantine', 'trust', 'ignore'].includes(action)) {
+    return { ok: false, message: 'Geçersiz tehdit işlemi.' };
+  }
+  const restartProtection = action === 'trust' && Boolean(protectionWatcher);
+  if (restartProtection) stopProtectionWatcher({ silent: true });
+  try {
+    return await runEngineAction(
+      ['--protection-action', String(itemId), '--disposition', action],
+      'protection-action',
+    );
+  } finally {
+    if (restartProtection && !protectionWatcher) startProtectionWatcher();
+  }
+});
 ipcMain.handle('signature:status', () => runEngineAction(['--signature-status'], 'signature-status'));
 ipcMain.handle('yara:status', () => runEngineAction(['--yara-status'], 'yara-status'));
 ipcMain.handle('signature:update', () => performProtonUpdate());
@@ -705,6 +807,11 @@ app.on('before-quit', () => {
     protectionWatcher.stopping = true;
     protectionWatcher.child.kill();
     protectionWatcher = null;
+  }
+  if (behaviorWatcher) {
+    behaviorWatcher.stopping = true;
+    behaviorWatcher.child.kill();
+    behaviorWatcher = null;
   }
   tray?.destroy();
   tray = null;
