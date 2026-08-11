@@ -967,10 +967,18 @@
       );
       float topBias = saturate(0.52 + geometricNormal.y * 0.48);
       float leftBias = saturate(0.52 - geometricNormal.x * 0.48);
+      // Every marked pane participates in the same moving optical field.
+      // The previous specular-only gate made the broad background ribbon
+      // visible on just a few showcase cards. Weighting the material inputs
+      // lets smaller sidebar, status and result panes bend that same field at
+      // a softer amplitude, without introducing a separate painted gradient.
       float showcaseSurface = smoothstep(
-        1.12,
-        1.26,
-        specularStrength
+        0.60,
+        1.34,
+        refractionStrength * 0.62
+          + depth * 0.28
+          + specularStrength * 0.22
+          + dispersion * 0.15
       );
 
       vec3 glassColor = refractedColor;

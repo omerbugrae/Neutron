@@ -7,9 +7,13 @@
   "scripts": {
     "start": "electron .",
     "package": "electron-forge package",
-    "make": "electron-forge make"
+    "make": "electron-forge make",
+    "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
+    "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32"
   },
   "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
     "electron": "^43.3.0"
   },
   "repository": {
@@ -23,5 +27,30 @@
   "bugs": {
     "url": "https://github.com/omerbugrae/Neutron/issues"
   },
-  "homepage": "https://github.com/omerbugrae/Neutron#readme"
+  "homepage": "https://github.com/omerbugrae/Neutron#readme",
+  "config": {
+    "forge": {
+      "packagerConfig": {
+        "asar": false,
+        "executableName": "Neutron",
+        "icon": "assets/neutron"
+      },
+      "makers": [
+        {
+          "name": "@electron-forge/maker-squirrel",
+          "config": {
+            "name": "neutron",
+            "authors": "Neutron",
+            "description": "Neutron desktop security application"
+          }
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "electron-squirrel-startup": "^1.0.1"
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.4": true
+  }
 }
