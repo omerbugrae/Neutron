@@ -6,9 +6,12 @@
   const pages = [...document.querySelectorAll('.app-page[data-page]')];
   const pageTargets = [...document.querySelectorAll('[data-page-target]')];
   const quickScanButtons = [...document.querySelectorAll('[data-action="quick-scan"]')];
+  const heroPrimaryAction = document.querySelector('.hero-actions [data-action="quick-scan"]');
   const folderScanButtons = [...document.querySelectorAll('[data-action="choose-folder-scan"]')];
   const protectionToggle = document.querySelector('[data-action="toggle-protection"]');
+  const behaviorProtectionToggle = document.querySelector('[data-action="toggle-behavior-protection"]');
   const signatureUpdateButton = document.querySelector('[data-action="update-signatures"]');
+  const clearAnalysisCacheButton = document.querySelector('[data-action="clear-analysis-cache"]');
   const settingToggles = [...document.querySelectorAll('[data-setting-toggle]')];
   const scanLimitSelect = document.querySelector('[data-setting-select="scan_max_files"]');
   const addWatchFolderButton = document.querySelector('[data-action="add-watch-folder"]');
@@ -18,6 +21,7 @@
   const textTargets = (role) => [...document.querySelectorAll(`[data-role="${role}"]`)];
   let scanning = false;
   let protectionEnabled = null;
+  let behaviorEnabled = null;
   let behaviorReady = null;
   let signatureLabel = 'Proton hazırlanıyor';
   let currentSettings = null;
@@ -30,6 +34,13 @@
   const formatDuration = (milliseconds) => {
     const value = Number(milliseconds) || 0;
     return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} sn`;
+  };
+
+  const formatBytes = (bytes) => {
+    const value = Math.max(0, Number(bytes) || 0);
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   const formatScanDate = (value) => {
@@ -49,6 +60,23 @@
       button.setAttribute('aria-busy', disabled ? 'true' : 'false');
     });
     folderScanButtons.forEach((button) => { button.disabled = disabled; });
+  };
+
+  const syncHeroPrimaryAction = () => {
+    if (!heroPrimaryAction || scanning) return;
+    const label = heroPrimaryAction.querySelector('[data-action-label]');
+    if (protectionEnabled === null) {
+      if (label) label.textContent = 'Koruma denetleniyor';
+      heroPrimaryAction.disabled = true;
+      heroPrimaryAction.title = 'Gerçek zamanlı koruma durumu denetleniyor';
+      return;
+    }
+    const shouldEnableProtection = protectionEnabled === false;
+    if (label) label.textContent = shouldEnableProtection ? 'Korumayı aç' : 'Hızlı tarama başlat';
+    heroPrimaryAction.disabled = false;
+    heroPrimaryAction.title = shouldEnableProtection
+      ? 'Gerçek zamanlı dosya korumasını etkinleştir'
+      : 'Masaüstü ve İndirilenler için salt-okunur hızlı tarama';
   };
 
   const pageNameFromHash = () => window.location.hash.slice(1);
@@ -84,6 +112,7 @@
     if (pageName === 'settings') {
       applySettings();
       applyExclusions();
+      applyAnalysisCacheStatus();
     }
   };
 
@@ -108,6 +137,7 @@
     setText('scan-page-heading', 'Masaüstü ve İndirilenler');
     setText('scan-page-summary', `En fazla ${scanLimit.toLocaleString('tr-TR')} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
     setButtons('Hızlı tarama başlat', false);
+    syncHeroPrimaryAction();
   };
 
   const setProtectionState = (enabled, heading, detail) => {
@@ -126,20 +156,6 @@
       ? 'Yeni ve değişen dosyalar Neutron tarafından yerel olarak denetleniyor.'
       : 'Yeni ve değişen dosyalar izlenmiyor. Koruma sayfasından korumayı açın.');
     setText('overview-file-protection-state', enabled ? 'Koruma etkin' : 'Koruma kapalı');
-    if (!enabled) {
-      behaviorReady = false;
-      setText('overview-behavior-state', 'Koruma kapalı');
-      setText('behavior-protection-state', 'Koruma kapalı');
-      setText('behavior-protection-detail', 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.');
-    } else if (behaviorReady === true) {
-      setText('overview-behavior-state', 'Davranış izleme etkin');
-      setText('behavior-protection-state', 'Etkin');
-      setText('behavior-protection-detail', 'Yeni süreçler ve Windows otomatik başlangıç noktaları izleniyor.');
-    } else {
-      setText('overview-behavior-state', 'Başlatılıyor');
-      setText('behavior-protection-state', 'Başlatılıyor');
-      setText('behavior-protection-detail', 'Süreç ve kalıcılık başlangıç görüntüsü hazırlanıyor.');
-    }
     setText('protection-label', enabled ? 'KORUMA ETKİN' : 'KORUMA KAPALI');
     setText('scan-heading', enabled ? 'Neutron seni koruyor.' : 'Korumayı açın.');
     setText('scan-summary', enabled
@@ -150,6 +166,54 @@
       protectionToggle.classList.toggle('is-active', enabled);
       protectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       protectionToggle.disabled = false;
+    }
+    syncHeroPrimaryAction();
+  };
+
+  const setBehaviorProtectionState = (enabled, ready, heading, detail) => {
+    behaviorEnabled = enabled;
+    behaviorReady = ready;
+    setText('overview-behavior-state', enabled ? (ready ? 'Etkin' : 'Başlatılıyor') : 'Kapalı');
+    setText('behavior-protection-state', heading);
+    setText('behavior-protection-detail', detail);
+    setText('behavior-toggle-label', enabled ? 'Kapat' : 'Aç');
+    if (behaviorProtectionToggle) {
+      behaviorProtectionToggle.classList.toggle('is-active', enabled);
+      behaviorProtectionToggle.closest('.detail-module')?.classList.toggle('is-behavior-active', enabled);
+      document.querySelector('[data-role="overview-behavior-state"]')
+        ?.closest('.protection-module')
+        ?.classList.toggle('is-behavior-active', enabled);
+      behaviorProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      behaviorProtectionToggle.disabled = false;
+    }
+  };
+
+  const applyProtectionStatus = async () => {
+    try {
+      const status = await engine?.getProtectionStatus?.();
+      if (!status?.ok) throw new Error('Koruma durumu okunamadı');
+      if (status.enabled) {
+        setProtectionState(true, status.ready ? 'Koruma etkin' : 'Koruma başlatılıyor', status.ready
+          ? 'Masaüstü ve İndirilenler klasörleri izleniyor.'
+          : 'İzlenecek klasörlerin ilk görüntüsü hazırlanıyor.');
+      } else {
+        setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
+      }
+      if (status.behaviorEnabled) {
+        setBehaviorProtectionState(
+          true,
+          Boolean(status.behaviorReady),
+          status.behaviorReady ? 'Etkin' : 'Başlatılıyor',
+          status.behaviorReady
+            ? 'Yeni süreçler ve Windows otomatik başlangıç noktaları izleniyor.'
+            : 'Süreç ve kalıcılık başlangıç görüntüsü hazırlanıyor.',
+        );
+      } else {
+        setBehaviorProtectionState(false, false, 'Kapalı', 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.');
+      }
+    } catch {
+      setProtectionState(false, 'Koruma kullanılamıyor', 'Python motoruna bağlanılamadı.');
+      setBehaviorProtectionState(false, false, 'Kullanılamıyor', 'Davranış izleme motoruna bağlanılamadı.');
     }
   };
 
@@ -247,6 +311,7 @@
       row.classList.toggle('is-resolved', disposition !== 'pending');
       row.classList.toggle('is-critical', disposition === 'pending' && ['high', 'critical'].includes(event.severity));
       const content = document.createElement('div');
+      content.className = 'protection-event-row__content';
       const title = document.createElement('h3');
       title.textContent = event.file_path || 'Bilinmeyen dosya';
       const detail = document.createElement('p');
@@ -426,6 +491,29 @@
     }
   };
 
+  const renderAnalysisCacheStatus = (result) => {
+    const entries = Number(result?.entries) || 0;
+    const hits = Number(result?.hits) || 0;
+    const misses = Number(result?.misses) || 0;
+    const rate = Number(result?.hit_rate) || 0;
+    setText('cache-summary', entries ? `${entries.toLocaleString('tr-TR')} kayıt hazır` : 'Önbellek boş');
+    setText('cache-detail', entries
+      ? `${formatBytes(result?.result_bytes)} yerel sonuç · ${hits + misses} kontrolde %${rate.toLocaleString('tr-TR')} isabet.`
+      : 'İlk taramada sonuçlar hazırlanır; değişmeyen dosyalar sonraki taramalarda daha hızlı geçilir.');
+  };
+
+  const applyAnalysisCacheStatus = async () => {
+    if (!engine?.getAnalysisCacheStatus) return;
+    try {
+      const result = await engine.getAnalysisCacheStatus();
+      if (!result?.ok) throw new Error(result?.message || 'Önbellek okunamadı');
+      renderAnalysisCacheStatus(result);
+    } catch (error) {
+      setText('cache-summary', 'Durum okunamadı');
+      setText('cache-detail', error?.message || 'Tarama önbelleği kullanılamıyor.');
+    }
+  };
+
   const saveSetting = async (key, value) => {
     if (!engine?.updateSetting) return false;
     setText('settings-save-state', 'Kaydediliyor…');
@@ -436,6 +524,9 @@
       return false;
     }
     renderSettings(result.settings);
+    if (key === 'protection_enabled' || key === 'behavior_protection_enabled') {
+      await applyProtectionStatus();
+    }
     return true;
   };
 
@@ -555,9 +646,16 @@
       const badge = document.createElement('span');
       const signatureMatch = finding.kind === 'test-signature' || finding.kind === 'signature';
       badge.className = signatureMatch ? 'finding-badge' : 'finding-badge finding-badge--review';
-      badge.textContent = finding.kind === 'test-signature'
+      const findingLabel = finding.kind === 'test-signature'
         ? 'EICAR TEST'
-        : signatureMatch ? 'İMZA' : finding.kind === 'yara' ? 'YARA' : 'İNCELEME';
+        : signatureMatch ? 'İMZA'
+          : finding.kind === 'yara' ? 'YARA'
+            : finding.kind === 'pe-analysis' ? 'PE ANALİZİ'
+              : finding.kind === 'archive-warning' ? 'ARŞİV UYARISI'
+                : finding.kind === 'archive-structure' ? 'ARŞİV YAPISI' : 'İNCELEME';
+      badge.textContent = Number.isFinite(finding.risk_score) && finding.risk_score > 0
+        ? `${findingLabel} · ${finding.risk_score}/100`
+        : findingLabel;
       const actions = document.createElement('div');
       actions.className = 'finding-actions';
       const action = document.createElement('button');
@@ -565,11 +663,12 @@
       action.type = 'button';
       action.textContent = 'Karantinaya al';
       action.addEventListener('click', async () => {
-        const approved = window.confirm(`“${finding.path}” dosyası Neutron karantina alanına taşınsın mı? Dosya silinmez.`);
+        const actionablePath = finding.container_path || finding.path;
+        const approved = window.confirm(`“${actionablePath}” dosyası Neutron karantina alanına taşınsın mı? Dosya silinmez.`);
         if (!approved) return;
         action.disabled = true;
         action.textContent = 'Taşınıyor…';
-        const result = await engine?.addToQuarantine?.({ path: finding.path, reason: finding.reason || 'Tarama bulgusu' });
+        const result = await engine?.addToQuarantine?.({ path: actionablePath, reason: finding.reason || 'Tarama bulgusu' });
         if (result?.ok) {
           action.textContent = 'Karantinaya alındı';
           applyQuarantine();
@@ -688,10 +787,12 @@
     }
 
     if (event.type === 'behavior-ready') {
-      behaviorReady = true;
-      setText('overview-behavior-state', 'Davranış izleme etkin');
-      setText('behavior-protection-state', 'Etkin');
-      setText('behavior-protection-detail', `${Number(event.process_count) || 0} çalışan süreç ve ${Number(event.persistence_points) || 0} otomatik başlangıç noktası izleniyor.`);
+      setBehaviorProtectionState(
+        true,
+        true,
+        'Etkin',
+        `${Number(event.process_count) || 0} çalışan süreç ve ${Number(event.persistence_points) || 0} otomatik başlangıç noktası izleniyor.`,
+      );
       return;
     }
 
@@ -699,25 +800,22 @@
       const finding = event.finding || {};
       setText('activity-title', `${event.file_name || 'Bir davranış'} işaretlendi`);
       setText('activity-detail', `${finding.reason || 'Şüpheli davranış incelenmeli'}; otomatik işlem uygulanmadı.`);
-      setText('overview-behavior-state', 'İnceleme gerekiyor');
+      setText('overview-behavior-state', 'Uyarı');
       setText('behavior-protection-detail', finding.reason || 'Şüpheli davranış yerel geçmişe kaydedildi.');
       applyProtectionHistory();
       return;
     }
 
     if (event.type === 'behavior-stopped') {
-      behaviorReady = false;
-      setText('overview-behavior-state', 'Koruma kapalı');
-      setText('behavior-protection-state', 'Koruma kapalı');
-      setText('behavior-protection-detail', 'Davranış izleme durduruldu.');
+      setBehaviorProtectionState(false, false, 'Kapalı', 'Davranış izleme durduruldu.');
       return;
     }
 
     if (event.type === 'behavior-error') {
-      behaviorReady = false;
-      setText('overview-behavior-state', 'Kullanılamıyor');
-      setText('behavior-protection-state', 'Kullanılamıyor');
-      setText('behavior-protection-detail', event.message || 'Davranış izleme motoru başlatılamadı.');
+      setBehaviorProtectionState(
+        false, false, 'Kullanılamıyor',
+        event.message || 'Davranış izleme motoru başlatılamadı.',
+      );
       return;
     }
 
@@ -776,6 +874,22 @@
     }
   });
 
+  behaviorProtectionToggle?.addEventListener('click', async () => {
+    if (!engine?.updateSetting || typeof behaviorEnabled !== 'boolean') return;
+    behaviorProtectionToggle.disabled = true;
+    setText('behavior-toggle-label', behaviorEnabled ? 'Kapatılıyor' : 'Başlatılıyor');
+    try {
+      const result = await engine.updateSetting('behavior_protection_enabled', !behaviorEnabled);
+      if (!result?.ok) throw new Error(result?.message || 'Davranış izleme değiştirilemedi.');
+      if (result.settings) renderSettings(result.settings);
+      await applyProtectionStatus();
+    } catch (error) {
+      setText('behavior-protection-detail', error?.message || 'Davranış izleme değiştirilemedi.');
+      behaviorProtectionToggle.disabled = false;
+      setText('behavior-toggle-label', behaviorEnabled ? 'Kapat' : 'Aç');
+    }
+  });
+
   signatureUpdateButton?.addEventListener('click', async () => {
     if (!engine?.updateSignatures) return;
     signatureUpdateButton.disabled = true;
@@ -798,6 +912,26 @@
       signatureUpdateButton.textContent = 'Tekrar dene';
     } finally {
       signatureUpdateButton.disabled = false;
+    }
+  });
+
+  clearAnalysisCacheButton?.addEventListener('click', async () => {
+    if (!engine?.clearAnalysisCache) return;
+    clearAnalysisCacheButton.disabled = true;
+    clearAnalysisCacheButton.textContent = 'Temizleniyor…';
+    try {
+      const result = await engine.clearAnalysisCache();
+      if (!result?.ok) throw new Error(result?.message || 'Önbellek temizlenemedi.');
+      renderAnalysisCacheStatus(result);
+      clearAnalysisCacheButton.textContent = 'Önbellek temizlendi';
+    } catch (error) {
+      setText('cache-detail', error?.message || 'Tarama önbelleği temizlenemedi.');
+      clearAnalysisCacheButton.textContent = 'Tekrar dene';
+    } finally {
+      window.setTimeout(() => {
+        clearAnalysisCacheButton.disabled = false;
+        clearAnalysisCacheButton.textContent = 'Önbelleği temizle';
+      }, 900);
     }
   });
 
@@ -887,7 +1021,8 @@
     }
 
     if (event.type === 'progress') {
-      const detail = `${event.scanned} dosya tarandı. Güvenli salt-okunur kontrol devam ediyor.`;
+      const hits = Number(event.cache_hits) || 0;
+      const detail = `${event.scanned} dosya tarandı.${hits ? ` ${hits} değişmeyen dosya önbellekten doğrulandı.` : ''} Güvenli salt-okunur kontrol devam ediyor.`;
       setButtons(`${event.scanned} dosya inceleniyor`, true);
       setText('scan-summary', detail);
       setText('scan-page-summary', detail);
@@ -899,8 +1034,9 @@
       scanning = false;
       const confirmed = Number(event.confirmed_count) || 0;
       const review = Number(event.review_count) || 0;
+      const cacheHits = Number(event.cache_hits) || 0;
       const resultTitle = confirmed > 0 ? `${confirmed} imza eşleşmesi bulundu` : 'Doğrulanmış tehdit bulunmadı';
-      const detail = `${event.scanned} dosya ${formatDuration(event.elapsed_ms)} içinde incelendi.${event.limited ? ' Tarama güvenlik sınırına ulaştı.' : ''}`;
+      const detail = `${event.scanned} dosya ${formatDuration(event.elapsed_ms)} içinde incelendi.${cacheHits ? ` ${cacheHits} değişmeyen dosya önbellekten doğrulandı.` : ''}${event.limited ? ' Tarama güvenlik sınırına ulaştı.' : ''}`;
       setReadyState();
       setText('last-scan', 'Az önce');
       setText('threat-count', String(confirmed));
@@ -928,7 +1064,22 @@
   });
 
   quickScanButtons.forEach((button) => button.addEventListener('click', async () => {
-    if (scanning || !engine?.startQuickScan) return;
+    if (scanning) return;
+    if (button === heroPrimaryAction && protectionEnabled === false) {
+      if (!engine?.startProtection) return;
+      button.disabled = true;
+      const label = button.querySelector('[data-action-label]');
+      if (label) label.textContent = 'Koruma başlatılıyor';
+      const result = await engine.startProtection();
+      if (!result?.ok) {
+        setProtectionState(false, 'Koruma başlatılamadı', result?.message || 'Koruma motoru kullanılamıyor.');
+        return;
+      }
+      applySettings();
+      await applyProtectionStatus();
+      return;
+    }
+    if (!engine?.startQuickScan) return;
     showPage('scan');
     setButtons('Tarama hazırlanıyor', true);
     const result = await engine.startQuickScan();
@@ -967,17 +1118,6 @@
   applyYaraStatus();
   applySettings();
   applyExclusions();
-  engine?.getProtectionStatus?.().then((status) => {
-    if (status?.enabled) {
-      behaviorReady = Boolean(status.behaviorReady);
-      setProtectionState(true, status.ready ? 'Koruma etkin' : 'Koruma başlatılıyor', status.ready
-        ? 'Masaüstü ve İndirilenler klasörleri izleniyor.'
-        : 'İzlenecek klasörlerin ilk görüntüsü hazırlanıyor.');
-    } else {
-      behaviorReady = false;
-      setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
-    }
-  }).catch(() => {
-    setProtectionState(false, 'Koruma kullanılamıyor', 'Python motoruna bağlanılamadı.');
-  });
+  applyAnalysisCacheStatus();
+  applyProtectionStatus();
 })();

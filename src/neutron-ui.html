@@ -527,7 +527,8 @@
               <ul class="scan-rules">
                 <li><span>01</span> EICAR test imzası kontrol edilir.</li>
                 <li><span>02</span> Şüpheli çift uzantılar incelenir.</li>
-                <li><span>03</span> Her sonuç yerel geçmişe kaydedilir.</li>
+                <li><span>03</span> ZIP içerikleri Neutron Archive Engine ile diske çıkarılmadan denetlenir.</li>
+                <li><span>04</span> Her sonuç yerel geçmişe kaydedilir.</li>
               </ul>
             </article>
           </div>
@@ -560,7 +561,7 @@
           </header>
           <article class="protection-control-panel">
             <div>
-              <p class="section-eyebrow">GERÇEK ZAMANLI KORUMA</p>
+              <p class="section-eyebrow">GERÇEK ZAMANLI DOSYA KORUMASI</p>
               <h2 data-role="realtime-protection-state">Başlatılıyor</h2>
               <p data-role="realtime-protection-detail">Masaüstü ve İndirilenler için yerel izleyici hazırlanıyor.</p>
             </div>
@@ -577,6 +578,13 @@
             <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-behavior" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-pulse"></use></svg></span>
               <p class="section-eyebrow">DAVRANIŞ İZLEME</p><h2 data-role="behavior-protection-state">Başlatılıyor</h2><p data-role="behavior-protection-detail">Yeni süreçler ve Windows otomatik başlangıç noktaları salt-okunur izlenecek.</p>
+              <div class="module-control-row">
+                <span>Bağımsız süreç koruması</span>
+                <button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-behavior-protection" aria-pressed="false" disabled>
+                  <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
+                  <span data-role="behavior-toggle-label">Aç</span>
+                </button>
+              </div>
             </article>
             <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-web" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-globe"></use></svg></span>
@@ -621,7 +629,8 @@
               <h2>Uygulama davranışı</h2>
               <div class="settings-preference-list">
                 <div class="settings-preference"><div><strong>Windows ile başlat</strong><p>Oturum açıldığında Neutron'u arka planda otomatik çalıştırır.</p></div><button class="settings-switch" type="button" data-setting-toggle="start_with_windows" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Gerçek zamanlı korumayı aç</strong><p>Neutron başladığında dosya izleyicisini otomatik etkinleştirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Gerçek zamanlı dosya korumasını aç</strong><p>Neutron başladığında dosya izleyicisini otomatik etkinleştirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Davranış izlemeyi aç</strong><p>Yeni süreçleri ve Windows otomatik başlangıç noktalarını dosya korumasından bağımsız izler.</p></div><button class="settings-switch" type="button" data-setting-toggle="behavior_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Güvenlik bildirimleri</strong><p>Bir dosya işaretlendiğinde Windows bildirimi gösterir.</p></div><button class="settings-switch" type="button" data-setting-toggle="notifications_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
               </div>
             </article>
@@ -665,7 +674,14 @@
               <button class="settings-action" type="button" data-action="update-signatures">Proton'u denetle</button>
               <p class="settings-note">Proton güncellemeleri denetlenir ve uygun olduğunda kullanıma hazırlanır.</p>
             </article>
-            <article class="settings-card"><p class="section-eyebrow">YEREL VERİ</p><h2>data/neutron.db</h2><p>Ayarlar, tarama ve koruma kayıtları yerel SQLite dosyasında tutulur. Taranan dosyalar veya sonuçları güncelleme sunucusuna gönderilmez.</p><p class="settings-save-state" data-role="settings-save-state">Ayarlar hazırlanıyor</p></article>
+            <article class="settings-card cache-settings-card">
+              <p class="section-eyebrow">TARAMA ÖNBELLEĞİ</p>
+              <h2 data-role="cache-summary">Hazırlanıyor</h2>
+              <p data-role="cache-detail">Değişmeyen dosyaların güvenli analiz sonuçları bu bilgisayarda tutulur.</p>
+              <button class="settings-action" type="button" data-action="clear-analysis-cache">Önbelleği temizle</button>
+              <p class="settings-note">Dosya, Proton veya YARA kuralları değiştiğinde ilgili sonuç otomatik geçersiz olur.</p>
+            </article>
+            <article class="settings-card"><p class="section-eyebrow">YEREL VERİ</p><h2>data/neutron.db</h2><p>Ayarlar, geçmiş ve analiz önbelleği yerel SQLite dosyasında tutulur. Taranan dosyalar veya sonuçları güncelleme sunucusuna gönderilmez.</p><p class="settings-save-state" data-role="settings-save-state">Ayarlar hazırlanıyor</p></article>
           </div>
         </section>
       </main>

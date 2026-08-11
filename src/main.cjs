@@ -35,6 +35,7 @@ let protonUpdatePromise = null;
 let appSettings = {
   start_with_windows: false,
   protection_enabled: true,
+  behavior_protection_enabled: true,
   notifications_enabled: true,
   watch_paths: [],
   scan_max_files: 1500,
@@ -113,7 +114,15 @@ function showFindingNotification(event, title = 'Neutron bir dosyayı işaretled
 function updateTrayMenu() {
   if (!tray) return;
   const protectionActive = Boolean(protectionWatcher);
-  tray.setToolTip(protectionActive ? 'Neutron — Koruma etkin' : 'Neutron — Koruma kapalı');
+  const behaviorActive = Boolean(behaviorWatcher);
+  const tooltip = protectionActive && behaviorActive
+    ? 'Neutron — Dosya ve davranış koruması etkin'
+    : protectionActive
+      ? 'Neutron — Dosya koruması etkin'
+      : behaviorActive
+        ? 'Neutron — Davranış izleme etkin'
+        : 'Neutron — Koruma kapalı';
+  tray.setToolTip(tooltip);
   tray.setContextMenu(Menu.buildFromTemplate([
     {
       label: 'Neutron’u aç',
@@ -124,6 +133,13 @@ function updateTrayMenu() {
       label: protectionActive ? 'Gerçek zamanlı korumayı kapat' : 'Gerçek zamanlı korumayı aç',
       click: async () => {
         await updateApplicationSetting('protection_enabled', !protectionActive);
+        updateTrayMenu();
+      },
+    },
+    {
+      label: behaviorActive ? 'Davranış izlemeyi kapat' : 'Davranış izlemeyi aç',
+      click: async () => {
+        await updateApplicationSetting('behavior_protection_enabled', !behaviorActive);
         updateTrayMenu();
       },
     },
@@ -168,23 +184,64 @@ function resolvePython() {
       : 'python3';
 }
 
+function bundledEnginePath() {
+  const architecture = process.arch === 'ia32' ? 'x86' : 'x64';
+  const runtimeRoot = app.isPackaged
+    ? path.join(process.resourcesPath, 'runtime', 'engine')
+    : path.join(__dirname, '..', 'runtime', 'engine');
+  return path.join(runtimeRoot, architecture, 'neutron-engine', 'neutron-engine.exe');
+}
+
+function resolveEngine(argumentsList = []) {
+  const executable = bundledEnginePath();
+  const useBundledEngine = app.isPackaged || process.env.NEUTRON_USE_BUNDLED_ENGINE === '1';
+  if (useBundledEngine) {
+    return {
+      command: executable,
+      arguments: [...argumentsList, '--json-lines'],
+      cwd: path.dirname(executable),
+      bundled: true,
+    };
+  }
+
+  const enginePath = path.join(__dirname, 'engine.py');
+  return {
+    command: resolvePython(),
+    arguments: [enginePath, ...argumentsList, '--json-lines'],
+    cwd: path.dirname(enginePath),
+    bundled: false,
+  };
+}
+
 function engineEnvironment() {
+  const developmentInternalPaths = app.isPackaged
+    ? ''
+    : ['src', 'tools', 'tests', 'runtime', 'build', 'venv', 'node_modules', 'data']
+      .map((entry) => path.join(__dirname, '..', entry))
+      .join(path.delimiter);
   return {
     ...process.env,
-    // Prototip aşamasında geçmiş dosyası proje içinde görünür tutulur.
-    NEUTRON_DATA_DIR: path.join(__dirname, '..', 'data'),
+    // Geliştirmede proje verisi görünür kalır; kurulumda kullanıcıya ait yazılabilir alan kullanılır.
+    NEUTRON_DATA_DIR: app.isPackaged
+      ? path.join(app.getPath('userData'), 'data')
+      : path.join(__dirname, '..', 'data'),
+    NEUTRON_BUNDLED_DATA_DIR: path.join(__dirname, '..', 'data'),
+    NEUTRON_INTERNAL_PATHS: developmentInternalPaths,
+    NEUTRON_ARCHIVE_HOST: process.execPath,
+    NEUTRON_ARCHIVE_SCRIPT: path.join(__dirname, 'neutron-archive.cjs'),
+    NEUTRON_ARCHIVE_RUN_AS_NODE: '1',
   };
 }
 
 function readScanHistory() {
-  const enginePath = path.join(__dirname, 'engine.py');
+  const engine = resolveEngine(['--history', '--limit', '5']);
 
   return new Promise((resolve) => {
     const child = spawn(
-      resolvePython(),
-      [enginePath, '--history', '--limit', '5', '--json-lines'],
+      engine.command,
+      engine.arguments,
       {
-        cwd: path.dirname(enginePath),
+        cwd: engine.cwd,
         windowsHide: true,
         shell: false,
         env: engineEnvironment(),
@@ -212,11 +269,11 @@ function readScanHistory() {
 }
 
 function runEngineAction(argumentsList, expectedType, options = {}) {
-  const enginePath = path.join(__dirname, 'engine.py');
+  const engine = resolveEngine(argumentsList);
   return new Promise((resolve) => {
     const hasInput = typeof options.stdin === 'string' || Buffer.isBuffer(options.stdin);
-    const child = spawn(resolvePython(), [enginePath, ...argumentsList, '--json-lines'], {
-      cwd: path.dirname(enginePath), windowsHide: true, shell: false,
+    const child = spawn(engine.command, engine.arguments, {
+      cwd: engine.cwd, windowsHide: true, shell: false,
       env: engineEnvironment(), stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     let output = '';
@@ -359,16 +416,15 @@ function startScan(webContents, options = {}) {
     };
   }
 
-  const enginePath = path.join(__dirname, 'engine.py');
   const scanId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const engineArguments = options.targetPath
-    ? [enginePath, '--scan-path', options.targetPath, '--json-lines']
-    : [enginePath, '--quick-scan', '--json-lines'];
+  const engine = resolveEngine(
+    options.targetPath ? ['--scan-path', options.targetPath] : ['--quick-scan']
+  );
   const child = spawn(
-    resolvePython(),
-    engineArguments,
+    engine.command,
+    engine.arguments,
     {
-      cwd: path.dirname(enginePath),
+      cwd: engine.cwd,
       windowsHide: true,
       shell: false,
       env: engineEnvironment(),
@@ -452,9 +508,9 @@ function protectionStatus() {
 
 function startBehaviorWatcher() {
   if (behaviorWatcher) return protectionStatus();
-  const enginePath = path.join(__dirname, 'engine.py');
-  const child = spawn(resolvePython(), [enginePath, '--watch-behavior', '--json-lines'], {
-    cwd: path.dirname(enginePath),
+  const engine = resolveEngine(['--watch-behavior']);
+  const child = spawn(engine.command, engine.arguments, {
+    cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
@@ -462,6 +518,7 @@ function startBehaviorWatcher() {
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   behaviorWatcher = watcher;
+  updateTrayMenu();
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
     watcher.pending += chunk;
@@ -485,10 +542,12 @@ function startBehaviorWatcher() {
   child.stderr.on('data', (chunk) => { watcher.stderr = `${watcher.stderr}${chunk}`.slice(-2_000); });
   child.once('error', () => {
     if (behaviorWatcher === watcher) behaviorWatcher = null;
+    updateTrayMenu();
     sendProtectionEvent({ type: 'behavior-error', message: 'Davranış izleme motoru başlatılamadı.' });
   });
   child.once('close', (code) => {
     if (behaviorWatcher === watcher) behaviorWatcher = null;
+    updateTrayMenu();
     if (!watcher.stopping && code !== 0) {
       sendProtectionEvent({
         type: 'behavior-error',
@@ -502,22 +561,21 @@ function startBehaviorWatcher() {
 }
 
 function stopBehaviorWatcher(options = {}) {
-  if (!behaviorWatcher) return;
+  if (!behaviorWatcher) return protectionStatus();
   behaviorWatcher.stopping = true;
   behaviorWatcher.silent = Boolean(options.silent);
   behaviorWatcher.child.kill();
   behaviorWatcher = null;
+  updateTrayMenu();
+  return protectionStatus();
 }
 
 function startProtectionWatcher() {
-  if (protectionWatcher) {
-    if (!behaviorWatcher) startBehaviorWatcher();
-    return protectionStatus();
-  }
+  if (protectionWatcher) return protectionStatus();
 
-  const enginePath = path.join(__dirname, 'engine.py');
-  const child = spawn(resolvePython(), [enginePath, '--watch', '--json-lines'], {
-    cwd: path.dirname(enginePath),
+  const engine = resolveEngine(['--watch']);
+  const child = spawn(engine.command, engine.arguments, {
+    cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
@@ -525,7 +583,6 @@ function startProtectionWatcher() {
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   protectionWatcher = watcher;
-  startBehaviorWatcher();
   updateTrayMenu();
 
   child.stdout.setEncoding('utf8');
@@ -575,20 +632,20 @@ function startProtectionWatcher() {
 }
 
 function stopProtectionWatcher(options = {}) {
-  stopBehaviorWatcher(options);
-  if (!protectionWatcher) return { ok: true, enabled: false, ready: false };
+  if (!protectionWatcher) return protectionStatus();
   protectionWatcher.stopping = true;
   protectionWatcher.silent = Boolean(options.silent);
   protectionWatcher.child.kill();
   protectionWatcher = null;
   updateTrayMenu();
-  return { ok: true, enabled: false, ready: false };
+  return protectionStatus();
 }
 
 async function updateApplicationSetting(key, value) {
   const allowedKeys = new Set([
     'start_with_windows',
     'protection_enabled',
+    'behavior_protection_enabled',
     'notifications_enabled',
     'watch_paths',
     'scan_max_files',
@@ -609,6 +666,8 @@ async function updateApplicationSetting(key, value) {
 
   if (key === 'protection_enabled') {
     appSettings.protection_enabled ? startProtectionWatcher() : stopProtectionWatcher();
+  } else if (key === 'behavior_protection_enabled') {
+    appSettings.behavior_protection_enabled ? startBehaviorWatcher() : stopBehaviorWatcher();
   } else if ((key === 'watch_paths' || key === 'scan_max_files') && protectionWatcher) {
     stopProtectionWatcher({ silent: true });
     startProtectionWatcher();
@@ -662,6 +721,7 @@ async function createWindow() {
   });
   await readAppSettings();
   if (appSettings.protection_enabled) startProtectionWatcher();
+  if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
@@ -724,6 +784,19 @@ ipcMain.handle('protection:action', async (_event, itemId, action) => {
 });
 ipcMain.handle('signature:status', () => runEngineAction(['--signature-status'], 'signature-status'));
 ipcMain.handle('yara:status', () => runEngineAction(['--yara-status'], 'yara-status'));
+ipcMain.handle('cache:status', () => runEngineAction(['--cache-status'], 'cache-status'));
+ipcMain.handle('cache:clear', async () => {
+  if (activeScan) {
+    return { ok: false, message: 'Tarama sürerken önbellek temizlenemez.' };
+  }
+  const restartProtection = Boolean(protectionWatcher);
+  if (restartProtection) stopProtectionWatcher({ silent: true });
+  try {
+    return await runEngineAction(['--cache-clear'], 'cache-cleared');
+  } finally {
+    if (restartProtection && !protectionWatcher) startProtectionWatcher();
+  }
+});
 ipcMain.handle('signature:update', () => performProtonUpdate());
 ipcMain.handle('settings:get', () => readAppSettings());
 ipcMain.handle('settings:update', (_event, key, value) => updateApplicationSetting(key, value));

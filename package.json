@@ -6,15 +6,20 @@
   "description": "Neutron desktop security application",
   "main": "src/main.cjs",
   "scripts": {
-    "prestart": "npm run icon:build",
+    "prestart": "npm run icon:build && npm run archive:check",
     "start": "electron .",
-    "prepackage": "npm run icon:build",
+    "prepackage": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify",
     "package": "electron-forge package",
-    "premake": "npm run icon:build",
+    "premake": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify",
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
     "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
     "icon:build": "electron tools/build-windows-icon.cjs",
+    "archive:check": "node --check src/neutron-archive.cjs",
+    "archive:version": "node src/neutron-archive.cjs --version",
+    "engine:build": ".\\venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --distpath runtime\\engine\\x64 --workpath build\\pyinstaller tools\\engine\\neutron-engine.spec",
+    "engine:verify": "node tools/engine/verify-engine.cjs x64",
+    "engine:version": ".\\runtime\\engine\\x64\\neutron-engine\\neutron-engine.exe --engine-version --json-lines",
     "proton:keygen": "node tools/proton/keygen.cjs",
     "proton:pack": "node tools/proton/pack.cjs",
     "proton:verify": "node tools/proton/verify.cjs",
@@ -44,6 +49,17 @@
     "forge": {
       "packagerConfig": {
         "asar": false,
+        "extraResource": [
+          "runtime"
+        ],
+        "ignore": [
+          "^/venv($|/)",
+          "^/build($|/)",
+          "^/runtime($|/)",
+          "^/tests($|/)",
+          "^/tools($|/)",
+          "^/data/neutron\\.db$"
+        ],
         "executableName": "Neutron",
         "icon": "assets/neutron",
         "win32metadata": {

@@ -10,6 +10,7 @@ karantinaya almaz veya ağ üzerinden veri göndermez. Electron ile standart
 from __future__ import annotations
 
 import argparse
+import base64
 import ctypes
 import hashlib
 import json
@@ -19,14 +20,19 @@ import re
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 try:
     import winreg
@@ -37,6 +43,11 @@ try:
     import yara
 except ImportError:
     yara = None
+
+try:
+    import pefile
+except ImportError:
+    pefile = None
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -51,17 +62,31 @@ MAX_DEPTH = 8
 MAX_HASH_BYTES = 25 * 1024 * 1024
 MAX_CONTENT_BYTES = 1 * 1024 * 1024
 MAX_YARA_BYTES = 25 * 1024 * 1024
+MAX_PE_BYTES = 64 * 1024 * 1024
+MAX_PE_SECTIONS = 96
+MAX_PE_IMPORTS = 4096
+MAX_ARCHIVE_INPUT_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 512
+MAX_ARCHIVE_DEPTH = 3
+MAX_ARCHIVE_COMPRESSION_RATIO = 250
+MAX_ARCHIVE_FINDINGS = 50
 MAX_PROTON_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_PROTON_SIGNATURES = 1_000_000
 MAX_PROTON_RULES = 256
 MAX_PROTON_RULE_BYTES = 2 * 1024 * 1024
 MAX_PROTON_TOTAL_RULE_BYTES = 16 * 1024 * 1024
+MAX_ANALYSIS_CACHE_ENTRIES = 25_000
+ANALYSIS_CACHE_RETENTION_DAYS = 30
+ANALYSIS_CACHE_REVISION = "static-analysis-v2-archive"
 PROGRESS_INTERVAL = 25
 WATCH_INTERVAL_SECONDS = 5.0
 BEHAVIOR_INTERVAL_SECONDS = 3.0
 WATCH_DEBOUNCE_SECONDS = 0.9
 WATCH_SETTLE_SECONDS = 0.65
 SIGNATURE_DATABASE_NAME = "Proton"
+NEUTRON_ENGINE_VERSION = "0.1.0"
 BUILTIN_SIGNATURE_VERSION = "1.00.001"
 PROTON_VERSION_PATTERN = re.compile(r"^\d+\.\d{2}\.\d{3}$")
 PROTON_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -70,6 +95,7 @@ EXCLUSION_EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9][a-z0-9_+-]{0,15}$")
 DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "start_with_windows": False,
     "protection_enabled": True,
+    "behavior_protection_enabled": True,
     "notifications_enabled": True,
     "watch_paths": [],
     "scan_max_files": MAX_FILES,
@@ -83,6 +109,7 @@ EXECUTABLE_EXTENSIONS = {
     ".msi", ".ps1", ".scr", ".vbe", ".vbs",
 }
 DOCUMENT_EXTENSIONS = {".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".txt", ".xlsx", ".zip"}
+ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar"}
 RISK_WORDS = {"keygen", "crack", "ransom", "payload", "trojan"}
 SKIP_DIRECTORIES = {
     "$recycle.bin", "appdata", "node_modules", "system volume information",
@@ -97,6 +124,8 @@ class Finding:
     severity: str
     reason: str
     sha256: str | None = None
+    risk_score: int | None = None
+    container_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,12 +135,56 @@ class ExclusionSet:
     hashes: frozenset[str]
 
 
+@dataclass(frozen=True)
+class PEAnalysis:
+    architecture: str
+    image_kind: str
+    entry_point: int
+    section_count: int
+    import_count: int
+    signature_status: str
+    risk_score: int
+    reasons: tuple[str, ...]
+
+
+@dataclass
+class AnalysisCacheEntry:
+    file_size: int
+    modified_ns: int
+    changed_ns: int
+    findings_json: str
+    analyzed_at: str
+
+
+@dataclass
+class AnalysisCacheSession:
+    proton_version: str
+    yara_fingerprint: str
+    entries: dict[str, AnalysisCacheEntry] = field(default_factory=dict)
+    pending: dict[str, AnalysisCacheEntry] = field(default_factory=dict)
+    hits: int = 0
+    misses: int = 0
+    stores: int = 0
+
+
+@dataclass
+class ArchiveBudget:
+    members: int = 0
+    expanded_bytes: int = 0
+    findings: int = 0
+
+
 def data_directory() -> Path:
     """Electron'ın verdiği klasörü, yoksa proje içindeki data klasörünü kullanır."""
     configured = os.environ.get("NEUTRON_DATA_DIR")
     if configured:
         return Path(configured)
     return Path(__file__).resolve().parent.parent / "data"
+
+
+def bundled_data_directory() -> Path | None:
+    configured = os.environ.get("NEUTRON_BUNDLED_DATA_DIR")
+    return Path(configured) if configured else None
 
 
 def database_path() -> Path:
@@ -243,6 +316,31 @@ def open_database() -> Iterator[sqlite3.Connection]:
 
         CREATE INDEX IF NOT EXISTS exclusion_events_occurred_idx
           ON exclusion_events(occurred_at DESC);
+
+        CREATE TABLE IF NOT EXISTS analysis_cache (
+          path_key TEXT PRIMARY KEY,
+          file_path TEXT NOT NULL,
+          file_size INTEGER NOT NULL,
+          modified_ns INTEGER NOT NULL,
+          changed_ns INTEGER NOT NULL,
+          engine_revision TEXT NOT NULL,
+          proton_version TEXT NOT NULL,
+          yara_fingerprint TEXT NOT NULL,
+          findings_json TEXT NOT NULL,
+          analyzed_at TEXT NOT NULL,
+          last_used_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS analysis_cache_context_idx
+          ON analysis_cache(engine_revision, proton_version, yara_fingerprint, last_used_at DESC);
+
+        CREATE TABLE IF NOT EXISTS analysis_cache_metrics (
+          id INTEGER PRIMARY KEY CHECK(id = 1),
+          hits INTEGER NOT NULL DEFAULT 0,
+          misses INTEGER NOT NULL DEFAULT 0,
+          stores INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
         """
     )
     protection_columns = {
@@ -305,6 +403,13 @@ def open_database() -> Iterator[sqlite3.Connection]:
             for key, value in DEFAULT_APP_SETTINGS.items()
         ],
     )
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO analysis_cache_metrics (id, hits, misses, stores, updated_at)
+        VALUES (1, 0, 0, 0, ?)
+        """,
+        (updated_at,),
+    )
     connection.commit()
     try:
         yield connection
@@ -355,7 +460,10 @@ def signature_status_payload() -> dict[str, Any]:
 def normalize_app_setting(key: str, value: Any) -> Any:
     if key not in DEFAULT_APP_SETTINGS:
         raise ValueError("Bilinmeyen ayar")
-    if key in {"start_with_windows", "protection_enabled", "notifications_enabled"}:
+    if key in {
+        "start_with_windows", "protection_enabled", "behavior_protection_enabled",
+        "notifications_enabled",
+    }:
         if not isinstance(value, bool):
             raise ValueError("Ayar true veya false olmalı")
         return value
@@ -473,10 +581,19 @@ def load_exclusion_set() -> ExclusionSet:
         rows = connection.execute(
             "SELECT kind, normalized_value FROM exclusions WHERE enabled = 1"
         ).fetchall()
-    folders = tuple(str(value) for kind, value in rows if kind == "folder")
+    folders = [str(value) for kind, value in rows if kind == "folder"]
+    for raw_path in os.environ.get("NEUTRON_INTERNAL_PATHS", "").split(os.pathsep):
+        if not raw_path.strip():
+            continue
+        try:
+            normalized = canonical_path(Path(raw_path))
+        except (OSError, RuntimeError):
+            continue
+        if normalized not in folders:
+            folders.append(normalized)
     extensions = frozenset(str(value) for kind, value in rows if kind == "extension")
     hashes = frozenset(str(value) for kind, value in rows if kind == "hash")
-    return ExclusionSet(folders=folders, extensions=extensions, hashes=hashes)
+    return ExclusionSet(folders=tuple(folders), extensions=extensions, hashes=hashes)
 
 
 def is_path_excluded(
@@ -562,19 +679,33 @@ def remove_exclusion(item_id: int) -> dict[str, Any]:
     return exclusions_payload()
 
 
-def rules_directory() -> Path:
-    return data_directory() / "rules"
+def rules_directories() -> tuple[Path, ...]:
+    candidates = [data_directory() / "rules"]
+    bundled = bundled_data_directory()
+    if bundled is not None:
+        candidates.append(bundled / "rules")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(str(candidate.resolve(strict=False)))
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return tuple(unique)
 
 
 def yara_sources(proton_override: list[dict[str, str]] | None = None) -> dict[str, str]:
     sources: dict[str, str] = {}
-    for index, rule_path in enumerate(sorted(rules_directory().glob("*.yar"))):
-        try:
-            if rule_path.stat().st_size > MAX_PROTON_RULE_BYTES:
+    rule_index = 0
+    for directory in rules_directories():
+        for rule_path in sorted(directory.glob("*.yar")):
+            try:
+                if rule_path.stat().st_size > MAX_PROTON_RULE_BYTES:
+                    continue
+                sources[f"builtin_{rule_index}_{rule_path.stem}"] = rule_path.read_text(encoding="utf-8")
+                rule_index += 1
+            except (OSError, UnicodeError):
                 continue
-            sources[f"builtin_{index}_{rule_path.stem}"] = rule_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            continue
 
     if proton_override is None:
         try:
@@ -593,21 +724,34 @@ def yara_sources(proton_override: list[dict[str, str]] | None = None) -> dict[st
     return sources
 
 
+def yara_rule_fingerprint(sources: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for namespace, source in sorted(sources.items()):
+        digest.update(namespace.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest() if sources else "none"
+
+
 def load_yara_rules(proton_override: list[dict[str, str]] | None = None) -> tuple[Any | None, dict[str, Any]]:
+    sources = yara_sources(proton_override)
+    fingerprint = yara_rule_fingerprint(sources)
     if yara is None:
         return None, {
             "available": False,
             "version": None,
-            "rule_files": 0,
+            "rule_files": len(sources),
+            "fingerprint": f"unavailable:{fingerprint}",
             "message": "yara-python kurulu değil.",
         }
 
-    sources = yara_sources(proton_override)
     if not sources:
         return None, {
             "available": True,
             "version": yara.__version__,
             "rule_files": 0,
+            "fingerprint": fingerprint,
             "message": "YARA kural dosyası bulunamadı.",
         }
 
@@ -618,14 +762,233 @@ def load_yara_rules(proton_override: list[dict[str, str]] | None = None) -> tupl
             "available": True,
             "version": yara.__version__,
             "rule_files": len(sources),
+            "fingerprint": f"invalid:{fingerprint}",
             "message": f"YARA kuralları derlenemedi: {error}",
         }
     return compiled, {
         "available": True,
         "version": yara.__version__,
         "rule_files": len(sources),
+        "fingerprint": fingerprint,
         "message": "YARA kuralları hazır.",
     }
+
+
+def analysis_cache_path_key(path: Path) -> str:
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved = path.absolute()
+    return os.path.normcase(str(resolved))
+
+
+def open_analysis_cache_session(yara_fingerprint: str) -> AnalysisCacheSession:
+    try:
+        proton_version = str(signature_status_payload().get("version") or BUILTIN_SIGNATURE_VERSION)
+    except (OSError, sqlite3.Error):
+        proton_version = BUILTIN_SIGNATURE_VERSION
+    session = AnalysisCacheSession(proton_version=proton_version, yara_fingerprint=yara_fingerprint)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=ANALYSIS_CACHE_RETENTION_DAYS)).isoformat()
+    try:
+        with open_database() as connection:
+            connection.execute(
+                """
+                DELETE FROM analysis_cache
+                WHERE engine_revision != ? OR proton_version != ? OR yara_fingerprint != ?
+                   OR last_used_at < ?
+                """,
+                (ANALYSIS_CACHE_REVISION, proton_version, yara_fingerprint, cutoff),
+            )
+            rows = connection.execute(
+                """
+                SELECT path_key, file_size, modified_ns, changed_ns, findings_json, analyzed_at
+                FROM analysis_cache
+                WHERE engine_revision = ? AND proton_version = ? AND yara_fingerprint = ?
+                ORDER BY last_used_at DESC
+                LIMIT ?
+                """,
+                (ANALYSIS_CACHE_REVISION, proton_version, yara_fingerprint, MAX_ANALYSIS_CACHE_ENTRIES),
+            ).fetchall()
+        for row in rows:
+            session.entries[str(row[0])] = AnalysisCacheEntry(
+                file_size=int(row[1]), modified_ns=int(row[2]), changed_ns=int(row[3]),
+                findings_json=str(row[4]), analyzed_at=str(row[5]),
+            )
+    except (OSError, sqlite3.Error, ValueError):
+        session.entries.clear()
+    return session
+
+
+def deserialize_cached_findings(raw: str) -> list[Finding] | None:
+    try:
+        items = json.loads(raw)
+        if not isinstance(items, list) or len(items) > 100:
+            return None
+        findings: list[Finding] = []
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            findings.append(Finding(
+                path=str(item["path"]), kind=str(item["kind"]), severity=str(item["severity"]),
+                reason=str(item["reason"]), sha256=item.get("sha256"), risk_score=item.get("risk_score"),
+                container_path=item.get("container_path"),
+            ))
+        return findings
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def inspect_file_cached(
+    path: Path,
+    signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None,
+    exclusions: ExclusionSet,
+    session: AnalysisCacheSession,
+) -> list[Finding]:
+    if is_path_excluded(path, exclusions):
+        return []
+    try:
+        stat = path.stat()
+    except (OSError, PermissionError):
+        return []
+    path_key = analysis_cache_path_key(path)
+    entry = session.entries.get(path_key)
+    if entry and (
+        entry.file_size == stat.st_size
+        and entry.modified_ns == stat.st_mtime_ns
+        and entry.changed_ns == stat.st_ctime_ns
+    ):
+        cached = deserialize_cached_findings(entry.findings_json)
+        if cached is not None:
+            session.hits += 1
+            session.pending[path_key] = entry
+            if exclusions.hashes:
+                cached = [finding for finding in cached if finding.sha256 not in exclusions.hashes]
+            return cached
+
+    session.misses += 1
+    findings = inspect_file(path, signatures, yara_rules, exclusions)
+    try:
+        final_stat = path.stat()
+    except (OSError, PermissionError):
+        return findings
+    if (
+        final_stat.st_size != stat.st_size
+        or final_stat.st_mtime_ns != stat.st_mtime_ns
+        or final_stat.st_ctime_ns != stat.st_ctime_ns
+    ):
+        # Tarama sırasında değişen bir dosyanın kısmi sonucu güvenilir bir cache girdisi değildir.
+        return findings
+    analyzed_at = datetime.now(timezone.utc).isoformat()
+    new_entry = AnalysisCacheEntry(
+        file_size=int(final_stat.st_size), modified_ns=int(final_stat.st_mtime_ns),
+        changed_ns=int(final_stat.st_ctime_ns),
+        findings_json=json.dumps([asdict(finding) for finding in findings], ensure_ascii=False),
+        analyzed_at=analyzed_at,
+    )
+    session.entries[path_key] = new_entry
+    session.pending[path_key] = new_entry
+    session.stores += 1
+    return findings
+
+
+def flush_analysis_cache(session: AnalysisCacheSession) -> None:
+    if not session.pending and not (session.hits or session.misses or session.stores):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with open_database() as connection:
+            connection.executemany(
+                """
+                INSERT INTO analysis_cache (
+                  path_key, file_path, file_size, modified_ns, changed_ns, engine_revision,
+                  proton_version, yara_fingerprint, findings_json, analyzed_at, last_used_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path_key) DO UPDATE SET
+                  file_path=excluded.file_path, file_size=excluded.file_size,
+                  modified_ns=excluded.modified_ns, changed_ns=excluded.changed_ns,
+                  engine_revision=excluded.engine_revision, proton_version=excluded.proton_version,
+                  yara_fingerprint=excluded.yara_fingerprint, findings_json=excluded.findings_json,
+                  analyzed_at=excluded.analyzed_at, last_used_at=excluded.last_used_at
+                """,
+                [
+                    (key, key, entry.file_size, entry.modified_ns, entry.changed_ns,
+                     ANALYSIS_CACHE_REVISION, session.proton_version, session.yara_fingerprint,
+                     entry.findings_json, entry.analyzed_at, now)
+                    for key, entry in session.pending.items()
+                ],
+            )
+            connection.execute(
+                """
+                UPDATE analysis_cache_metrics
+                SET hits = hits + ?, misses = misses + ?, stores = stores + ?, updated_at = ?
+                WHERE id = 1
+                """,
+                (session.hits, session.misses, session.stores, now),
+            )
+            connection.execute(
+                """
+                DELETE FROM analysis_cache WHERE path_key IN (
+                  SELECT path_key FROM analysis_cache ORDER BY last_used_at DESC LIMIT -1 OFFSET ?
+                )
+                """,
+                (MAX_ANALYSIS_CACHE_ENTRIES,),
+            )
+    except (OSError, sqlite3.Error):
+        return
+    session.pending.clear()
+    session.hits = session.misses = session.stores = 0
+
+
+def analysis_cache_status_payload() -> dict[str, Any]:
+    proton_version = str(signature_status_payload().get("version") or BUILTIN_SIGNATURE_VERSION)
+    yara_fingerprint = yara_rule_fingerprint(yara_sources())
+    if yara is None:
+        yara_fingerprint = f"unavailable:{yara_fingerprint}"
+    with open_database() as connection:
+        entries, result_bytes = connection.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(LENGTH(findings_json)), 0)
+            FROM analysis_cache
+            WHERE engine_revision = ? AND proton_version = ? AND yara_fingerprint = ?
+            """,
+            (ANALYSIS_CACHE_REVISION, proton_version, yara_fingerprint),
+        ).fetchone()
+        hits, misses, stores, updated_at = connection.execute(
+            "SELECT hits, misses, stores, updated_at FROM analysis_cache_metrics WHERE id = 1"
+        ).fetchone()
+    attempts = int(hits) + int(misses)
+    return {
+        "entries": int(entries), "result_bytes": int(result_bytes), "hits": int(hits),
+        "misses": int(misses), "stores": int(stores),
+        "hit_rate": round((int(hits) / attempts) * 100, 1) if attempts else 0.0,
+        "engine_revision": ANALYSIS_CACHE_REVISION, "updated_at": updated_at,
+    }
+
+
+def analysis_cache_status() -> int:
+    try:
+        emit("cache-status", **analysis_cache_status_payload())
+        return 0
+    except (OSError, sqlite3.Error, TypeError):
+        emit("error", code="CACHE_STATUS_UNAVAILABLE", message="Tarama önbelleği okunamadı.")
+        return 2
+
+
+def clear_analysis_cache() -> int:
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        with open_database() as connection:
+            connection.execute("DELETE FROM analysis_cache")
+            connection.execute(
+                "UPDATE analysis_cache_metrics SET hits=0, misses=0, stores=0, updated_at=? WHERE id=1",
+                (now,),
+            )
+        emit("cache-cleared", **analysis_cache_status_payload())
+        return 0
+    except (OSError, sqlite3.Error, TypeError):
+        emit("error", code="CACHE_CLEAR_FAILED", message="Tarama önbelleği temizlenemedi.")
+        return 2
 
 
 def save_scan_history(
@@ -936,6 +1299,12 @@ def snapshot_targets(
 
 
 def save_protection_event(event_kind: str, finding: Finding) -> int:
+    stored_path = finding.container_path or finding.path
+    stored_reason = (
+        f"{finding.path} · {finding.reason}"
+        if finding.container_path and finding.path != finding.container_path
+        else finding.reason
+    )
     with open_database() as connection:
         cursor = connection.execute(
             """
@@ -947,10 +1316,10 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
             (
                 datetime.now(timezone.utc).isoformat(),
                 event_kind,
-                finding.path,
+                stored_path,
                 finding.kind,
                 finding.severity,
-                finding.reason,
+                stored_reason,
                 finding.sha256,
             ),
         )
@@ -1062,6 +1431,710 @@ def sha256_for(path: Path, size: int) -> str | None:
     return digest.hexdigest()
 
 
+def verify_authenticode(path: Path, has_embedded_signature: bool) -> str:
+    """Verify an embedded Windows signature without opening UI or using the network."""
+    if not has_embedded_signature:
+        return "not-embedded"
+    if os.name != "nt":
+        return "present-unverified"
+    from ctypes import wintypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", ctypes.c_ubyte * 8),
+        ]
+
+    class WINTRUST_FILE_INFO(ctypes.Structure):
+        _fields_ = [
+            ("cbStruct", wintypes.DWORD),
+            ("pcwszFilePath", wintypes.LPCWSTR),
+            ("hFile", wintypes.HANDLE),
+            ("pgKnownSubject", ctypes.POINTER(GUID)),
+        ]
+
+    class WINTRUST_DATA(ctypes.Structure):
+        _fields_ = [
+            ("cbStruct", wintypes.DWORD),
+            ("pPolicyCallbackData", wintypes.LPVOID),
+            ("pSIPClientData", wintypes.LPVOID),
+            ("dwUIChoice", wintypes.DWORD),
+            ("fdwRevocationChecks", wintypes.DWORD),
+            ("dwUnionChoice", wintypes.DWORD),
+            ("pFile", ctypes.POINTER(WINTRUST_FILE_INFO)),
+            ("dwStateAction", wintypes.DWORD),
+            ("hWVTStateData", wintypes.HANDLE),
+            ("pwszURLReference", wintypes.LPCWSTR),
+            ("dwProvFlags", wintypes.DWORD),
+            ("dwUIContext", wintypes.DWORD),
+        ]
+
+    action = GUID(
+        0x00AAC56B,
+        0xCD44,
+        0x11D0,
+        (ctypes.c_ubyte * 8)(0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE),
+    )
+    file_info = WINTRUST_FILE_INFO(
+        ctypes.sizeof(WINTRUST_FILE_INFO), str(path), None, None
+    )
+    trust_data = WINTRUST_DATA(
+        ctypes.sizeof(WINTRUST_DATA),
+        None,
+        None,
+        2,
+        0,
+        1,
+        ctypes.pointer(file_info),
+        0,
+        None,
+        None,
+        0x00001000,
+        0,
+    )
+    try:
+        wintrust = ctypes.WinDLL("wintrust", use_last_error=True)
+        wintrust.WinVerifyTrust.argtypes = [
+            wintypes.HWND, ctypes.POINTER(GUID), ctypes.POINTER(WINTRUST_DATA)
+        ]
+        wintrust.WinVerifyTrust.restype = ctypes.c_long
+        return "trusted" if wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(trust_data)) == 0 else "invalid"
+    except (OSError, ValueError):
+        return "present-unverified"
+
+
+def verify_windows_catalog_signature(path: Path) -> str:
+    """Ask Windows for embedded or catalog Authenticode status only on risky files."""
+    if os.name != "nt":
+        return "not-embedded"
+    script = (
+        "$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; "
+        "[Console]::Out.Write($signature.Status.ToString())"
+    )
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive",
+                "-Command", script, str(path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=6,
+            check=False,
+            creationflags=creation_flags,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "present-unverified"
+    status = result.stdout.strip().casefold()
+    if result.returncode == 0 and status == "valid":
+        return "trusted"
+    if status == "notsigned":
+        return "unsigned"
+    return "invalid" if status else "present-unverified"
+
+
+def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysis | None:
+    if pefile is None or size < 64 or size > MAX_PE_BYTES:
+        return None
+    try:
+        pe = pefile.PE(data=payload, fast_load=True) if payload is not None else pefile.PE(str(path), fast_load=True)
+    except (OSError, pefile.PEFormatError):
+        return None
+    try:
+        sections = list(pe.sections)
+        if not sections or len(sections) > MAX_PE_SECTIONS:
+            return None
+        directory_names = [
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"],
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT"],
+            pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"],
+        ]
+        try:
+            pe.parse_data_directories(directories=directory_names)
+        except (AttributeError, IndexError, pefile.PEFormatError):
+            pass
+
+        machine = int(pe.FILE_HEADER.Machine)
+        architecture = {
+            0x014C: "x86",
+            0x8664: "x64",
+            0x01C4: "ARM Thumb-2",
+            0xAA64: "ARM64",
+        }.get(machine, f"machine-0x{machine:04x}")
+        characteristics = int(pe.FILE_HEADER.Characteristics)
+        subsystem = int(getattr(pe.OPTIONAL_HEADER, "Subsystem", 0))
+        image_kind = "DLL" if characteristics & 0x2000 else "sürücü" if subsystem == 1 else "EXE"
+        entry_point = int(pe.OPTIONAL_HEADER.AddressOfEntryPoint)
+        reasons: list[tuple[int, str]] = []
+
+        executable_high_entropy = []
+        writable_executable = []
+        for section in sections:
+            flags = int(section.Characteristics)
+            executable = bool(flags & 0x20000000)
+            writable = bool(flags & 0x80000000)
+            raw_size = int(section.SizeOfRawData)
+            name = section.Name.rstrip(b"\0").decode("ascii", errors="replace") or "isimsiz"
+            entropy = float(section.get_entropy()) if raw_size else 0.0
+            if executable and writable:
+                writable_executable.append(name)
+            if executable and raw_size >= 4096 and entropy >= 7.35:
+                executable_high_entropy.append(f"{name} ({entropy:.2f})")
+        if writable_executable:
+            reasons.append((32, f"yazılabilir ve çalıştırılabilir bölüm: {', '.join(writable_executable[:3])}"))
+        if executable_high_entropy:
+            reasons.append((22, f"yüksek entropili çalıştırılabilir bölüm: {', '.join(executable_high_entropy[:3])}"))
+
+        entry_section = pe.get_section_by_rva(entry_point) if entry_point else None
+        if entry_point and entry_section is None:
+            reasons.append((25, "giriş noktası hiçbir PE bölümünün içinde değil"))
+        elif entry_section is not None and not int(entry_section.Characteristics) & 0x20000000:
+            reasons.append((24, "giriş noktası çalıştırılabilir olmayan bölümde"))
+        if len(sections) > 12:
+            reasons.append((7, f"olağandışı yüksek bölüm sayısı: {len(sections)}"))
+
+        import_names: set[str] = set()
+        import_count = 0
+        for directory_name in ("DIRECTORY_ENTRY_IMPORT", "DIRECTORY_ENTRY_DELAY_IMPORT"):
+            for library in list(getattr(pe, directory_name, []) or [])[:256]:
+                for imported in list(getattr(library, "imports", []) or []):
+                    if import_count >= MAX_PE_IMPORTS:
+                        break
+                    import_count += 1
+                    if imported.name:
+                        import_names.add(imported.name.decode("ascii", errors="ignore").casefold())
+                if import_count >= MAX_PE_IMPORTS:
+                    break
+
+        api_groups = (
+            (30, "süreç enjeksiyonu API kümesi", {
+                "virtualallocex", "writeprocessmemory", "createremotethread",
+                "queueuserapc", "ntunmapviewofsection", "setthreadcontext",
+            }, 3),
+            (30, "kimlik bilgisi dökümü API kümesi", {
+                "minidumpwritedump", "openprocesstoken", "adjusttokenprivileges",
+                "duplicatehandle", "ntquerysysteminformation",
+            }, 3),
+            (18, "kalıcılık değiştirme API kümesi", {
+                "regsetvalueexa", "regsetvalueexw", "regcreatekeyexa", "regcreatekeyexw",
+                "createservicea", "createservicew", "changeserviceconfiga", "changeserviceconfigw",
+            }, 3),
+            (14, "ağdan içerik alma API kümesi", {
+                "urldownloadtofilea", "urldownloadtofilew", "internetopenurla",
+                "internetopenurlw", "winhttpopenrequest", "httpsendrequesta",
+                "httpsendrequestw", "winhttpreceiveresponse",
+            }, 3),
+        )
+        for points, description, names, threshold in api_groups:
+            matches = sorted(import_names.intersection(names))
+            if len(matches) >= threshold:
+                reasons.append((points, f"{description}: {', '.join(matches[:4])}"))
+
+        overlay_offset = pe.get_overlay_data_start_offset()
+        if overlay_offset is not None and size > 0:
+            overlay_ratio = max(0, size - int(overlay_offset)) / size
+            if overlay_ratio >= 0.65 and size >= 128 * 1024:
+                reasons.append((8, f"dosyanın %{overlay_ratio * 100:.0f} bölümü PE dışı ek veri"))
+
+        security_index = pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_SECURITY"]
+        has_signature = False
+        if len(pe.OPTIONAL_HEADER.DATA_DIRECTORY) > security_index:
+            security = pe.OPTIONAL_HEADER.DATA_DIRECTORY[security_index]
+            has_signature = bool(int(security.VirtualAddress) and int(security.Size) >= 8)
+        preliminary_score = min(100, sum(points for points, _reason in reasons))
+        if payload is None:
+            signature_status = verify_authenticode(path, has_signature)
+            if not has_signature and preliminary_score >= 20:
+                signature_status = verify_windows_catalog_signature(path)
+        else:
+            # Arşiv üyeleri diske çıkarılmaz; Windows güven zinciri yalnız dosya yolu
+            # üzerinden doğrulanabildiğinden gömülü imzanın varlığı raporlanır.
+            signature_status = "present-unverified" if has_signature else "not-embedded"
+        if signature_status == "invalid":
+            reasons.append((25, "gömülü dijital imza Windows doğrulamasından geçmedi"))
+
+        risk_score = min(100, sum(points for points, _reason in reasons))
+        if signature_status == "trusted" and risk_score:
+            risk_score = max(0, risk_score - 18)
+        ordered_reasons = tuple(reason for _points, reason in sorted(reasons, reverse=True))
+        return PEAnalysis(
+            architecture=architecture,
+            image_kind=image_kind,
+            entry_point=entry_point,
+            section_count=len(sections),
+            import_count=import_count,
+            signature_status=signature_status,
+            risk_score=risk_score,
+            reasons=ordered_reasons,
+        )
+    except (AttributeError, IndexError, MemoryError, OSError, OverflowError, ValueError, pefile.PEFormatError):
+        return None
+    finally:
+        pe.close()
+
+
+def pe_finding(path: Path, size: int, digest: str | None, payload: bytes | None = None) -> Finding | None:
+    analysis = analyze_pe(path, size, payload)
+    if analysis is None or analysis.risk_score < 20 or not analysis.reasons:
+        return None
+    severity = (
+        "critical" if analysis.risk_score >= 85
+        else "high" if analysis.risk_score >= 60
+        else "medium" if analysis.risk_score >= 35
+        else "low"
+    )
+    signature_labels = {
+        "trusted": "imza geçerli",
+        "unsigned": "imzasız",
+        "invalid": "imza geçersiz",
+        "not-embedded": "gömülü imza yok",
+        "present-unverified": "imza doğrulanamadı",
+    }
+    summary = "; ".join(analysis.reasons[:3])
+    reason = (
+        f"PE risk puanı {analysis.risk_score}/100 · {analysis.image_kind} {analysis.architecture} · "
+        f"{signature_labels.get(analysis.signature_status, analysis.signature_status)} · {summary}"
+    )
+    return Finding(
+        path=str(path),
+        kind="pe-analysis",
+        severity=severity,
+        reason=reason,
+        sha256=digest,
+        risk_score=analysis.risk_score,
+    )
+
+
+def severity_for_risk(score: int) -> str:
+    return "critical" if score >= 85 else "high" if score >= 60 else "medium" if score >= 35 else "low"
+
+
+def combine_static_risk(findings: list[Finding]) -> None:
+    analytical = [
+        finding for finding in findings
+        if finding.kind in {"review", "yara", "pe-analysis"} and finding.risk_score is not None
+    ]
+    if len({finding.kind for finding in analytical}) < 2:
+        return
+    primary = next(
+        (finding for finding in analytical if finding.kind == "pe-analysis"),
+        max(analytical, key=lambda finding: finding.risk_score or 0),
+    )
+    scores = sorted((finding.risk_score or 0 for finding in analytical), reverse=True)
+    combined = min(100, round(scores[0] + sum(scores[1:]) * 0.35))
+    primary.risk_score = combined
+    primary.severity = severity_for_risk(combined)
+    primary.reason = f"Birleşik statik risk {combined}/100 · {primary.reason}"
+
+
+def append_archive_notice(
+    findings: list[Finding], budget: ArchiveBudget, path: str, reason: str,
+    *, severity: str = "low", kind: str = "archive-warning", risk_score: int = 0,
+) -> None:
+    if budget.findings >= MAX_ARCHIVE_FINDINGS:
+        return
+    findings.append(Finding(
+        path=path, kind=kind, severity=severity, reason=reason,
+        sha256=None, risk_score=risk_score, container_path=path.split(" → ", 1)[0],
+    ))
+    budget.findings += 1
+
+
+def normalized_archive_member_name(raw_name: str) -> tuple[str, bool]:
+    value = str(raw_name).replace("\\", "/").strip()
+    drive_prefix = bool(re.match(r"^[A-Za-z]:", value))
+    absolute = value.startswith("/") or drive_prefix
+    parts = [part for part in value.split("/") if part not in {"", "."}]
+    traversal = any(part == ".." for part in parts)
+    safe_parts = [part for part in parts if part != ".."]
+    normalized = "/".join(safe_parts) or "isimsiz-üye"
+    return normalized[:1024], absolute or traversal
+
+
+def detect_archive_format(name: str, header: bytes) -> str | None:
+    suffix = Path(name).suffix.casefold()
+    if suffix in ARCHIVE_EXTENSIONS:
+        return suffix
+    if header.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        return ".zip"
+    if header.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return ".7z"
+    if header.startswith((b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")):
+        return ".rar"
+    return None
+
+
+def inspect_memory_payload(
+    display_path: str,
+    member_name: str,
+    payload: bytes,
+    signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None,
+    exclusions: ExclusionSet,
+    depth: int,
+    budget: ArchiveBudget,
+) -> list[Finding]:
+    if budget.findings >= MAX_ARCHIVE_FINDINGS:
+        return []
+    findings: list[Finding] = []
+    size = len(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest in exclusions.hashes:
+        return findings
+
+    name = Path(member_name).name.casefold()
+    suffix = Path(member_name).suffix.casefold()
+    stem_parts = name.split(".")
+    if (
+        suffix in EXECUTABLE_EXTENSIONS
+        and len(stem_parts) >= 3
+        and f".{stem_parts[-2]}" in DOCUMENT_EXTENSIONS
+    ):
+        findings.append(Finding(
+            path=display_path, kind="review", severity="medium",
+            reason="Arşivde belge uzantısını taklit eden çalıştırılabilir dosya adı",
+            sha256=digest, risk_score=45, container_path=display_path.split(" → ", 1)[0],
+        ))
+    if suffix in EXECUTABLE_EXTENSIONS and any(word in name for word in RISK_WORDS):
+        findings.append(Finding(
+            path=display_path, kind="review", severity="low",
+            reason="Arşivde inceleme gerektiren dosya adı ve çalıştırılabilir tür",
+            sha256=digest, risk_score=20, container_path=display_path.split(" → ", 1)[0],
+        ))
+
+    if suffix in {".exe", ".dll", ".scr"}:
+        structural = pe_finding(Path(member_name), size, digest, payload)
+        if structural is not None:
+            structural.path = display_path
+            structural.container_path = display_path.split(" → ", 1)[0]
+            findings.append(structural)
+
+    signature = signatures.get(size, {}).get(digest)
+    if signature:
+        findings.append(Finding(
+            path=display_path,
+            kind="test-signature" if signature["source"] == "builtin" else "signature",
+            severity=str(signature["severity"]),
+            reason=f'{signature["name"]} eşleşmesi arşiv içinde bulundu',
+            sha256=digest, risk_score=100, container_path=display_path.split(" → ", 1)[0],
+        ))
+
+    if payload.strip() == EICAR_MARKER and not any(
+        finding.kind == "test-signature" for finding in findings
+    ):
+        findings.append(Finding(
+            path=display_path, kind="test-signature", severity="high",
+            reason="EICAR güvenli antivirüs test imzası arşiv içinde bulundu",
+            sha256=digest, risk_score=100, container_path=display_path.split(" → ", 1)[0],
+        ))
+
+    if yara_rules is not None and size <= MAX_YARA_BYTES:
+        try:
+            for match in yara_rules.match(data=payload, timeout=2):
+                metadata = match.meta or {}
+                description = str(metadata.get("description") or match.rule)
+                severity = str(metadata.get("severity") or "medium").casefold()
+                if severity not in {"low", "medium", "high", "critical"}:
+                    severity = "medium"
+                findings.append(Finding(
+                    path=display_path, kind="yara", severity=severity,
+                    reason=f"YARA arşiv üyesi: {description}", sha256=digest,
+                    risk_score={"low": 20, "medium": 40, "high": 70, "critical": 95}[severity],
+                    container_path=display_path.split(" → ", 1)[0],
+                ))
+        except (MemoryError, TimeoutError, yara.Error):
+            pass
+
+    combine_static_risk(findings)
+    remaining = max(0, MAX_ARCHIVE_FINDINGS - budget.findings)
+    accepted = findings[:remaining]
+    budget.findings += len(accepted)
+
+    nested_archive_format = detect_archive_format(member_name, payload[:8])
+    if nested_archive_format:
+        if depth >= MAX_ARCHIVE_DEPTH:
+            append_archive_notice(
+                accepted, budget, display_path,
+                f"İç içe arşiv derinliği {MAX_ARCHIVE_DEPTH} sınırına ulaştı; daha derin içerik atlandı.",
+            )
+        else:
+            accepted.extend(inspect_archive_bytes(
+                display_path, nested_archive_format, payload, signatures, yara_rules,
+                exclusions, depth + 1, budget
+            ))
+    return accepted
+
+
+def inspect_archive_member(
+    findings: list[Finding],
+    outer_path: str,
+    raw_name: str,
+    declared_size: int,
+    compressed_size: int,
+    encrypted: bool,
+    is_link: bool,
+    loader: Any,
+    signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None,
+    exclusions: ExclusionSet,
+    depth: int,
+    budget: ArchiveBudget,
+) -> bool:
+    if budget.members >= MAX_ARCHIVE_MEMBERS or budget.findings >= MAX_ARCHIVE_FINDINGS:
+        return False
+    budget.members += 1
+    member_name, unsafe_path = normalized_archive_member_name(raw_name)
+    display_path = f"{outer_path} → {member_name}"
+    if unsafe_path:
+        append_archive_notice(
+            findings, budget, display_path,
+            "Arşiv üyesi üst dizine veya mutlak konuma çıkmaya çalışan güvensiz yol içeriyor.",
+            severity="medium", kind="archive-structure", risk_score=40,
+        )
+    if is_link:
+        append_archive_notice(
+            findings, budget, display_path,
+            "Arşivdeki sembolik bağlantı güvenlik nedeniyle izlenmedi.",
+        )
+        return True
+    if encrypted:
+        append_archive_notice(
+            findings, budget, display_path,
+            "Parolalı arşiv üyesi açılamadığı için içerik taranamadı.",
+        )
+        return True
+    if declared_size < 0 or declared_size > MAX_ARCHIVE_MEMBER_BYTES:
+        append_archive_notice(
+            findings, budget, display_path,
+            f"Arşiv üyesi {MAX_ARCHIVE_MEMBER_BYTES // (1024 * 1024)} MB güvenlik sınırını aştığı için atlandı.",
+        )
+        return True
+    ratio = declared_size / compressed_size if compressed_size > 0 else 0.0
+    if compressed_size > 0 and declared_size >= 1024 * 1024 and ratio > MAX_ARCHIVE_COMPRESSION_RATIO:
+        append_archive_notice(
+            findings, budget, display_path,
+            f"Olağandışı sıkıştırma oranı ({ratio:.0f}:1) nedeniyle zip-bomb koruması üyeyi durdurdu.",
+            severity="medium", kind="archive-structure", risk_score=35,
+        )
+        return True
+    if budget.expanded_bytes + declared_size > MAX_ARCHIVE_TOTAL_BYTES:
+        append_archive_notice(
+            findings, budget, outer_path,
+            f"Arşivin toplam açılmış boyutu {MAX_ARCHIVE_TOTAL_BYTES // (1024 * 1024)} MB sınırını aştı; kalan içerik atlandı.",
+        )
+        return False
+    try:
+        payload = loader()
+    except Exception as error:
+        append_archive_notice(
+            findings, budget, display_path,
+            f"Arşiv üyesi güvenli biçimde okunamadı: {type(error).__name__}.",
+        )
+        return True
+    if not isinstance(payload, bytes) or len(payload) > MAX_ARCHIVE_MEMBER_BYTES:
+        append_archive_notice(
+            findings, budget, display_path,
+            "Arşiv üyesi okuma sırasında boyut sınırını aştığı için atlandı.",
+        )
+        return True
+    budget.expanded_bytes += len(payload)
+    findings.extend(inspect_memory_payload(
+        display_path, member_name, payload, signatures, yara_rules, exclusions, depth, budget
+    ))
+    return True
+
+
+def inspect_zip_bytes(
+    outer_path: str, payload: bytes, signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None, exclusions: ExclusionSet, depth: int, budget: ArchiveBudget,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    archive_host = os.environ.get("NEUTRON_ARCHIVE_HOST") or shutil.which("node")
+    archive_script = Path(
+        os.environ.get("NEUTRON_ARCHIVE_SCRIPT")
+        or Path(__file__).resolve().with_name("neutron-archive.cjs")
+    )
+    if not archive_host or not archive_script.is_file():
+        append_archive_notice(
+            findings, budget, outer_path,
+            "Neutron Archive Engine başlatılamadığı için ZIP içeriği taranamadı.",
+        )
+        return findings
+
+    environment = os.environ.copy()
+    if environment.get("NEUTRON_ARCHIVE_RUN_AS_NODE") == "1":
+        environment["ELECTRON_RUN_AS_NODE"] = "1"
+    process: subprocess.Popen[bytes] | None = None
+    engine_reported_error = False
+    try:
+        process = subprocess.Popen(
+            [archive_host, str(archive_script)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=str(archive_script.parent),
+            env=environment,
+            shell=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if process.stdin is None or process.stdout is None:
+            raise OSError("archive engine pipe unavailable")
+        process.stdin.write(payload)
+        process.stdin.close()
+
+        header_seen = False
+        for raw_line in process.stdout:
+            if len(raw_line) > (MAX_ARCHIVE_MEMBER_BYTES * 2):
+                raise ValueError("archive engine record exceeds limit")
+            try:
+                event = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ValueError("archive engine returned invalid JSON") from None
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "")
+            if event_type == "archive":
+                if event.get("protocol") != 1 or event.get("format") != "zip":
+                    raise ValueError("archive engine protocol mismatch")
+                header_seen = True
+                declared_members = int(event.get("members_declared") or 0)
+                if declared_members > MAX_ARCHIVE_MEMBERS:
+                    append_archive_notice(
+                        findings, budget, outer_path,
+                        f"Arşiv {MAX_ARCHIVE_MEMBERS} üye güvenlik sınırını aşıyor; fazlası atlandı.",
+                    )
+                continue
+            if event_type == "warning":
+                append_archive_notice(
+                    findings, budget, outer_path,
+                    str(event.get("message") or "Arşiv motoru bir güvenlik sınırına ulaştı."),
+                )
+                continue
+            if event_type == "error":
+                engine_reported_error = True
+                append_archive_notice(
+                    findings, budget, outer_path,
+                    f"ZIP arşivi bozuk veya desteklenmeyen yapıda: {event.get('code') or 'archive-error'}.",
+                )
+                continue
+            if event_type != "member" or not header_seen:
+                continue
+
+            skipped = str(event.get("skipped") or "")
+            encrypted = bool(event.get("encrypted")) or skipped == "encrypted"
+            is_link = bool(event.get("is_link")) or skipped == "link"
+            data_value = event.get("data")
+
+            def load(encoded: Any = data_value, skipped_reason: str = skipped) -> bytes:
+                if skipped_reason:
+                    messages = {
+                        "member-limit": "archive member exceeds limit",
+                        "compression-ratio": "archive compression ratio exceeds limit",
+                        "unsupported-method": "unsupported ZIP compression method",
+                    }
+                    raise ValueError(messages.get(skipped_reason, skipped_reason))
+                if not isinstance(encoded, str):
+                    raise ValueError("archive member data is missing")
+                return base64.b64decode(encoded, validate=True)
+
+            if not inspect_archive_member(
+                findings,
+                outer_path,
+                str(event.get("name") or "isimsiz-üye"),
+                int(event.get("declared_size") or 0),
+                int(event.get("compressed_size") or 0),
+                encrypted,
+                is_link,
+                load,
+                signatures,
+                yara_rules,
+                exclusions,
+                depth,
+                budget,
+            ):
+                break
+
+        return_code = process.wait(timeout=5)
+        if not header_seen and not engine_reported_error:
+            raise ValueError(f"archive engine stopped before header ({return_code})")
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        append_archive_notice(
+            findings, budget, outer_path,
+            f"Neutron Archive Engine ZIP içeriğini güvenli biçimde okuyamadı: {type(error).__name__}.",
+        )
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stdin is not None and not process.stdin.closed:
+                process.stdin.close()
+    return findings
+
+
+def inspect_7z_bytes(
+    outer_path: str, payload: bytes, signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None, exclusions: ExclusionSet, depth: int, budget: ArchiveBudget,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    append_archive_notice(
+        findings, budget, outer_path,
+        "7Z içerik taraması Neutron Archive Engine'in sonraki sürümüne ayrıldı; harici program çalıştırılmadı.",
+    )
+    return findings
+
+
+def inspect_rar_bytes(
+    outer_path: str, payload: bytes, signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None, exclusions: ExclusionSet, depth: int, budget: ArchiveBudget,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    append_archive_notice(
+        findings, budget, outer_path,
+        "RAR içerik taraması Neutron Archive Engine'in sonraki sürümüne ayrıldı; harici program çalıştırılmadı.",
+    )
+    return findings
+
+
+def inspect_archive_bytes(
+    outer_path: str,
+    suffix: str,
+    payload: bytes,
+    signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None,
+    exclusions: ExclusionSet,
+    depth: int = 1,
+    budget: ArchiveBudget | None = None,
+) -> list[Finding]:
+    active_budget = budget or ArchiveBudget()
+    if len(payload) > MAX_ARCHIVE_INPUT_BYTES:
+        findings: list[Finding] = []
+        append_archive_notice(
+            findings, active_budget, outer_path,
+            f"Arşiv {MAX_ARCHIVE_INPUT_BYTES // (1024 * 1024)} MB giriş sınırını aştığı için içerik taranmadı.",
+        )
+        return findings
+    if suffix == ".zip":
+        return inspect_zip_bytes(
+            outer_path, payload, signatures, yara_rules, exclusions, depth, active_budget
+        )
+    if suffix == ".7z":
+        return inspect_7z_bytes(
+            outer_path, payload, signatures, yara_rules, exclusions, depth, active_budget
+        )
+    if suffix == ".rar":
+        return inspect_rar_bytes(
+            outer_path, payload, signatures, yara_rules, exclusions, depth, active_budget
+        )
+    return []
+
+
 def inspect_file(
     path: Path,
     signatures: dict[int, dict[str, dict[str, Any]]] | None = None,
@@ -1092,6 +2165,13 @@ def inspect_file(
 
     suffix = path.suffix.casefold()
     name = path.name.casefold()
+    archive_format = suffix if suffix in ARCHIVE_EXTENSIONS else None
+    if archive_format is None and size >= 4:
+        try:
+            with path.open("rb") as stream:
+                archive_format = detect_archive_format(path.name, stream.read(8))
+        except (OSError, PermissionError):
+            archive_format = None
     stem_parts = name.split(".")
     looks_like_double_extension = (
         suffix in EXECUTABLE_EXTENSIONS
@@ -1105,6 +2185,7 @@ def inspect_file(
             severity="medium",
             reason="Belge uzantısını taklit eden çalıştırılabilir dosya adı",
             sha256=file_digest(),
+            risk_score=45,
         ))
 
     if suffix in EXECUTABLE_EXTENSIONS and any(word in name for word in RISK_WORDS):
@@ -1114,7 +2195,14 @@ def inspect_file(
             severity="low",
             reason="İnceleme gerektiren dosya adı ve çalıştırılabilir tür",
             sha256=file_digest(),
+            risk_score=20,
         ))
+
+    if suffix in {".exe", ".dll", ".scr"}:
+        structural_finding = pe_finding(path, size, None)
+        if structural_finding is not None:
+            structural_finding.sha256 = file_digest()
+            findings.append(structural_finding)
 
     size_signatures = (signatures or {}).get(size, {})
     if size_signatures:
@@ -1127,6 +2215,7 @@ def inspect_file(
                 severity=str(signature["severity"]),
                 reason=f'{signature["name"]} eşleşmesi bulundu',
                 sha256=digest,
+                risk_score=100,
             ))
 
     # İçerik taraması yalnız küçük/orta dosyalarda yapılır. Bir eşleşme EICAR
@@ -1148,6 +2237,7 @@ def inspect_file(
                     severity="high",
                     reason="EICAR güvenli antivirüs test imzası bulundu",
                     sha256=hashlib.sha256(sample).hexdigest(),
+                    risk_score=100,
                 ))
         except (OSError, PermissionError):
             pass
@@ -1167,10 +2257,34 @@ def inspect_file(
                     severity=severity,
                     reason=f"YARA: {description}",
                     sha256=file_digest(),
+                    risk_score={"low": 20, "medium": 40, "high": 70, "critical": 95}[severity],
                 ))
         except (OSError, PermissionError, yara.Error):
             pass
 
+    if archive_format:
+        if size > MAX_ARCHIVE_INPUT_BYTES:
+            findings.append(Finding(
+                path=str(path), kind="archive-warning", severity="low",
+                reason=f"Arşiv {MAX_ARCHIVE_INPUT_BYTES // (1024 * 1024)} MB giriş sınırını aştığı için içerik taranmadı.",
+                sha256=file_digest(), risk_score=0, container_path=str(path),
+            ))
+        else:
+            try:
+                with path.open("rb") as stream:
+                    archive_payload = stream.read(MAX_ARCHIVE_INPUT_BYTES + 1)
+                findings.extend(inspect_archive_bytes(
+                    str(path), archive_format, archive_payload, signatures or {}, yara_rules,
+                    active_exclusions,
+                ))
+            except (OSError, PermissionError, MemoryError) as error:
+                findings.append(Finding(
+                    path=str(path), kind="archive-warning", severity="low",
+                    reason=f"Arşiv güvenli biçimde okunamadı: {type(error).__name__}.",
+                    sha256=None, risk_score=0, container_path=str(path),
+                ))
+
+    combine_static_risk(findings)
     return findings
 
 
@@ -1398,6 +2512,7 @@ def watch_targets_polling_fallback() -> int:
     signatures = load_signatures()
     yara_rules, yara_status = load_yara_rules()
     exclusions = load_exclusion_set()
+    cache_session = open_analysis_cache_session(str(yara_status.get("fingerprint", "none")))
     previous = snapshot_targets(targets, max_files, exclusions)
     emit(
         "watch-ready",
@@ -1421,7 +2536,9 @@ def watch_targets_polling_fallback() -> int:
 
                 event_kind = "created" if prior_signature is None else "changed"
                 path = Path(raw_path)
-                findings = inspect_file(path, signatures, yara_rules, exclusions)
+                findings = inspect_file_cached(
+                    path, signatures, yara_rules, exclusions, cache_session
+                )
                 if not findings:
                     emit(
                         "watch-checked",
@@ -1445,7 +2562,9 @@ def watch_targets_polling_fallback() -> int:
                     )
 
             previous = current
+            flush_analysis_cache(cache_session)
     except KeyboardInterrupt:
+        flush_analysis_cache(cache_session)
         emit("watch-stopped")
         return 0
 
@@ -1466,8 +2585,9 @@ def emit_watch_result(
     signatures: dict[int, dict[str, dict[str, Any]]],
     yara_rules: Any | None,
     exclusions: ExclusionSet,
+    cache_session: AnalysisCacheSession,
 ) -> None:
-    findings = inspect_file(path, signatures, yara_rules, exclusions)
+    findings = inspect_file_cached(path, signatures, yara_rules, exclusions, cache_session)
     if not findings:
         emit("watch-checked", event_kind=event_kind, file_path=str(path), file_name=path.name)
         return
@@ -1500,6 +2620,7 @@ def watch_targets() -> int:
     signatures = load_signatures()
     yara_rules, yara_status = load_yara_rules()
     exclusions = load_exclusion_set()
+    cache_session = open_analysis_cache_session(str(yara_status.get("fingerprint", "none")))
     pending: dict[str, dict[str, Any]] = {}
     event_queue: queue.SimpleQueue[tuple[str, str, tuple[int, int] | None]] = queue.SimpleQueue()
     processed_signatures: dict[str, tuple[int, int]] = {}
@@ -1584,8 +2705,12 @@ def watch_targets() -> int:
                 processed_signatures[raw_path] = current_signature
                 if len(processed_signatures) > max_files:
                     processed_signatures.pop(next(iter(processed_signatures)))
-                emit_watch_result(path, item["event_kind"], signatures, yara_rules, exclusions)
+                emit_watch_result(
+                    path, item["event_kind"], signatures, yara_rules, exclusions, cache_session
+                )
+                flush_analysis_cache(cache_session)
     except KeyboardInterrupt:
+        flush_analysis_cache(cache_session)
         emit("watch-stopped")
         return 0
     finally:
@@ -1865,16 +2990,30 @@ def scan_targets(targets: list[Path], mode: str) -> int:
     signatures = load_signatures()
     yara_rules, yara_status = load_yara_rules()
     exclusions = load_exclusion_set()
+    cache_session = open_analysis_cache_session(str(yara_status.get("fingerprint", "none")))
     emit("engine-status", yara=yara_status)
 
-    for file_path in iter_files(targets, max_files, exclusions):
-        scanned += 1
-        findings.extend(inspect_file(file_path, signatures, yara_rules, exclusions))
-        if scanned % PROGRESS_INTERVAL == 0:
-            emit("progress", scanned=scanned, max_files=max_files)
+    try:
+        for file_path in iter_files(targets, max_files, exclusions):
+            scanned += 1
+            findings.extend(inspect_file_cached(
+                file_path, signatures, yara_rules, exclusions, cache_session
+            ))
+            if scanned % PROGRESS_INTERVAL == 0:
+                emit(
+                    "progress", scanned=scanned, max_files=max_files,
+                    cache_hits=cache_session.hits, cache_misses=cache_session.misses,
+                )
+    finally:
+        cache_hits = cache_session.hits
+        cache_misses = cache_session.misses
+        flush_analysis_cache(cache_session)
 
     confirmed = [finding for finding in findings if finding.kind in {"test-signature", "signature"}]
-    review = [finding for finding in findings if finding.kind in {"review", "yara"}]
+    review = [
+        finding for finding in findings
+        if finding.kind in {"review", "yara", "pe-analysis", "archive-warning", "archive-structure"}
+    ]
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
     limited = scanned >= max_files
     history_saved = False
@@ -1906,6 +3045,8 @@ def scan_targets(targets: list[Path], mode: str) -> int:
         limited=limited,
         history_saved=history_saved,
         scan_run_id=scan_run_id,
+        cache_hits=cache_hits,
+        cache_misses=cache_misses,
     )
     return 0
 
@@ -1941,6 +3082,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Neutron salt-okunur hızlı tarama motoru")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--quick-scan", action="store_true", help="Masaüstü ve İndirilenler klasörlerini tara")
+    action.add_argument("--engine-version", action="store_true", help="Neutron motor sürümünü göster")
     action.add_argument("--scan-path", metavar="KLASOR", help="Kullanıcının seçtiği tek klasörü tara")
     action.add_argument("--history", action="store_true", help="Yerel tarama geçmişini oku")
     action.add_argument("--watch", action="store_true", help="Yeni ve değişen dosyaları izle")
@@ -1951,6 +3093,8 @@ def main() -> int:
     action.add_argument("--signature-update", action="store_true", help="Paketle gelen yerel imzaları yükle")
     action.add_argument("--install-proton-stdin", action="store_true", help="Doğrulanmış Proton yükünü standart girdiden kur")
     action.add_argument("--yara-status", action="store_true", help="YARA motorunu ve kurallarını doğrula")
+    action.add_argument("--cache-status", action="store_true", help="Yerel analiz önbelleği durumunu oku")
+    action.add_argument("--cache-clear", action="store_true", help="Yerel analiz önbelleğini temizle")
     action.add_argument("--settings", action="store_true", help="Uygulama ayarlarını oku")
     action.add_argument("--setting-set", metavar="ANAHTAR", help="Tek bir uygulama ayarını güncelle")
     action.add_argument("--exclusions", action="store_true", help="Etkin istisnaları ve değişiklik geçmişini oku")
@@ -1970,6 +3114,9 @@ def main() -> int:
     parser.add_argument("--json-lines", action="store_true", help="Electron IPC için JSON Lines çıktısı")
     args = parser.parse_args()
 
+    if args.engine_version:
+        emit("engine-version", version=NEUTRON_ENGINE_VERSION, frozen=bool(getattr(sys, "frozen", False)))
+        return 0
     if args.history:
         return history(args.limit)
     if args.protection_history:
@@ -1986,6 +3133,10 @@ def main() -> int:
         return install_proton_from_stdin()
     if args.yara_status:
         return yara_status()
+    if args.cache_status:
+        return analysis_cache_status()
+    if args.cache_clear:
+        return clear_analysis_cache()
     if args.settings:
         return settings_status()
     if args.setting_set:
