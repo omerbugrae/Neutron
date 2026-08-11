@@ -1,15 +1,27 @@
 {
   "name": "neutron",
+  "productName": "Neutron",
   "version": "0.1.0",
   "private": true,
   "description": "Neutron desktop security application",
   "main": "src/main.cjs",
   "scripts": {
+    "prestart": "npm run icon:build",
     "start": "electron .",
+    "prepackage": "npm run icon:build",
     "package": "electron-forge package",
+    "premake": "npm run icon:build",
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
-    "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32"
+    "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
+    "icon:build": "electron tools/build-windows-icon.cjs",
+    "proton:keygen": "node tools/proton/keygen.cjs",
+    "proton:pack": "node tools/proton/pack.cjs",
+    "proton:verify": "node tools/proton/verify.cjs",
+    "proton:test": "node tools/proton/self-test.cjs",
+    "proton:update-test": "node tools/proton/updater-self-test.cjs",
+    "proton:publish": "node tools/proton/publish.cjs",
+    "proton:publish-test": "node tools/proton/publish-self-test.cjs"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
@@ -33,7 +45,14 @@
       "packagerConfig": {
         "asar": false,
         "executableName": "Neutron",
-        "icon": "assets/neutron"
+        "icon": "assets/neutron",
+        "win32metadata": {
+          "CompanyName": "Neutron",
+          "FileDescription": "Neutron Security",
+          "ProductName": "Neutron",
+          "InternalName": "Neutron",
+          "OriginalFilename": "Neutron.exe"
+        }
       },
       "makers": [
         {
@@ -41,7 +60,9 @@
           "config": {
             "name": "neutron",
             "authors": "Neutron",
-            "description": "Neutron desktop security application"
+            "description": "Neutron desktop security application",
+            "setupIcon": "assets/neutron.ico",
+            "iconUrl": "https://raw.githubusercontent.com/omerbugrae/Neutron/main/assets/neutron.ico"
           }
         }
       ]

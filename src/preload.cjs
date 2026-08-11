@@ -17,6 +17,14 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   getSignatureStatus: () => ipcRenderer.invoke('signature:status'),
   getYaraStatus: () => ipcRenderer.invoke('yara:status'),
   updateSignatures: () => ipcRenderer.invoke('signature:update'),
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  updateSetting: (key, value) => ipcRenderer.invoke('settings:update', key, value),
+  chooseWatchFolder: () => ipcRenderer.invoke('settings:choose-watch-folder'),
+  getExclusions: () => ipcRenderer.invoke('exclusions:list'),
+  addExclusionFolder: () => ipcRenderer.invoke('exclusions:add-folder'),
+  addExclusionExtension: (extension) => ipcRenderer.invoke('exclusions:add-extension', extension),
+  trustFileHash: (sha256, label) => ipcRenderer.invoke('exclusions:trust-hash', sha256, label),
+  removeExclusion: (itemId) => ipcRenderer.invoke('exclusions:remove', itemId),
   getQuarantine: () => ipcRenderer.invoke('quarantine:list'),
   addToQuarantine: (finding) => ipcRenderer.invoke('quarantine:add', finding),
   restoreFromQuarantine: (itemId) => ipcRenderer.invoke('quarantine:restore', itemId),
@@ -30,5 +38,10 @@ contextBridge.exposeInMainWorld('neutronEngine', {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('protection:event', listener);
     return () => ipcRenderer.removeListener('protection:event', listener);
+  },
+  onProtonUpdateEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('proton:update-event', listener);
+    return () => ipcRenderer.removeListener('proton:update-event', listener);
   },
 });

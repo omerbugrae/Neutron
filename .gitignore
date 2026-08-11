@@ -6,3 +6,10 @@ __pycache__/
 data/*
 !data/rules/
 !data/rules/*.yar
+*.pdbx
+*.pdbx.sig
+proton-encryption.key
+proton-signing-private.pem
+proton-secrets/
+proton-dist/
+requirements.txt

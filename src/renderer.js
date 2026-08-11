@@ -9,10 +9,17 @@
   const folderScanButtons = [...document.querySelectorAll('[data-action="choose-folder-scan"]')];
   const protectionToggle = document.querySelector('[data-action="toggle-protection"]');
   const signatureUpdateButton = document.querySelector('[data-action="update-signatures"]');
+  const settingToggles = [...document.querySelectorAll('[data-setting-toggle]')];
+  const scanLimitSelect = document.querySelector('[data-setting-select="scan_max_files"]');
+  const addWatchFolderButton = document.querySelector('[data-action="add-watch-folder"]');
+  const addExclusionFolderButton = document.querySelector('[data-action="add-exclusion-folder"]');
+  const exclusionExtensionForm = document.querySelector('[data-role="exclusion-extension-form"]');
+  const exclusionExtensionInput = document.querySelector('[data-role="exclusion-extension-input"]');
   const textTargets = (role) => [...document.querySelectorAll(`[data-role="${role}"]`)];
   let scanning = false;
-  let protectionEnabled = false;
+  let protectionEnabled = null;
   let signatureLabel = 'Proton hazırlanıyor';
+  let currentSettings = null;
 
   const setText = (role, value) => textTargets(role).forEach((element) => {
     element.textContent = value;
@@ -72,23 +79,38 @@
       applyProtectionHistory();
     }
     if (pageName === 'quarantine') applyQuarantine();
+    if (pageName === 'settings') {
+      applySettings();
+      applyExclusions();
+    }
   };
 
   const setReadyState = () => {
-    setText('engine-state', protectionEnabled ? 'Gerçek zamanlı koruma etkin' : 'Koruma kapalı');
+    const scanLimit = Number(currentSettings?.scan_max_files) || 1500;
+    const protectionKnown = typeof protectionEnabled === 'boolean';
+    setText('engine-state', !protectionKnown
+      ? 'Koruma durumu denetleniyor'
+      : protectionEnabled ? 'Gerçek zamanlı koruma etkin' : 'Koruma kapalı');
     setText('database-state', signatureLabel);
-    setText('protection-label', protectionEnabled ? 'KORUMA ETKİN' : 'KORUMA KAPALI');
-    setText('scan-heading', protectionEnabled ? 'Neutron seni koruyor.' : 'Korumayı açın.');
-    setText('scan-summary', protectionEnabled
+    setText('protection-label', !protectionKnown
+      ? 'KORUMA DENETLENİYOR'
+      : protectionEnabled ? 'KORUMA ETKİN' : 'KORUMA KAPALI');
+    setText('scan-heading', !protectionKnown
+      ? 'Neutron hazırlanıyor.'
+      : protectionEnabled ? 'Neutron seni koruyor.' : 'Korumayı açın.');
+    setText('scan-summary', !protectionKnown
+      ? 'Koruma motorunun durumu kontrol ediliyor.'
+      : protectionEnabled
       ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.'
       : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.');
     setText('scan-page-heading', 'Masaüstü ve İndirilenler');
-    setText('scan-page-summary', 'En fazla 1.500 dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.');
+    setText('scan-page-summary', `En fazla ${scanLimit.toLocaleString('tr-TR')} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
     setButtons('Hızlı tarama başlat', false);
   };
 
   const setProtectionState = (enabled, heading, detail) => {
     protectionEnabled = enabled;
+    document.body.classList.remove('protection-pending');
     document.body.classList.toggle('protection-off', !enabled);
     document.body.classList.toggle('protection-on', enabled);
     setText('realtime-protection-state', heading);
@@ -231,7 +253,7 @@
       signatureLabel = `${databaseName} ${result.version || '1.00.001'}`;
       setText('database-state', signatureLabel);
       setText('signature-version', `${databaseName} ${result.version || '1.00.001'}`);
-      setText('signature-detail', `${count} etkin imza · Yalnızca paketle gelen çevrimdışı Proton tanımları.`);
+      setText('signature-detail', `${count} etkin tehdit tanımı · Proton kullanıma hazır.`);
     } catch {
       signatureLabel = 'İmza veritabanı kullanılamıyor';
       setText('database-state', signatureLabel);
@@ -248,6 +270,166 @@
       setText('yara-status', `v${result.version} · ${result.rule_files} kural dosyası`);
     } catch {
       setText('yara-status', 'Kullanılamıyor');
+    }
+  };
+
+  const renderWatchPaths = (paths) => {
+    const list = document.querySelector('[data-role="watch-path-list"]');
+    if (!list) return;
+    list.replaceChildren();
+    if (!paths.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Varsayılan olarak Masaüstü ve İndirilenler izleniyor.';
+      list.append(empty);
+      return;
+    }
+    paths.forEach((watchedPath) => {
+      const row = document.createElement('div');
+      row.className = 'watch-path-row';
+      const label = document.createElement('span');
+      label.textContent = watchedPath;
+      label.title = watchedPath;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Kaldır';
+      remove.addEventListener('click', async () => {
+        remove.disabled = true;
+        await saveSetting('watch_paths', (currentSettings?.watch_paths || []).filter((item) => item !== watchedPath));
+      });
+      row.append(label, remove);
+      list.append(row);
+    });
+  };
+
+  const renderSettings = (settings) => {
+    currentSettings = settings;
+    settingToggles.forEach((button) => {
+      const enabled = Boolean(settings[button.dataset.settingToggle]);
+      button.classList.toggle('is-active', enabled);
+      button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      const label = button.querySelector('span');
+      if (label) label.textContent = enabled ? 'Açık' : 'Kapalı';
+      button.disabled = false;
+    });
+    if (scanLimitSelect) {
+      scanLimitSelect.value = String(settings.scan_max_files || 1500);
+      scanLimitSelect.disabled = false;
+    }
+    renderWatchPaths(Array.isArray(settings.watch_paths) ? settings.watch_paths : []);
+    setText('settings-save-state', 'Tüm ayarlar bu bilgisayarda saklanıyor');
+    if (!scanning) {
+      const limit = Number(settings.scan_max_files) || 1500;
+      setText('scan-page-summary', `En fazla ${limit.toLocaleString('tr-TR')} dosya incelenir. Dosyalara otomatik işlem uygulanmaz.`);
+    }
+  };
+
+  const applySettings = async () => {
+    if (!engine?.getSettings) return;
+    try {
+      const result = await engine.getSettings();
+      if (!result?.ok || !result.settings) throw new Error('settings unavailable');
+      renderSettings(result.settings);
+    } catch {
+      setText('settings-save-state', 'Ayarlar okunamadı');
+    }
+  };
+
+  const saveSetting = async (key, value) => {
+    if (!engine?.updateSetting) return false;
+    setText('settings-save-state', 'Kaydediliyor…');
+    const result = await engine.updateSetting(key, value);
+    if (!result?.ok || !result.settings) {
+      setText('settings-save-state', result?.message || 'Ayar kaydedilemedi');
+      if (currentSettings) renderSettings(currentSettings);
+      return false;
+    }
+    renderSettings(result.settings);
+    return true;
+  };
+
+  const exclusionKindLabel = (kind) => ({
+    folder: 'Klasör',
+    extension: 'Uzantı',
+    hash: 'Güvenilir dosya',
+  }[kind] || 'İstisna');
+
+  const renderExclusions = (result) => {
+    const list = document.querySelector('[data-role="exclusion-list"]');
+    const history = document.querySelector('[data-role="exclusion-history"]');
+    if (!list || !history) return;
+    const items = Array.isArray(result?.items) ? result.items : [];
+    const events = Array.isArray(result?.history) ? result.history : [];
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Henüz bir istisna eklenmedi.';
+      list.append(empty);
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'exclusion-row';
+      const kind = document.createElement('span');
+      kind.className = 'exclusion-kind';
+      kind.textContent = exclusionKindLabel(item.kind);
+      const value = document.createElement('span');
+      value.className = 'exclusion-value';
+      value.textContent = item.label || item.value;
+      value.title = item.label ? `${item.label}\n${item.value}` : item.value;
+      const remove = document.createElement('button');
+      remove.className = 'exclusion-remove';
+      remove.type = 'button';
+      remove.textContent = 'Kaldır';
+      remove.addEventListener('click', async () => {
+        remove.disabled = true;
+        const outcome = await engine?.removeExclusion?.(Number(item.id));
+        if (!outcome?.ok) {
+          remove.disabled = false;
+          setText('exclusion-state', outcome?.message || 'İstisna kaldırılamadı');
+          return;
+        }
+        renderExclusions(outcome);
+        setText('exclusion-state', 'İstisna kaldırıldı · koruma kapsamı yenilendi');
+      });
+      row.append(kind, value, remove);
+      list.append(row);
+    });
+
+    history.replaceChildren();
+    if (!events.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Henüz değişiklik yok.';
+      history.append(empty);
+    }
+    events.forEach((event) => {
+      const row = document.createElement('div');
+      row.className = 'exclusion-history-row';
+      const action = document.createElement('strong');
+      action.textContent = event.action === 'removed' ? 'Kaldırıldı' : 'Eklendi';
+      const kind = document.createElement('span');
+      kind.textContent = exclusionKindLabel(event.exclusion_kind);
+      const value = document.createElement('span');
+      value.textContent = event.exclusion_value;
+      value.title = event.exclusion_value;
+      const date = document.createElement('time');
+      date.dateTime = event.occurred_at || '';
+      date.textContent = formatScanDate(event.occurred_at);
+      row.append(action, kind, value, date);
+      history.append(row);
+    });
+  };
+
+  const applyExclusions = async () => {
+    if (!engine?.getExclusions) return;
+    try {
+      const result = await engine.getExclusions();
+      if (!result?.ok) throw new Error(result?.message || 'İstisnalar okunamadı');
+      renderExclusions(result);
+      setText('exclusion-state', `${Array.isArray(result.items) ? result.items.length : 0} istisna etkin`);
+    } catch (error) {
+      setText('exclusion-state', error?.message || 'İstisnalar okunamadı');
     }
   };
 
@@ -285,7 +467,8 @@
       badge.textContent = finding.kind === 'test-signature'
         ? 'EICAR TEST'
         : signatureMatch ? 'İMZA' : finding.kind === 'yara' ? 'YARA' : 'İNCELEME';
-      row.append(content, badge);
+      const actions = document.createElement('div');
+      actions.className = 'finding-actions';
       const action = document.createElement('button');
       action.className = 'finding-action';
       action.type = 'button';
@@ -304,7 +487,30 @@
         action.disabled = false;
         action.textContent = result?.message || 'Tekrar dene';
       });
-      row.append(action);
+      actions.append(action);
+      if (/^[a-f0-9]{64}$/i.test(finding.sha256 || '')) {
+        const trust = document.createElement('button');
+        trust.className = 'finding-action finding-action--trust';
+        trust.type = 'button';
+        trust.textContent = 'Güvenilir say';
+        trust.addEventListener('click', async () => {
+          const approved = window.confirm(`“${finding.path}” dosyasının mevcut SHA-256 özeti güvenilir sayılsın mı? Dosya değişirse yeniden taranır.`);
+          if (!approved) return;
+          trust.disabled = true;
+          trust.textContent = 'Kaydediliyor…';
+          const result = await engine?.trustFileHash?.(finding.sha256, finding.path || 'Güvenilir dosya');
+          if (!result?.ok) {
+            trust.disabled = false;
+            trust.textContent = result?.message || 'Tekrar dene';
+            return;
+          }
+          trust.textContent = 'Güvenilir';
+          action.disabled = true;
+          applyExclusions();
+        });
+        actions.append(trust);
+      }
+      row.append(content, badge, actions);
       list.append(row);
     });
   };
@@ -364,10 +570,13 @@
 
     if (event.type === 'watch-ready') {
       const targetCount = Array.isArray(event.targets) ? event.targets.length : 0;
+      const eventBased = event.backend === 'watchdog';
       setProtectionState(
         true,
         'Koruma etkin',
-        `${targetCount || 2} klasör izleniyor. Yalnız yeni ve değişen dosyalar yerel olarak incelenir.`
+        eventBased
+          ? `${targetCount || 2} klasör anlık dosya olaylarıyla izleniyor.`
+          : `${targetCount || 2} klasör yedek zamanlanmış denetimle izleniyor.`
       );
       setText('engine-state', 'Gerçek zamanlı koruma etkin');
       return;
@@ -399,6 +608,24 @@
     }
   });
 
+  engine?.onProtonUpdateEvent?.((event) => {
+    if (!event || typeof event.stage !== 'string') return;
+    const progress = Number.isFinite(event.progress) ? ` %${event.progress}` : '';
+    const states = {
+      checking: ['Denetleniyor…', 'Proton güncellemeleri kontrol ediliyor.'],
+      downloading: [`İndiriliyor${progress}`, `Proton ${event.version || ''} indiriliyor${progress}.`],
+      verifying: ['Hazırlanıyor…', 'Güncelleme kullanıma hazırlanıyor.'],
+      installing: ['Kuruluyor…', 'Proton güncellemesi uygulanıyor.'],
+      current: ['Proton güncel', `Kurulu Proton ${event.version || ''} en yeni sürüm.`],
+      complete: ['Proton güncel', `Proton ${event.version || ''} başarıyla kuruldu.`],
+      error: ['Tekrar dene', event.message || 'Proton güncellenemedi.'],
+    };
+    const state = states[event.stage];
+    if (!state) return;
+    if (signatureUpdateButton) signatureUpdateButton.textContent = state[0];
+    setText('signature-detail', state[1]);
+  });
+
   protectionToggle?.addEventListener('click', async () => {
     if (!engine?.startProtection || !engine?.stopProtection) return;
     protectionToggle.disabled = true;
@@ -410,6 +637,7 @@
       setProtectionState(false, 'Koruma başlatılamadı', result?.message || 'Koruma motoru kullanılamıyor.');
       return;
     }
+    applySettings();
     if (!result.enabled) {
       setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
     } else if (!result.ready) {
@@ -429,13 +657,83 @@
       signatureLabel = `${databaseName} ${result.version || '1.00.001'}`;
       setText('database-state', signatureLabel);
       setText('signature-version', `${databaseName} ${result.version || '1.00.001'}`);
-      setText('signature-detail', `${count} etkin Proton imzası doğrulandı. Ağ bağlantısı kullanılmadı.`);
+      const outcome = result.updated
+        ? `Proton ${result.version || ''} güncellendi · ${count} etkin tehdit tanımı.`
+        : (result.message || `${count} etkin tehdit tanımı kullanılıyor.`);
+      setText('signature-detail', result.archive_warning ? `${outcome} ${result.archive_warning}` : outcome);
       signatureUpdateButton.textContent = 'Proton güncel';
     } catch (error) {
       setText('signature-detail', error?.message || 'Yerel imzalar denetlenemedi.');
       signatureUpdateButton.textContent = 'Tekrar dene';
     } finally {
       signatureUpdateButton.disabled = false;
+    }
+  });
+
+  settingToggles.forEach((button) => button.addEventListener('click', async () => {
+    const key = button.dataset.settingToggle;
+    if (!key || !currentSettings) return;
+    button.disabled = true;
+    await saveSetting(key, !Boolean(currentSettings[key]));
+  }));
+
+  scanLimitSelect?.addEventListener('change', async () => {
+    scanLimitSelect.disabled = true;
+    await saveSetting('scan_max_files', Number(scanLimitSelect.value));
+  });
+
+  addWatchFolderButton?.addEventListener('click', async () => {
+    if (!engine?.chooseWatchFolder || !currentSettings) return;
+    addWatchFolderButton.disabled = true;
+    try {
+      const selection = await engine.chooseWatchFolder();
+      if (!selection?.ok || !selection.path) return;
+      const paths = [...new Set([...(currentSettings.watch_paths || []), selection.path])];
+      await saveSetting('watch_paths', paths);
+    } finally {
+      addWatchFolderButton.disabled = false;
+    }
+  });
+
+  addExclusionFolderButton?.addEventListener('click', async () => {
+    if (!engine?.addExclusionFolder) return;
+    addExclusionFolderButton.disabled = true;
+    setText('exclusion-state', 'Klasör seçiliyor…');
+    try {
+      const result = await engine.addExclusionFolder();
+      if (result?.cancelled) {
+        setText('exclusion-state', 'Klasör seçimi iptal edildi');
+        return;
+      }
+      if (!result?.ok) {
+        setText('exclusion-state', result?.message || 'Klasör eklenemedi');
+        return;
+      }
+      renderExclusions(result);
+      setText('exclusion-state', 'Klasör istisnası etkin · koruma kapsamı yenilendi');
+    } finally {
+      addExclusionFolderButton.disabled = false;
+    }
+  });
+
+  exclusionExtensionForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const extension = exclusionExtensionInput?.value?.trim();
+    if (!extension || !engine?.addExclusionExtension) return;
+    const submit = exclusionExtensionForm.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    setText('exclusion-state', 'Uzantı ekleniyor…');
+    try {
+      const result = await engine.addExclusionExtension(extension);
+      if (!result?.ok) {
+        setText('exclusion-state', result?.message || 'Uzantı eklenemedi');
+        return;
+      }
+      if (exclusionExtensionInput) exclusionExtensionInput.value = '';
+      renderExclusions(result);
+      setText('exclusion-state', 'Uzantı istisnası etkin · koruma kapsamı yenilendi');
+    } finally {
+      if (submit) submit.disabled = false;
     }
   });
 
@@ -536,6 +834,8 @@
   applyProtectionHistory();
   applySignatureStatus();
   applyYaraStatus();
+  applySettings();
+  applyExclusions();
   engine?.getProtectionStatus?.().then((status) => {
     if (status?.enabled) {
       setProtectionState(true, status.ready ? 'Koruma etkin' : 'Koruma başlatılıyor', status.ready

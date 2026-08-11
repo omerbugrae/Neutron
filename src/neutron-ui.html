@@ -11,7 +11,7 @@
     <script src="titlebar-controls.js" defer></script>
     <script src="renderer.js" defer></script>
   </head>
-  <body class="flat-ui">
+  <body class="flat-ui protection-pending">
     <svg class="icon-sprite" aria-hidden="true">
       <symbol id="icon-home" viewBox="0 0 24 24">
         <path d="M3.8 10.7 12 3.9l8.2 6.8v8.8a1 1 0 0 1-1 1h-5.1v-6.1H9.9v6.1H4.8a1 1 0 0 1-1-1Z" />
@@ -110,7 +110,7 @@
         <button class="titlebar-control" type="button" data-window-action="toggleMaximize" aria-label="Büyüt">
           <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7" rx="1" /></svg>
         </button>
-        <button class="titlebar-control titlebar-control--close" type="button" data-window-action="close" aria-label="Kapat">
+        <button class="titlebar-control titlebar-control--close" type="button" data-window-action="close" aria-label="Sistem tepsisine küçült">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" /></svg>
         </button>
       </div>
@@ -614,18 +614,58 @@
         </section>
 
         <section class="app-page" data-page="settings" hidden>
-          <header class="page-header"><div><p class="section-eyebrow">AYARLAR</p><h1>Neutron ayarları</h1><p>Bu prototipin yerel motor ve veri tercihleri.</p></div></header>
+          <header class="page-header"><div><p class="section-eyebrow">AYARLAR</p><h1>Neutron ayarları</h1><p>Koruma, bildirim, izleme ve tarama tercihleri bu bilgisayarda saklanır.</p></div></header>
           <div class="settings-grid">
-            <article class="settings-card glass-dom-surface" data-liquidglass data-glass-id="settings-engine" data-glass-radius="28" data-glass-depth="0.84" data-glass-refraction="0.96" data-glass-dispersion="0.4" data-glass-frost="0.1" data-glass-specular="0.94"><p class="section-eyebrow">MOTOR</p><h2>Tarama motoru v0.2</h2><p>Hızlı tarama ve gerçek zamanlı koruma aynı yerel imza eşleştiricisini kullanır.</p></article>
+            <article class="settings-card settings-card--wide">
+              <p class="section-eyebrow">GENEL</p>
+              <h2>Uygulama davranışı</h2>
+              <div class="settings-preference-list">
+                <div class="settings-preference"><div><strong>Windows ile başlat</strong><p>Oturum açıldığında Neutron'u arka planda otomatik çalıştırır.</p></div><button class="settings-switch" type="button" data-setting-toggle="start_with_windows" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Gerçek zamanlı korumayı aç</strong><p>Neutron başladığında dosya izleyicisini otomatik etkinleştirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Güvenlik bildirimleri</strong><p>Bir dosya işaretlendiğinde Windows bildirimi gösterir.</p></div><button class="settings-switch" type="button" data-setting-toggle="notifications_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+              </div>
+            </article>
+            <article class="settings-card settings-card--wide">
+              <div class="settings-card-heading"><div><p class="section-eyebrow">İZLENEN KLASÖRLER</p><h2>Gerçek zamanlı kapsam</h2></div><button class="settings-action" type="button" data-action="add-watch-folder">Klasör ekle</button></div>
+              <p>Liste boşsa Masaüstü ve İndirilenler otomatik olarak izlenir.</p>
+              <div class="watch-path-list" data-role="watch-path-list"><p class="settings-empty">Varsayılan klasörler kullanılıyor.</p></div>
+            </article>
+            <article class="settings-card settings-card--wide exclusions-settings-card">
+              <div class="settings-card-heading"><div><p class="section-eyebrow">TARAMA İSTİSNALARI</p><h2>İzin verilen öğeler</h2></div><button class="settings-action" type="button" data-action="add-exclusion-folder">Klasör ekle</button></div>
+              <p>Eklenen klasörler, uzantılar ve güvenilir dosya özetleri hem taramalarda hem gerçek zamanlı korumada atlanır.</p>
+              <form class="exclusion-extension-form" data-role="exclusion-extension-form">
+                <label for="exclusion-extension">Dosya uzantısı</label>
+                <div><input id="exclusion-extension" data-role="exclusion-extension-input" type="text" maxlength="18" spellcheck="false" autocomplete="off" placeholder=".log"><button class="settings-action" type="submit">Uzantı ekle</button></div>
+              </form>
+              <div class="exclusion-list" data-role="exclusion-list"><p class="settings-empty">Henüz bir istisna eklenmedi.</p></div>
+              <details class="exclusion-history">
+                <summary>Son istisna değişiklikleri</summary>
+                <div class="exclusion-history-list" data-role="exclusion-history"><p class="settings-empty">Henüz değişiklik yok.</p></div>
+              </details>
+              <p class="settings-save-state" data-role="exclusion-state">İstisnalar hazırlanıyor</p>
+              <p class="settings-note">Güvenlik nedeniyle sürücü kökü, kullanıcı klasörünün tamamı, Windows ve Program Files klasörleri istisna bırakılamaz.</p>
+            </article>
+            <article class="settings-card">
+              <p class="section-eyebrow">TARAMA SINIRI</p>
+              <h2>Dosya sayısı</h2>
+              <p>Tek taramada ve izleme görüntüsünde incelenecek en fazla dosya.</p>
+              <select class="settings-select" data-setting-select="scan_max_files" aria-label="Tarama dosya sınırı">
+                <option value="500">500 dosya</option>
+                <option value="1500">1.500 dosya</option>
+                <option value="3000">3.000 dosya</option>
+                <option value="5000">5.000 dosya</option>
+                <option value="10000">10.000 dosya</option>
+              </select>
+            </article>
             <article class="settings-card signature-settings-card">
               <p class="section-eyebrow">PROTON VERİTABANI</p>
               <h2 data-role="signature-version">Proton hazırlanıyor</h2>
               <p data-role="signature-detail">Paketle gelen Proton imzaları denetleniyor.</p>
               <div class="settings-engine-status"><span>YARA motoru</span><strong data-role="yara-status">Denetleniyor</strong></div>
               <button class="settings-action" type="button" data-action="update-signatures">Proton'u denetle</button>
-              <p class="settings-note">Bu işlem internete bağlanmaz ve yalnızca Neutron veritabanını günceller.</p>
+              <p class="settings-note">Proton güncellemeleri denetlenir ve uygun olduğunda kullanıma hazırlanır.</p>
             </article>
-            <article class="settings-card glass-dom-surface" data-liquidglass data-glass-id="settings-storage" data-glass-radius="28" data-glass-depth="0.84" data-glass-refraction="0.96" data-glass-dispersion="0.4" data-glass-frost="0.1" data-glass-specular="0.94"><p class="section-eyebrow">YEREL VERİ</p><h2>data/neutron.db</h2><p>Tarama, koruma ve imza kayıtları proje içindeki SQLite dosyasında tutulur. Ağ aktarımı yapılmaz.</p></article>
+            <article class="settings-card"><p class="section-eyebrow">YEREL VERİ</p><h2>data/neutron.db</h2><p>Ayarlar, tarama ve koruma kayıtları yerel SQLite dosyasında tutulur. Taranan dosyalar veya sonuçları güncelleme sunucusuna gönderilmez.</p><p class="settings-save-state" data-role="settings-save-state">Ayarlar hazırlanıyor</p></article>
           </div>
         </section>
       </main>

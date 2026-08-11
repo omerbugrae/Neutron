@@ -13,12 +13,15 @@ import argparse
 import hashlib
 import json
 import os
+import queue
+import re
 import secrets
 import shutil
 import sqlite3
 import sys
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -29,16 +32,41 @@ try:
 except ImportError:
     yara = None
 
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    FileSystemEventHandler = None
+    Observer = None
+
 
 MAX_FILES = 1_500
 MAX_DEPTH = 8
 MAX_HASH_BYTES = 25 * 1024 * 1024
 MAX_CONTENT_BYTES = 1 * 1024 * 1024
 MAX_YARA_BYTES = 25 * 1024 * 1024
+MAX_PROTON_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_PROTON_SIGNATURES = 1_000_000
+MAX_PROTON_RULES = 256
+MAX_PROTON_RULE_BYTES = 2 * 1024 * 1024
+MAX_PROTON_TOTAL_RULE_BYTES = 16 * 1024 * 1024
 PROGRESS_INTERVAL = 25
 WATCH_INTERVAL_SECONDS = 5.0
+WATCH_DEBOUNCE_SECONDS = 0.9
+WATCH_SETTLE_SECONDS = 0.65
 SIGNATURE_DATABASE_NAME = "Proton"
 BUILTIN_SIGNATURE_VERSION = "1.00.001"
+PROTON_VERSION_PATTERN = re.compile(r"^\d+\.\d{2}\.\d{3}$")
+PROTON_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+PROTON_RULE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+\.yar$")
+EXCLUSION_EXTENSION_PATTERN = re.compile(r"^\.[a-z0-9][a-z0-9_+-]{0,15}$")
+DEFAULT_APP_SETTINGS: dict[str, Any] = {
+    "start_with_windows": False,
+    "protection_enabled": True,
+    "notifications_enabled": True,
+    "watch_paths": [],
+    "scan_max_files": MAX_FILES,
+}
 
 # EICAR, antivirüs ürünlerini güvenli şekilde denemek için kullanılan zararsız
 # standart test dizgesidir. Bu motor yalnızca bu test imzasını kesin bulgu sayar.
@@ -64,6 +92,13 @@ class Finding:
     sha256: str | None = None
 
 
+@dataclass(frozen=True)
+class ExclusionSet:
+    folders: tuple[str, ...]
+    extensions: frozenset[str]
+    hashes: frozenset[str]
+
+
 def data_directory() -> Path:
     """Electron'ın verdiği klasörü, yoksa proje içindeki data klasörünü kullanır."""
     configured = os.environ.get("NEUTRON_DATA_DIR")
@@ -76,7 +111,8 @@ def database_path() -> Path:
     return data_directory() / "neutron.db"
 
 
-def open_database() -> sqlite3.Connection:
+@contextmanager
+def open_database() -> Iterator[sqlite3.Connection]:
     directory = data_directory()
     directory.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(database_path())
@@ -159,6 +195,44 @@ def open_database() -> sqlite3.Connection:
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS proton_yara_rules (
+          name TEXT PRIMARY KEY,
+          sha256 TEXT NOT NULL,
+          source_text TEXT NOT NULL,
+          installed_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS exclusions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL CHECK(kind IN ('folder', 'extension', 'hash')),
+          value TEXT NOT NULL,
+          normalized_value TEXT NOT NULL,
+          label TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          UNIQUE(kind, normalized_value)
+        );
+
+        CREATE TABLE IF NOT EXISTS exclusion_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          occurred_at TEXT NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('added', 'removed')),
+          exclusion_kind TEXT NOT NULL,
+          exclusion_value TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS exclusions_enabled_idx
+          ON exclusions(enabled, kind);
+
+        CREATE INDEX IF NOT EXISTS exclusion_events_occurred_idx
+          ON exclusion_events(occurred_at DESC);
         """
     )
     eicar_sha256 = hashlib.sha256(EICAR_MARKER).hexdigest()
@@ -197,8 +271,22 @@ def open_database() -> sqlite3.Connection:
         "INSERT OR IGNORE INTO signature_metadata (key, value) VALUES ('updated_at', ?)",
         (updated_at,),
     )
+    connection.executemany(
+        "INSERT OR IGNORE INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+        [
+            (key, json.dumps(value, ensure_ascii=False), updated_at)
+            for key, value in DEFAULT_APP_SETTINGS.items()
+        ],
+    )
     connection.commit()
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def load_signatures() -> dict[int, dict[str, dict[str, Any]]]:
@@ -232,16 +320,253 @@ def signature_status_payload() -> dict[str, Any]:
         "version": metadata.get("version", BUILTIN_SIGNATURE_VERSION),
         "updated_at": metadata.get("updated_at"),
         "signature_count": count,
-        "source": "builtin",
-        "network_used": False,
+        "source": metadata.get("source", "builtin"),
+        "network_used": metadata.get("source") == "github-release",
     }
+
+
+def normalize_app_setting(key: str, value: Any) -> Any:
+    if key not in DEFAULT_APP_SETTINGS:
+        raise ValueError("Bilinmeyen ayar")
+    if key in {"start_with_windows", "protection_enabled", "notifications_enabled"}:
+        if not isinstance(value, bool):
+            raise ValueError("Ayar true veya false olmalı")
+        return value
+    if key == "scan_max_files":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Tarama sınırı sayı olmalı")
+        return max(250, min(value, 10_000))
+    if key == "watch_paths":
+        if not isinstance(value, list):
+            raise ValueError("İzleme konumları liste olmalı")
+        normalized: list[str] = []
+        for raw_path in value[:8]:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            try:
+                resolved = Path(raw_path).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if resolved.is_dir() and str(resolved) not in normalized:
+                normalized.append(str(resolved))
+        return normalized
+    raise ValueError("Desteklenmeyen ayar")
+
+
+def read_app_settings() -> dict[str, Any]:
+    settings = dict(DEFAULT_APP_SETTINGS)
+    with open_database() as connection:
+        rows = connection.execute("SELECT key, value_json FROM app_settings").fetchall()
+    for key, raw_value in rows:
+        if key not in DEFAULT_APP_SETTINGS:
+            continue
+        try:
+            settings[key] = normalize_app_setting(key, json.loads(raw_value))
+        except (ValueError, TypeError, json.JSONDecodeError):
+            settings[key] = DEFAULT_APP_SETTINGS[key]
+    return settings
+
+
+def write_app_setting(key: str, value: Any) -> dict[str, Any]:
+    normalized = normalize_app_setting(key, value)
+    with open_database() as connection:
+        connection.execute(
+            """
+            INSERT INTO app_settings (key, value_json, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+              value_json = excluded.value_json,
+              updated_at = excluded.updated_at
+            """,
+            (key, json.dumps(normalized, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
+        )
+    return read_app_settings()
+
+
+def canonical_path(path: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(path.resolve())))
+
+
+def path_is_within(path_value: str, folder_value: str) -> bool:
+    try:
+        return os.path.commonpath([path_value, folder_value]) == folder_value
+    except ValueError:
+        return False
+
+
+def protected_exclusion_roots() -> tuple[str, ...]:
+    roots: list[str] = []
+    for variable in ("SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        raw_value = os.environ.get(variable)
+        if not raw_value:
+            continue
+        try:
+            value = canonical_path(Path(raw_value))
+        except (OSError, RuntimeError):
+            continue
+        if value not in roots:
+            roots.append(value)
+    return tuple(roots)
+
+
+def normalize_exclusion(kind: str, raw_value: str) -> tuple[str, str]:
+    if kind == "folder":
+        try:
+            folder = Path(raw_value).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise ValueError("Seçilen istisna klasörü kullanılamıyor") from None
+        if not folder.is_dir():
+            raise ValueError("İstisna konumu bir klasör değil")
+        normalized = canonical_path(folder)
+        anchor = canonical_path(Path(folder.anchor))
+        home = canonical_path(Path.home())
+        if normalized in {anchor, home}:
+            raise ValueError("Sürücü veya kullanıcı kökünün tamamı istisna bırakılamaz")
+        if any(path_is_within(normalized, protected) for protected in protected_exclusion_roots()):
+            raise ValueError("Windows ve program sistem klasörleri istisna bırakılamaz")
+        return str(folder), normalized
+    if kind == "extension":
+        extension = raw_value.strip().casefold()
+        if extension.startswith("*"):
+            extension = extension[1:]
+        if not extension.startswith("."):
+            extension = f".{extension}"
+        if not EXCLUSION_EXTENSION_PATTERN.fullmatch(extension):
+            raise ValueError("Dosya uzantısı .ext biçiminde olmalı")
+        return extension, extension
+    if kind == "hash":
+        digest = raw_value.strip().casefold()
+        if not PROTON_SHA256_PATTERN.fullmatch(digest):
+            raise ValueError("Güvenilir dosya hash değeri geçersiz")
+        return digest, digest
+    raise ValueError("Desteklenmeyen istisna türü")
+
+
+def load_exclusion_set() -> ExclusionSet:
+    with open_database() as connection:
+        rows = connection.execute(
+            "SELECT kind, normalized_value FROM exclusions WHERE enabled = 1"
+        ).fetchall()
+    folders = tuple(str(value) for kind, value in rows if kind == "folder")
+    extensions = frozenset(str(value) for kind, value in rows if kind == "extension")
+    hashes = frozenset(str(value) for kind, value in rows if kind == "hash")
+    return ExclusionSet(folders=folders, extensions=extensions, hashes=hashes)
+
+
+def is_path_excluded(
+    path: Path,
+    exclusions: ExclusionSet,
+    include_extension: bool = True,
+) -> bool:
+    if include_extension and path.suffix.casefold() in exclusions.extensions:
+        return True
+    try:
+        normalized = canonical_path(path)
+    except (OSError, RuntimeError):
+        normalized = os.path.normcase(os.path.normpath(str(path.absolute())))
+    return any(path_is_within(normalized, folder) for folder in exclusions.folders)
+
+
+def exclusions_payload() -> dict[str, Any]:
+    with open_database() as connection:
+        connection.row_factory = sqlite3.Row
+        items = [dict(row) for row in connection.execute(
+            """
+            SELECT id, kind, value, label, created_at
+            FROM exclusions
+            WHERE enabled = 1
+            ORDER BY kind, created_at, id
+            """
+        ).fetchall()]
+        history = [dict(row) for row in connection.execute(
+            """
+            SELECT occurred_at, action, exclusion_kind, exclusion_value
+            FROM exclusion_events
+            ORDER BY occurred_at DESC, id DESC
+            LIMIT 20
+            """
+        ).fetchall()]
+    return {"items": items, "history": history}
+
+
+def add_exclusion(kind: str, raw_value: str, label: str | None = None) -> dict[str, Any]:
+    value, normalized = normalize_exclusion(kind, raw_value)
+    safe_label = label.strip()[:160] if isinstance(label, str) and label.strip() else None
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with open_database() as connection:
+            connection.execute(
+                """
+                INSERT INTO exclusions (kind, value, normalized_value, label, enabled, created_at)
+                VALUES (?, ?, ?, ?, 1, ?)
+                """,
+                (kind, value, normalized, safe_label, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO exclusion_events (
+                  occurred_at, action, exclusion_kind, exclusion_value
+                ) VALUES (?, 'added', ?, ?)
+                """,
+                (now, kind, value),
+            )
+    except sqlite3.IntegrityError:
+        raise ValueError("Bu istisna zaten kayıtlı") from None
+    return exclusions_payload()
+
+
+def remove_exclusion(item_id: int) -> dict[str, Any]:
+    with open_database() as connection:
+        row = connection.execute(
+            "SELECT kind, value FROM exclusions WHERE id = ? AND enabled = 1",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("İstisna kaydı bulunamadı")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute("DELETE FROM exclusions WHERE id = ?", (item_id,))
+        connection.execute(
+            """
+            INSERT INTO exclusion_events (
+              occurred_at, action, exclusion_kind, exclusion_value
+            ) VALUES (?, 'removed', ?, ?)
+            """,
+            (now, str(row[0]), str(row[1])),
+        )
+    return exclusions_payload()
 
 
 def rules_directory() -> Path:
     return data_directory() / "rules"
 
 
-def load_yara_rules() -> tuple[Any | None, dict[str, Any]]:
+def yara_sources(proton_override: list[dict[str, str]] | None = None) -> dict[str, str]:
+    sources: dict[str, str] = {}
+    for index, rule_path in enumerate(sorted(rules_directory().glob("*.yar"))):
+        try:
+            if rule_path.stat().st_size > MAX_PROTON_RULE_BYTES:
+                continue
+            sources[f"builtin_{index}_{rule_path.stem}"] = rule_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+
+    if proton_override is None:
+        try:
+            with open_database() as connection:
+                rows = connection.execute(
+                    "SELECT name, source_text FROM proton_yara_rules ORDER BY name"
+                ).fetchall()
+            proton_rules = [{"name": str(name), "content": str(content)} for name, content in rows]
+        except (OSError, sqlite3.Error):
+            proton_rules = []
+    else:
+        proton_rules = proton_override
+
+    for index, rule in enumerate(proton_rules):
+        sources[f"proton_{index}_{Path(rule['name']).stem}"] = rule["content"]
+    return sources
+
+
+def load_yara_rules(proton_override: list[dict[str, str]] | None = None) -> tuple[Any | None, dict[str, Any]]:
     if yara is None:
         return None, {
             "available": False,
@@ -250,8 +575,8 @@ def load_yara_rules() -> tuple[Any | None, dict[str, Any]]:
             "message": "yara-python kurulu değil.",
         }
 
-    rule_files = sorted(rules_directory().glob("*.yar"))
-    if not rule_files:
+    sources = yara_sources(proton_override)
+    if not sources:
         return None, {
             "available": True,
             "version": yara.__version__,
@@ -259,20 +584,19 @@ def load_yara_rules() -> tuple[Any | None, dict[str, Any]]:
             "message": "YARA kural dosyası bulunamadı.",
         }
 
-    namespaces = {f"neutron_{index}": str(path) for index, path in enumerate(rule_files)}
     try:
-        compiled = yara.compile(filepaths=namespaces)
+        compiled = yara.compile(sources=sources)
     except yara.Error as error:
         return None, {
             "available": True,
             "version": yara.__version__,
-            "rule_files": len(rule_files),
+            "rule_files": len(sources),
             "message": f"YARA kuralları derlenemedi: {error}",
         }
     return compiled, {
         "available": True,
         "version": yara.__version__,
-        "rule_files": len(rule_files),
+        "rule_files": len(sources),
         "message": "YARA kuralları hazır.",
     }
 
@@ -493,28 +817,59 @@ def home_scan_targets() -> list[Path]:
     return targets
 
 
-def iter_files(targets: list[Path]) -> Iterator[Path]:
+def configured_scan_targets(settings: dict[str, Any] | None = None) -> list[Path]:
+    current = settings or read_app_settings()
+    configured = current.get("watch_paths") or []
+    if not configured:
+        return home_scan_targets()
+    targets: list[Path] = []
+    for raw_path in configured:
+        try:
+            path = Path(raw_path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if path.is_dir() and path not in targets:
+            targets.append(path)
+    return targets or home_scan_targets()
+
+
+def iter_files(
+    targets: list[Path],
+    max_files: int = MAX_FILES,
+    exclusions: ExclusionSet | None = None,
+) -> Iterator[Path]:
     """Sembolik bağları takip etmeden, derinliği ve sayıyı sınırlı tutar."""
     yielded = 0
+    active_exclusions = exclusions or ExclusionSet((), frozenset(), frozenset())
     stack: list[tuple[Path, int]] = [(target, 0) for target in reversed(targets)]
 
-    while stack and yielded < MAX_FILES:
+    while stack and yielded < max_files:
         directory, depth = stack.pop()
+        if is_path_excluded(directory, active_exclusions, include_extension=False):
+            continue
         try:
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    if yielded >= MAX_FILES:
+                    if yielded >= max_files:
                         return
                     try:
                         if entry.is_symlink():
                             continue
                         if entry.is_dir(follow_symlinks=False):
-                            if depth < MAX_DEPTH and entry.name.casefold() not in SKIP_DIRECTORIES:
-                                stack.append((Path(entry.path), depth + 1))
+                            child_path = Path(entry.path)
+                            if (
+                                depth < MAX_DEPTH
+                                and entry.name.casefold() not in SKIP_DIRECTORIES
+                                and not is_path_excluded(child_path, active_exclusions, include_extension=False)
+                            ):
+                                stack.append((child_path, depth + 1))
                             continue
                         if entry.is_file(follow_symlinks=False):
+                            file_path = Path(entry.path)
+                            if is_path_excluded(file_path, active_exclusions):
+                                continue
                             yielded += 1
-                            yield Path(entry.path)
+                            yield file_path
                     except OSError:
                         continue
         except (OSError, PermissionError):
@@ -538,9 +893,13 @@ def file_signature(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def snapshot_targets(targets: list[Path]) -> dict[str, tuple[int, int]]:
+def snapshot_targets(
+    targets: list[Path],
+    max_files: int = MAX_FILES,
+    exclusions: ExclusionSet | None = None,
+) -> dict[str, tuple[int, int]]:
     snapshot: dict[str, tuple[int, int]] = {}
-    for path in iter_files(targets):
+    for path in iter_files(targets, max_files, exclusions):
         if is_engine_data_file(path):
             continue
         signature = file_signature(path)
@@ -605,11 +964,28 @@ def inspect_file(
     path: Path,
     signatures: dict[int, dict[str, dict[str, Any]]] | None = None,
     yara_rules: Any | None = None,
+    exclusions: ExclusionSet | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
         size = path.stat().st_size
     except (OSError, PermissionError):
+        return findings
+
+    active_exclusions = exclusions or ExclusionSet((), frozenset(), frozenset())
+    if is_path_excluded(path, active_exclusions):
+        return findings
+    digest_value: str | None = None
+    digest_loaded = False
+
+    def file_digest() -> str | None:
+        nonlocal digest_value, digest_loaded
+        if not digest_loaded:
+            digest_value = sha256_for(path, size)
+            digest_loaded = True
+        return digest_value
+
+    if active_exclusions.hashes and file_digest() in active_exclusions.hashes:
         return findings
 
     suffix = path.suffix.casefold()
@@ -626,7 +1002,7 @@ def inspect_file(
             kind="review",
             severity="medium",
             reason="Belge uzantısını taklit eden çalıştırılabilir dosya adı",
-            sha256=sha256_for(path, size),
+            sha256=file_digest(),
         ))
 
     if suffix in EXECUTABLE_EXTENSIONS and any(word in name for word in RISK_WORDS):
@@ -635,12 +1011,12 @@ def inspect_file(
             kind="review",
             severity="low",
             reason="İnceleme gerektiren dosya adı ve çalıştırılabilir tür",
-            sha256=sha256_for(path, size),
+            sha256=file_digest(),
         ))
 
     size_signatures = (signatures or {}).get(size, {})
     if size_signatures:
-        digest = sha256_for(path, size)
+        digest = file_digest()
         signature = size_signatures.get(digest or "")
         if signature:
             findings.append(Finding(
@@ -688,7 +1064,7 @@ def inspect_file(
                     kind="yara",
                     severity=severity,
                     reason=f"YARA: {description}",
-                    sha256=sha256_for(path, size),
+                    sha256=file_digest(),
                 ))
         except (OSError, PermissionError, yara.Error):
             pass
@@ -696,20 +1072,25 @@ def inspect_file(
     return findings
 
 
-def watch_targets() -> int:
+def watch_targets_polling_fallback() -> int:
     """Poll the user's common download locations without changing any files."""
-    targets = home_scan_targets()
+    settings = read_app_settings()
+    targets = configured_scan_targets(settings)
+    max_files = int(settings["scan_max_files"])
     if not targets:
         emit("watch-error", code="NO_TARGETS", message="İzlenecek klasör bulunamadı.")
         return 2
 
     signatures = load_signatures()
     yara_rules, yara_status = load_yara_rules()
-    previous = snapshot_targets(targets)
+    exclusions = load_exclusion_set()
+    previous = snapshot_targets(targets, max_files, exclusions)
     emit(
         "watch-ready",
         targets=[str(target) for target in targets],
         tracked=len(previous),
+        max_files=max_files,
+        backend="polling-fallback",
         interval_seconds=WATCH_INTERVAL_SECONDS,
         yara=yara_status,
     )
@@ -717,7 +1098,7 @@ def watch_targets() -> int:
     try:
         while True:
             time.sleep(WATCH_INTERVAL_SECONDS)
-            current = snapshot_targets(targets)
+            current = snapshot_targets(targets, max_files, exclusions)
 
             for raw_path, signature in current.items():
                 prior_signature = previous.get(raw_path)
@@ -726,7 +1107,7 @@ def watch_targets() -> int:
 
                 event_kind = "created" if prior_signature is None else "changed"
                 path = Path(raw_path)
-                findings = inspect_file(path, signatures, yara_rules)
+                findings = inspect_file(path, signatures, yara_rules, exclusions)
                 if not findings:
                     emit(
                         "watch-checked",
@@ -754,6 +1135,148 @@ def watch_targets() -> int:
         return 0
 
 
+def should_ignore_watch_path(path: Path, exclusions: ExclusionSet | None = None) -> bool:
+    if path.is_symlink() or is_engine_data_file(path):
+        return True
+    if any(part.casefold() in SKIP_DIRECTORIES for part in path.parts):
+        return True
+    if exclusions is not None and is_path_excluded(path, exclusions):
+        return True
+    return path.suffix.casefold() in {".crdownload", ".download", ".part", ".partial", ".tmp"}
+
+
+def emit_watch_result(
+    path: Path,
+    event_kind: str,
+    signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None,
+    exclusions: ExclusionSet,
+) -> None:
+    findings = inspect_file(path, signatures, yara_rules, exclusions)
+    if not findings:
+        emit("watch-checked", event_kind=event_kind, file_path=str(path), file_name=path.name)
+        return
+    for finding in findings:
+        try:
+            save_protection_event(event_kind, finding)
+        except (OSError, sqlite3.Error):
+            pass
+        emit(
+            "watch-finding",
+            event_kind=event_kind,
+            file_name=path.name,
+            finding=asdict(finding),
+        )
+
+
+def watch_targets() -> int:
+    """Use native filesystem events, falling back to the bounded poller."""
+    if Observer is None or FileSystemEventHandler is None:
+        return watch_targets_polling_fallback()
+
+    settings = read_app_settings()
+    targets = configured_scan_targets(settings)
+    max_files = int(settings["scan_max_files"])
+    if not targets:
+        emit("watch-error", code="NO_TARGETS", message="İzlenecek klasör bulunamadı.")
+        return 2
+
+    signatures = load_signatures()
+    yara_rules, yara_status = load_yara_rules()
+    exclusions = load_exclusion_set()
+    pending: dict[str, dict[str, Any]] = {}
+    event_queue: queue.SimpleQueue[tuple[str, str, tuple[int, int] | None]] = queue.SimpleQueue()
+    processed_signatures: dict[str, tuple[int, int]] = {}
+
+    class NeutronEventHandler(FileSystemEventHandler):
+        def queue(self, raw_path: str, event_kind: str) -> None:
+            path = Path(raw_path)
+            if should_ignore_watch_path(path, exclusions):
+                return
+            event_queue.put((str(path), event_kind, file_signature(path)))
+
+        def on_created(self, event: Any) -> None:
+            if not event.is_directory:
+                self.queue(event.src_path, "created")
+
+        def on_modified(self, event: Any) -> None:
+            if not event.is_directory:
+                self.queue(event.src_path, "changed")
+
+        def on_moved(self, event: Any) -> None:
+            if not event.is_directory:
+                self.queue(event.dest_path, "moved")
+
+    observer = Observer()
+    handler = NeutronEventHandler()
+    try:
+        for target in targets:
+            observer.schedule(handler, str(target), recursive=True)
+        observer.start()
+    except (OSError, RuntimeError) as error:
+        try:
+            observer.stop()
+            observer.join(timeout=2)
+        except RuntimeError:
+            pass
+        emit("watch-fallback", reason=str(error), backend="polling")
+        return watch_targets_polling_fallback()
+
+    emit(
+        "watch-ready",
+        targets=[str(target) for target in targets],
+        tracked=0,
+        max_files=max_files,
+        backend="watchdog",
+        debounce_ms=round(WATCH_DEBOUNCE_SECONDS * 1000),
+        yara=yara_status,
+    )
+
+    try:
+        while True:
+            time.sleep(0.2)
+            now = time.monotonic()
+            while True:
+                try:
+                    raw_path, event_kind, signature = event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                pending[raw_path] = {
+                    "path": Path(raw_path),
+                    "event_kind": event_kind,
+                    "due_at": now + WATCH_DEBOUNCE_SECONDS,
+                    "signature": signature,
+                }
+            due_paths = [raw_path for raw_path, item in pending.items() if item["due_at"] <= now]
+            for raw_path in due_paths:
+                item = pending.get(raw_path)
+                if item is None:
+                    continue
+                path = item["path"]
+                current_signature = file_signature(path)
+                if current_signature is None:
+                    pending.pop(raw_path, None)
+                    continue
+                if current_signature != item["signature"]:
+                    item["signature"] = current_signature
+                    item["due_at"] = now + WATCH_SETTLE_SECONDS
+                    continue
+                if processed_signatures.get(raw_path) == current_signature:
+                    pending.pop(raw_path, None)
+                    continue
+                pending.pop(raw_path, None)
+                processed_signatures[raw_path] = current_signature
+                if len(processed_signatures) > max_files:
+                    processed_signatures.pop(next(iter(processed_signatures)))
+                emit_watch_result(path, item["event_kind"], signatures, yara_rules, exclusions)
+    except KeyboardInterrupt:
+        emit("watch-stopped")
+        return 0
+    finally:
+        observer.stop()
+        observer.join(timeout=5)
+
+
 def protection_history(limit: int) -> int:
     try:
         emit("protection-history", events=read_protection_history(limit))
@@ -769,6 +1292,207 @@ def signature_status() -> int:
         return 0
     except (OSError, sqlite3.Error):
         emit("error", code="SIGNATURE_STATUS_UNAVAILABLE", message="İmza veritabanı okunamadı.")
+        return 2
+
+
+def settings_status() -> int:
+    try:
+        emit("settings", settings=read_app_settings())
+        return 0
+    except (OSError, sqlite3.Error, ValueError):
+        emit("error", code="SETTINGS_UNAVAILABLE", message="Ayarlar okunamadı.")
+        return 2
+
+
+def setting_update(key: str, raw_value: str) -> int:
+    try:
+        value = json.loads(raw_value)
+        emit("settings-updated", settings=write_app_setting(key, value), changed_key=key)
+        return 0
+    except (OSError, sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as error:
+        emit("error", code="SETTING_UPDATE_FAILED", message=f"Ayar kaydedilemedi: {error}")
+        return 2
+
+
+def exclusions_status() -> int:
+    try:
+        emit("exclusions", **exclusions_payload())
+        return 0
+    except (OSError, sqlite3.Error):
+        emit("error", code="EXCLUSIONS_UNAVAILABLE", message="İstisnalar okunamadı.")
+        return 2
+
+
+def exclusion_add(kind: str, value: str, label: str | None = None) -> int:
+    try:
+        emit("exclusions-updated", **add_exclusion(kind, value, label))
+        return 0
+    except (OSError, sqlite3.Error, ValueError) as error:
+        emit("error", code="EXCLUSION_ADD_FAILED", message=f"İstisna eklenemedi: {error}")
+        return 2
+
+
+def exclusion_remove(item_id: int) -> int:
+    try:
+        emit("exclusions-updated", **remove_exclusion(item_id))
+        return 0
+    except (OSError, sqlite3.Error, ValueError) as error:
+        emit("error", code="EXCLUSION_REMOVE_FAILED", message=f"İstisna kaldırılamadı: {error}")
+        return 2
+
+
+def proton_version_tuple(value: str) -> tuple[int, int, int]:
+    if not PROTON_VERSION_PATTERN.fullmatch(value):
+        raise ValueError("Proton sürümü x.xx.xxx biçiminde değil")
+    parts = tuple(int(part) for part in value.split("."))
+    return parts[0], parts[1], parts[2]
+
+
+def validate_proton_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or payload.get("schema") != "neutron.proton.payload/v1":
+        raise ValueError("Proton paket şeması geçersiz")
+    if payload.get("database_name") != SIGNATURE_DATABASE_NAME:
+        raise ValueError("Proton veritabanı adı geçersiz")
+    version = str(payload.get("version", ""))
+    proton_version_tuple(version)
+    created_at = str(payload.get("created_at", ""))
+    if not created_at or len(created_at) > 64:
+        raise ValueError("Proton oluşturma zamanı geçersiz")
+
+    raw_signatures = payload.get("signatures")
+    if not isinstance(raw_signatures, list) or len(raw_signatures) > MAX_PROTON_SIGNATURES:
+        raise ValueError("Proton hash imzası listesi geçersiz")
+    seen_hashes: set[str] = set()
+    signatures: list[dict[str, Any]] = []
+    for index, raw_signature in enumerate(raw_signatures):
+        if not isinstance(raw_signature, dict):
+            raise ValueError(f"Proton hash imzası {index} geçersiz")
+        digest = str(raw_signature.get("sha256", "")).lower()
+        if not PROTON_SHA256_PATTERN.fullmatch(digest) or digest in seen_hashes:
+            raise ValueError(f"Proton SHA-256 girdisi {index} geçersiz veya yinelenmiş")
+        seen_hashes.add(digest)
+        file_size = raw_signature.get("file_size")
+        if isinstance(file_size, bool) or not isinstance(file_size, int) or file_size < 0:
+            raise ValueError(f"Proton dosya boyutu {index} geçersiz")
+        name = str(raw_signature.get("name", "")).strip()
+        severity = str(raw_signature.get("severity", "")).lower()
+        if not name or len(name) > 160 or severity not in {"low", "medium", "high", "critical"}:
+            raise ValueError(f"Proton hash imzası {index} alanları geçersiz")
+        signatures.append({
+            "sha256": digest,
+            "file_size": file_size,
+            "name": name,
+            "severity": severity,
+        })
+
+    raw_rules = payload.get("yara_rules")
+    if not isinstance(raw_rules, list) or len(raw_rules) > MAX_PROTON_RULES:
+        raise ValueError("Proton YARA listesi geçersiz")
+    seen_rule_names: set[str] = set()
+    total_rule_bytes = 0
+    rules: list[dict[str, str]] = []
+    for index, raw_rule in enumerate(raw_rules):
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"Proton YARA girdisi {index} geçersiz")
+        name = str(raw_rule.get("name", ""))
+        normalized_name = name.lower()
+        if not PROTON_RULE_NAME_PATTERN.fullmatch(name) or normalized_name in seen_rule_names:
+            raise ValueError(f"Proton YARA dosya adı {index} geçersiz veya yinelenmiş")
+        seen_rule_names.add(normalized_name)
+        content = raw_rule.get("content")
+        if not isinstance(content, str) or "\x00" in content:
+            raise ValueError(f"Proton YARA içeriği {index} geçersiz")
+        content_bytes = content.encode("utf-8")
+        total_rule_bytes += len(content_bytes)
+        if len(content_bytes) > MAX_PROTON_RULE_BYTES or total_rule_bytes > MAX_PROTON_TOTAL_RULE_BYTES:
+            raise ValueError("Proton YARA içeriği izin verilen boyutu aşıyor")
+        digest = str(raw_rule.get("sha256", "")).lower()
+        if not PROTON_SHA256_PATTERN.fullmatch(digest) or hashlib.sha256(content_bytes).hexdigest() != digest:
+            raise ValueError(f"Proton YARA özeti {index} uyuşmuyor")
+        rules.append({"name": name, "sha256": digest, "content": content})
+
+    if not signatures and not rules:
+        raise ValueError("Proton paketi boş")
+    return {
+        "version": version,
+        "created_at": created_at,
+        "signatures": signatures,
+        "rules": rules,
+    }
+
+
+def install_proton_from_stdin() -> int:
+    try:
+        raw_payload = sys.stdin.buffer.read(MAX_PROTON_PAYLOAD_BYTES + 1)
+        if len(raw_payload) > MAX_PROTON_PAYLOAD_BYTES:
+            raise ValueError("Proton yükü izin verilen boyutu aşıyor")
+        payload = validate_proton_payload(json.loads(raw_payload.decode("utf-8")))
+
+        compiled, yara_result = load_yara_rules(payload["rules"])
+        if yara is None or compiled is None:
+            raise ValueError(yara_result.get("message", "YARA kuralları doğrulanamadı"))
+
+        with open_database() as connection:
+            metadata = dict(connection.execute(
+                "SELECT key, value FROM signature_metadata"
+            ).fetchall())
+            current_version = metadata.get("version", BUILTIN_SIGNATURE_VERSION)
+            if proton_version_tuple(payload["version"]) < proton_version_tuple(current_version):
+                raise ValueError("Eski Proton sürümüne dönüş reddedildi")
+
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM signatures WHERE source = 'proton'")
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO signatures (
+                  sha256, file_size, name, severity, source, enabled, added_at
+                ) VALUES (?, ?, ?, ?, 'proton', 1, ?)
+                """,
+                [
+                    (
+                        signature["sha256"],
+                        signature["file_size"],
+                        signature["name"],
+                        signature["severity"],
+                        payload["created_at"],
+                    )
+                    for signature in payload["signatures"]
+                ],
+            )
+            connection.execute("DELETE FROM proton_yara_rules")
+            connection.executemany(
+                """
+                INSERT INTO proton_yara_rules (name, sha256, source_text, installed_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (rule["name"], rule["sha256"], rule["content"], payload["created_at"])
+                    for rule in payload["rules"]
+                ],
+            )
+            for key, value in {
+                "version": payload["version"],
+                "database_name": SIGNATURE_DATABASE_NAME,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "source": "github-release",
+            }.items():
+                connection.execute(
+                    """
+                    INSERT INTO signature_metadata (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, value),
+                )
+
+        emit(
+            "signature-updated",
+            **signature_status_payload(),
+            installed=True,
+            yara_rule_files=len(payload["rules"]),
+        )
+        return 0
+    except (UnicodeError, json.JSONDecodeError, ValueError, OSError, sqlite3.Error) as error:
+        emit("error", code="PROTON_INSTALL_FAILED", message=f"Proton kurulamadı: {error}")
         return 2
 
 
@@ -818,23 +1542,25 @@ def scan_targets(targets: list[Path], mode: str) -> int:
         emit("error", code="NO_TARGETS", message="Taranacak klasör bulunamadı.")
         return 2
 
-    emit("started", mode=mode, targets=[target.name for target in targets], max_files=MAX_FILES)
+    max_files = int(read_app_settings()["scan_max_files"])
+    emit("started", mode=mode, targets=[target.name for target in targets], max_files=max_files)
     scanned = 0
     findings: list[Finding] = []
     signatures = load_signatures()
     yara_rules, yara_status = load_yara_rules()
+    exclusions = load_exclusion_set()
     emit("engine-status", yara=yara_status)
 
-    for file_path in iter_files(targets):
+    for file_path in iter_files(targets, max_files, exclusions):
         scanned += 1
-        findings.extend(inspect_file(file_path, signatures, yara_rules))
+        findings.extend(inspect_file(file_path, signatures, yara_rules, exclusions))
         if scanned % PROGRESS_INTERVAL == 0:
-            emit("progress", scanned=scanned, max_files=MAX_FILES)
+            emit("progress", scanned=scanned, max_files=max_files)
 
     confirmed = [finding for finding in findings if finding.kind in {"test-signature", "signature"}]
     review = [finding for finding in findings if finding.kind in {"review", "yara"}]
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
-    limited = scanned >= MAX_FILES
+    limited = scanned >= max_files
     history_saved = False
     scan_run_id: int | None = None
     try:
@@ -869,7 +1595,7 @@ def scan_targets(targets: list[Path], mode: str) -> int:
 
 
 def quick_scan() -> int:
-    return scan_targets(home_scan_targets(), "quick")
+    return scan_targets(configured_scan_targets(), "quick")
 
 
 def custom_scan(raw_target: str) -> int:
@@ -905,13 +1631,23 @@ def main() -> int:
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
     action.add_argument("--signature-status", action="store_true", help="Yerel imza veritabanı durumunu oku")
     action.add_argument("--signature-update", action="store_true", help="Paketle gelen yerel imzaları yükle")
+    action.add_argument("--install-proton-stdin", action="store_true", help="Doğrulanmış Proton yükünü standart girdiden kur")
     action.add_argument("--yara-status", action="store_true", help="YARA motorunu ve kurallarını doğrula")
+    action.add_argument("--settings", action="store_true", help="Uygulama ayarlarını oku")
+    action.add_argument("--setting-set", metavar="ANAHTAR", help="Tek bir uygulama ayarını güncelle")
+    action.add_argument("--exclusions", action="store_true", help="Etkin istisnaları ve değişiklik geçmişini oku")
+    action.add_argument("--exclusion-add-folder", metavar="KLASOR", help="Klasör istisnası ekle")
+    action.add_argument("--exclusion-add-extension", metavar="UZANTI", help="Dosya uzantısı istisnası ekle")
+    action.add_argument("--exclusion-add-hash", metavar="SHA256", help="Güvenilir SHA-256 istisnası ekle")
+    action.add_argument("--exclusion-remove", metavar="ID", type=int, help="İstisnayı kaldır")
     action.add_argument("--quarantine", metavar="DOSYA", help="Onaylanan dosyayı karantinaya taşı")
     action.add_argument("--quarantine-list", action="store_true", help="Etkin karantina kayıtlarını oku")
     action.add_argument("--restore", metavar="ID", type=int, help="Karantinadaki dosyayı geri yükle")
     action.add_argument("--delete-quarantine", metavar="ID", type=int, help="Karantinadaki dosyayı kalıcı sil")
     parser.add_argument("--reason", default="Kullanıcı onaylı tarama bulgusu", help="Karantina nedeni")
+    parser.add_argument("--label", default=None, help="İstisna açıklaması")
     parser.add_argument("--limit", type=int, default=5, help="Döndürülecek en fazla geçmiş kaydı")
+    parser.add_argument("--value-json", default="null", help="Ayar için JSON değeri")
     parser.add_argument("--json-lines", action="store_true", help="Electron IPC için JSON Lines çıktısı")
     args = parser.parse_args()
 
@@ -923,8 +1659,24 @@ def main() -> int:
         return signature_status()
     if args.signature_update:
         return signature_update()
+    if args.install_proton_stdin:
+        return install_proton_from_stdin()
     if args.yara_status:
         return yara_status()
+    if args.settings:
+        return settings_status()
+    if args.setting_set:
+        return setting_update(args.setting_set, args.value_json)
+    if args.exclusions:
+        return exclusions_status()
+    if args.exclusion_add_folder:
+        return exclusion_add("folder", args.exclusion_add_folder, args.label)
+    if args.exclusion_add_extension:
+        return exclusion_add("extension", args.exclusion_add_extension, args.label)
+    if args.exclusion_add_hash:
+        return exclusion_add("hash", args.exclusion_add_hash, args.label)
+    if args.exclusion_remove is not None:
+        return exclusion_remove(args.exclusion_remove)
     if args.watch:
         return watch_targets()
     if args.scan_path:

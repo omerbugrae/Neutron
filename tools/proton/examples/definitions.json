@@ -1,0 +1,19 @@
+{
+  "database_name": "Proton",
+  "version": "1.00.002",
+  "minimum_engine_version": "0.1.0",
+  "signatures": [
+    {
+      "sha256": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f",
+      "file_size": 68,
+      "name": "EICAR güvenli antivirüs test imzası",
+      "severity": "high"
+    }
+  ],
+  "yara_rules": [
+    {
+      "name": "proton_safe_test.yar",
+      "path": "rules/proton_safe_test.yar"
+    }
+  ]
+}
