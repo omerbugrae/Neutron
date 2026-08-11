@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Neutron</title>
+    <link rel="stylesheet" href="liquidglass-ui.css" />
+    <script src="liquidglass-engine.js" defer></script>
+    <script src="titlebar-controls.js" defer></script>
+  </head>
+  <body>
+    <svg class="icon-sprite" aria-hidden="true">
+      <symbol id="icon-home" viewBox="0 0 24 24">
+        <path d="M3.8 10.7 12 3.9l8.2 6.8v8.8a1 1 0 0 1-1 1h-5.1v-6.1H9.9v6.1H4.8a1 1 0 0 1-1-1Z" />
+      </symbol>
+      <symbol id="icon-scan" viewBox="0 0 24 24">
+        <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3M7 12h10" />
+      </symbol>
+      <symbol id="icon-shield" viewBox="0 0 24 24">
+        <path d="M12 3.2 20 6v5.6c0 5.1-3.2 8.2-8 10.2-4.8-2-8-5.1-8-10.2V6Z" />
+        <path d="m8.4 12.2 2.3 2.3 4.9-5" />
+      </symbol>
+      <symbol id="icon-box" viewBox="0 0 24 24">
+        <path d="m4 7 8-4 8 4-8 4Z" />
+        <path d="M4 7v10l8 4 8-4V7M12 11v10" />
+      </symbol>
+      <symbol id="icon-history" viewBox="0 0 24 24">
+        <path d="M4.2 8.2A8.5 8.5 0 1 1 3.5 13" />
+        <path d="M3.5 4.5v4h4M12 7.5V12l3 2" />
+      </symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" />
+      </symbol>
+      <symbol id="icon-bell" viewBox="0 0 24 24">
+        <path d="M18 9a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8" />
+        <path d="M14.2 21h-4.4" />
+      </symbol>
+      <symbol id="icon-file" viewBox="0 0 24 24">
+        <path d="M6 3h8l4 4v14H6Z" />
+        <path d="M14 3v5h5M9 13h6M9 17h4" />
+      </symbol>
+      <symbol id="icon-pulse" viewBox="0 0 24 24">
+        <path d="M3 12h4l2-5 4 10 2-5h6" />
+      </symbol>
+      <symbol id="icon-globe" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9S14.4 18.5 12 21c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3Z" />
+      </symbol>
+      <symbol id="icon-chip" viewBox="0 0 24 24">
+        <rect x="6" y="6" width="12" height="12" rx="2" />
+        <path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4M10 10h4v4h-4Z" />
+      </symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24">
+        <path d="M5 12h14M14 7l5 5-5 5" />
+      </symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24">
+        <path d="m9 6 6 6-6 6" />
+      </symbol>
+    </svg>
+
+    <div class="css-fallback-background" aria-hidden="true"></div>
+
+    <header
+      class="native-titlebar glass-dom-surface"
+      data-liquidglass
+      data-glass-id="titlebar"
+      data-glass-radius="4"
+      data-glass-depth="0.4"
+      data-glass-refraction="0.5"
+      data-glass-dispersion="0.18"
+      data-glass-frost="0.1"
+      data-glass-specular="0.6"
+      data-glass-interactive="false"
+    >
+      <a class="titlebar-brand" href="#dashboard" aria-label="Neutron ana sayfa">
+        <span class="neutron-symbol" aria-hidden="true">
+          <i class="neutron-particle neutron-particle--one"></i>
+          <i class="neutron-particle neutron-particle--two"></i>
+          <i class="neutron-particle neutron-particle--three"></i>
+          <i class="neutron-orbit neutron-orbit--one"></i>
+          <i class="neutron-orbit neutron-orbit--two"></i>
+        </span>
+        <span class="titlebar-product">Neutron</span>
+      </a>
+      <div class="titlebar-drag-space" aria-hidden="true"></div>
+      <div class="titlebar-state" role="status" aria-live="polite">
+        <span class="titlebar-state__dot titlebar-state__dot--pending"></span>
+        Motor bağlantısı bekleniyor
+      </div>
+      <div class="titlebar-controls">
+        <button class="titlebar-control" type="button" data-window-action="minimize" aria-label="Küçült">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6h7" /></svg>
+        </button>
+        <button class="titlebar-control" type="button" data-window-action="toggleMaximize" aria-label="Büyüt">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7" rx="1" /></svg>
+        </button>
+        <button class="titlebar-control titlebar-control--close" type="button" data-window-action="close" aria-label="Kapat">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="application-layout">
+      <aside
+        class="sidebar glass-dom-surface"
+        data-liquidglass
+        data-glass-id="sidebar"
+        data-glass-radius="28"
+        data-glass-depth="0.72"
+        data-glass-refraction="0.82"
+        data-glass-dispersion="0.36"
+        data-glass-frost="0.14"
+        data-glass-specular="0.78"
+        data-glass-interactive="true"
+      >
+        <div class="sidebar-edition">
+          <span>NEUTRON</span>
+          <strong>STANDARD</strong>
+        </div>
+
+        <nav class="primary-navigation" aria-label="Ana navigasyon">
+          <a class="navigation-item is-active" href="#dashboard" aria-current="page">
+            <svg aria-hidden="true"><use href="#icon-home"></use></svg>
+            <span>Genel Bakış</span>
+          </a>
+          <a class="navigation-item" href="#scan">
+            <svg aria-hidden="true"><use href="#icon-scan"></use></svg>
+            <span>Virüs Taraması</span>
+          </a>
+          <a class="navigation-item" href="#protection">
+            <svg aria-hidden="true"><use href="#icon-shield"></use></svg>
+            <span>Koruma</span>
+          </a>
+          <button class="navigation-item" type="button" disabled>
+            <svg aria-hidden="true"><use href="#icon-box"></use></svg>
+            <span>Karantina</span>
+          </button>
+          <a class="navigation-item" href="#activity">
+            <svg aria-hidden="true"><use href="#icon-history"></use></svg>
+            <span>Etkinlik</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="sidebar-health">
+          <div class="sidebar-health__indicator">
+            <span></span>
+            <div>
+              <strong>Kurulum bekleniyor</strong>
+              <small>Motor henüz bağlanmadı</small>
+            </div>
+          </div>
+        </div>
+
+        <button
+          class="navigation-item navigation-item--settings"
+          type="button"
+          disabled
+        >
+          <svg aria-hidden="true"><use href="#icon-settings"></use></svg>
+          <span>Ayarlar</span>
+        </button>
+      </aside>
+
+      <main class="dashboard" id="dashboard">
+        <header class="dashboard-header">
+          <div class="dashboard-heading">
+            <p class="section-eyebrow">GENEL BAKIŞ</p>
+            <h1>Güvenlik merkezi hazır.</h1>
+            <p class="dashboard-subtitle">Neutron arayüzü hazır; koruma motoru sonraki aşamada bağlanacak.</p>
+          </div>
+
+          <div class="header-actions">
+            <button
+              class="database-pill glass-dom-surface"
+              type="button"
+              data-liquidglass
+              data-glass-id="database-status"
+              data-glass-radius="24"
+              data-glass-depth="0.48"
+              data-glass-refraction="0.64"
+              data-glass-dispersion="0.24"
+              data-glass-frost="0.08"
+              data-glass-specular="0.72"
+              data-glass-interactive="true"
+            >
+              <span class="live-dot live-dot--pending"></span>
+              Tanım verisi bekleniyor
+            </button>
+            <button
+              class="icon-button glass-dom-surface"
+              type="button"
+              aria-label="Bildirimler"
+              data-liquidglass
+              data-glass-id="notifications"
+              data-glass-radius="22"
+              data-glass-depth="0.52"
+              data-glass-refraction="0.7"
+              data-glass-dispersion="0.3"
+              data-glass-frost="0.06"
+              data-glass-specular="0.82"
+              data-glass-interactive="true"
+            >
+              <svg aria-hidden="true"><use href="#icon-bell"></use></svg>
+            </button>
+          </div>
+        </header>
+
+        <section
+          class="hero-protection glass-dom-surface"
+          id="scan"
+          data-liquidglass
+          data-glass-id="protection-hero"
+          data-glass-radius="38"
+          data-glass-depth="0.92"
+          data-glass-refraction="1"
+          data-glass-dispersion="0.58"
+          data-glass-frost="0.1"
+          data-glass-specular="1"
+          data-glass-interactive="true"
+        >
+          <div class="hero-shield-column">
+            <div class="hero-shield" role="img" aria-label="Koruma motoru bağlantı bekliyor">
+              <span class="hero-shield__caustic"></span>
+              <span class="hero-shield__orbit hero-shield__orbit--outer"></span>
+              <span class="hero-shield__orbit hero-shield__orbit--inner"></span>
+              <span class="hero-shield__body">
+                <svg aria-hidden="true"><use href="#icon-shield"></use></svg>
+              </span>
+            </div>
+          </div>
+
+          <div class="hero-message">
+            <div class="protection-label">
+              <span class="live-dot"></span>
+              KORUMA HAZIRLANIYOR
+            </div>
+            <h2>Neutron korumaya hazırlanıyor.</h2>
+            <p>Dosyalar, çalışan işlemler ve sistemin kritik alanları güvenlik motoruna bağlanmaya hazır.</p>
+            <div class="hero-actions">
+              <button
+                class="primary-action glass-prominent-button"
+                type="button"
+                disabled
+                title="Tarama motoru bağlandığında kullanılabilir"
+                data-liquidglass
+                data-glass-id="quick-scan-action"
+                data-glass-radius="28"
+                data-glass-depth="0.78"
+                data-glass-refraction="0.88"
+                data-glass-dispersion="0.42"
+                data-glass-frost="0.04"
+                data-glass-specular="1"
+                data-glass-interactive="false"
+              >
+                Hızlı tarama başlat
+                <svg aria-hidden="true"><use href="#icon-arrow"></use></svg>
+              </button>
+              <button class="text-action" type="button">
+                Tarama seçenekleri
+                <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
+              </button>
+            </div>
+          </div>
+
+          <dl class="hero-facts">
+            <div class="hero-fact">
+              <dt>Son tarama</dt>
+              <dd>Henüz yapılmadı</dd>
+            </div>
+            <div class="hero-fact">
+              <dt>Bulunan tehdit</dt>
+              <dd>—</dd>
+            </div>
+            <div class="hero-fact">
+              <dt>Korunan alan</dt>
+              <dd>3 modül</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="protection-section" id="protection">
+          <header class="content-section-header">
+            <div>
+              <p class="section-eyebrow">KORUMA MODÜLLERİ</p>
+              <h2>Sistem savunması</h2>
+            </div>
+            <button class="section-link" type="button">
+              Tümünü yönet
+              <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
+            </button>
+          </header>
+
+          <div class="module-grid">
+            <article
+              class="protection-module glass-dom-surface"
+              data-liquidglass
+              data-glass-id="module-file-protection"
+              data-glass-radius="26"
+              data-glass-depth="0.66"
+              data-glass-refraction="0.78"
+              data-glass-dispersion="0.3"
+              data-glass-frost="0.1"
+              data-glass-specular="0.76"
+              data-glass-interactive="true"
+            >
+              <header class="module-header">
+                <span class="module-icon"><svg aria-hidden="true"><use href="#icon-file"></use></svg></span>
+                <span class="module-status module-status--pending"><i></i>Motor bekleniyor</span>
+              </header>
+              <h3>Dosya koruması</h3>
+              <p>Yeni dosyaları, değişiklikleri ve indirmeleri denetler.</p>
+              <button
+                class="module-open"
+                type="button"
+                aria-label="Dosya koruması ayrıntılarını aç"
+              >
+                <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
+              </button>
+            </article>
+
+            <article
+              class="protection-module glass-dom-surface"
+              data-liquidglass
+              data-glass-id="module-behavior-monitoring"
+              data-glass-radius="26"
+              data-glass-depth="0.66"
+              data-glass-refraction="0.8"
+              data-glass-dispersion="0.32"
+              data-glass-frost="0.08"
+              data-glass-specular="0.78"
+              data-glass-interactive="true"
+            >
+              <header class="module-header">
+                <span class="module-icon"><svg aria-hidden="true"><use href="#icon-pulse"></use></svg></span>
+                <span class="module-status module-status--pending"><i></i>Motor bekleniyor</span>
+              </header>
+              <h3>Davranış izleme</h3>
+              <p>Şüpheli süreç hareketlerini ve kalıcılık girişimlerini izler.</p>
+              <button
+                class="module-open"
+                type="button"
+                aria-label="Davranış izleme ayrıntılarını aç"
+              >
+                <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
+              </button>
+            </article>
+
+            <article
+              class="protection-module glass-dom-surface"
+              data-liquidglass
+              data-glass-id="module-web-protection"
+              data-glass-radius="26"
+              data-glass-depth="0.66"
+              data-glass-refraction="0.76"
+              data-glass-dispersion="0.34"
+              data-glass-frost="0.12"
+              data-glass-specular="0.72"
+              data-glass-interactive="true"
+            >
+              <header class="module-header">
+                <span class="module-icon"><svg aria-hidden="true"><use href="#icon-globe"></use></svg></span>
+                <span class="module-status module-status--pending"><i></i>Motor bekleniyor</span>
+              </header>
+              <h3>Web koruması</h3>
+              <p>Tehlikeli bağlantıları ve indirilen içerikleri engellemeye hazırlanır.</p>
+              <button
+                class="module-open"
+                type="button"
+                aria-label="Web koruması ayrıntılarını aç"
+              >
+                <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
+              </button>
+            </article>
+
+            <article
+              class="protection-module protection-module--pending glass-dom-surface"
+              data-liquidglass
+              data-glass-id="module-neutron-engine"
+              data-glass-radius="26"
+              data-glass-depth="0.58"
+              data-glass-refraction="0.7"
+              data-glass-dispersion="0.26"
+              data-glass-frost="0.16"
+              data-glass-specular="0.66"
+              data-glass-interactive="true"
+            >
+              <header class="module-header">
+                <span class="module-icon"><svg aria-hidden="true"><use href="#icon-chip"></use></svg></span>
+                <span class="module-status module-status--pending"><i></i>Hazırlanıyor</span>
+              </header>
+              <h3>Neutron Engine</h3>
+              <p>Yerel tarama motoru ilerleyen aşamada bu yüzeye bağlanacak.</p>
+              <button
+                class="module-open"
+                type="button"
+                aria-label="Neutron Engine ayrıntılarını aç"
+              >
+                <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
+              </button>
+            </article>
+          </div>
+        </section>
+
+        <section class="activity-section" id="activity">
+          <article
+            class="activity-card glass-dom-surface"
+            data-liquidglass
+            data-glass-id="security-activity"
+            data-glass-radius="28"
+            data-glass-depth="1.12"
+            data-glass-refraction="1.34"
+            data-glass-dispersion="0.58"
+            data-glass-frost="0.05"
+            data-glass-specular="1.28"
+            data-glass-tint="rgba(82, 236, 207, 0.2)"
+            data-glass-interactive="true"
+          >
+            <header class="activity-card__header">
+              <div>
+                <p class="section-eyebrow">SON ETKİNLİK</p>
+                <h2>Güvenlik geçmişi</h2>
+              </div>
+              <svg class="activity-header-icon" aria-hidden="true"><use href="#icon-history"></use></svg>
+            </header>
+            <div class="empty-activity">
+              <span class="empty-activity__mark"><svg aria-hidden="true"><use href="#icon-shield"></use></svg></span>
+              <div>
+                <strong>Henüz bir güvenlik olayı yok</strong>
+                <p>Tehditler ve alınan önlemler burada görünecek.</p>
+              </div>
+            </div>
+          </article>
+
+          <article
+            class="health-card glass-dom-surface"
+            data-liquidglass
+            data-glass-id="protection-coverage"
+            data-glass-radius="28"
+            data-glass-depth="1.16"
+            data-glass-refraction="1.38"
+            data-glass-dispersion="0.66"
+            data-glass-frost="0.045"
+            data-glass-specular="1.34"
+            data-glass-tint="rgba(134, 123, 255, 0.22)"
+            data-glass-interactive="true"
+          >
+            <p class="section-eyebrow">KORUMA KAPSAMI</p>
+            <div class="health-score">
+              <div
+                class="health-score__ring"
+                role="progressbar"
+                aria-label="Planlanan dört koruma modülünün üçü arayüzde hazır"
+                aria-valuemin="0"
+                aria-valuemax="4"
+                aria-valuenow="3"
+              >
+                <span>3</span>
+                <small>/4</small>
+              </div>
+              <div class="health-score__copy">
+                <strong>3 modül arayüzde hazır</strong>
+                <p>Neutron Engine bağlantısı sonraki geliştirme aşamasında tamamlanacak.</p>
+              </div>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+  </body>
+</html>
