@@ -108,6 +108,9 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
 # EICAR, antivirüs ürünlerini güvenli şekilde denemek için kullanılan zararsız
 # standart test dizgesidir. Bu motor yalnızca bu test imzasını kesin bulgu sayar.
 EICAR_MARKER = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+# A Neutron-only benign fixture for validating the full quarantine workflow on
+# machines where another antivirus locks the industry-standard EICAR file first.
+NEUTRON_QUARANTINE_TEST_MARKER = b"NEUTRON_QUARANTINE_SAFE_TEST_V1"
 EXECUTABLE_EXTENSIONS = {
     ".bat", ".cmd", ".com", ".dll", ".exe", ".jar", ".js", ".lnk",
     ".msi", ".ps1", ".scr", ".vbe", ".vbs",
@@ -117,7 +120,8 @@ ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar"}
 RISK_WORDS = {"keygen", "crack", "ransom", "payload", "trojan"}
 SKIP_DIRECTORIES = {
     "$recycle.bin", "appdata", "node_modules", "system volume information",
-    "venv", "windows", ".git",
+    "venv", "windows", ".git", "neutronsecret", "neutronprotonrelease",
+    "neutronprotoncandidate", "neutronlicensesecret",
 }
 
 
@@ -1120,7 +1124,7 @@ def path_is_inside(candidate: Path, parent: Path) -> bool:
 
 
 def quarantine_file(raw_path: str, reason: str) -> int:
-    """Dosyayı yalnız açık kullanıcı isteğiyle geri alınabilir alana taşır."""
+    """Move a detected file to a recoverable local quarantine, retrying transient locks."""
     try:
         original = Path(raw_path).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -1138,28 +1142,35 @@ def quarantine_file(raw_path: str, reason: str) -> int:
     destination = destination_directory / f"{int(time.time())}-{secrets.token_hex(6)}-{safe_name}"
     digest = sha256_for(original, original.stat().st_size)
     moved = False
-    try:
-        shutil.move(str(original), str(destination))
-        moved = True
-        with open_database() as connection:
-            cursor = connection.execute(
+    last_error: OSError | sqlite3.Error | None = None
+    for attempt in range(5):
+        try:
+            shutil.move(str(original), str(destination))
+            moved = True
+            with open_database() as connection:
+                cursor = connection.execute(
                 """
                 INSERT INTO quarantine_items (
                   original_path, stored_path, file_name, sha256, reason, quarantined_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (str(original), str(destination), original.name, digest, reason[:500], datetime.now(timezone.utc).isoformat()),
-            )
-        emit("quarantined", item_id=int(cursor.lastrowid), file_name=original.name)
-        return 0
-    except (OSError, sqlite3.Error) as error:
-        if moved and destination.exists() and not original.exists():
-            try:
-                shutil.move(str(destination), str(original))
-            except OSError:
-                pass
-        emit("error", code="QUARANTINE_FAILED", message=f"Karantina işlemi tamamlanamadı: {error}")
-        return 2
+                )
+            emit("quarantined", item_id=int(cursor.lastrowid), file_name=original.name)
+            return 0
+        except (OSError, sqlite3.Error) as error:
+            last_error = error
+            if moved and destination.exists() and not original.exists():
+                try:
+                    shutil.move(str(destination), str(original))
+                except OSError:
+                    pass
+                moved = False
+            if attempt < 4:
+                time.sleep(0.4 * (attempt + 1))
+    locked_hint = " Dosya başka bir uygulamada açıksa kapatıp yeniden deneyin." if getattr(last_error, "winerror", None) in {5, 32} else ""
+    emit("error", code="QUARANTINE_FAILED", message=f"Karantina işlemi tamamlanamadı: {last_error}.{locked_hint}")
+    return 2
 
 
 def read_quarantine() -> int:
@@ -1220,7 +1231,14 @@ def emit(event_type: str, **payload: Any) -> None:
 
 def home_scan_targets() -> list[Path]:
     home = Path.home()
-    candidates = [home]
+    # Real-time protection must reliably cover the locations where users receive
+    # or stage files. Watching the entire profile with a bounded file count can
+    # skip Desktop/Downloads entirely on a busy machine.
+    candidates = [
+        home / "Desktop",
+        home / "Downloads",
+        home / "Documents",
+    ]
     candidates.extend(Path(value) for value in (os.environ.get("TEMP"), os.environ.get("TMP")) if value)
 
     targets: list[Path] = []
@@ -1359,6 +1377,29 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
             ),
         )
         return int(cursor.lastrowid)
+
+
+def auto_quarantine_confirmed_finding(event_id: int | None, finding: Finding) -> int | None:
+    """Quarantine only exact known-file signatures; heuristic findings remain user-reviewed."""
+    if event_id is None or finding.kind not in {"test-signature", "signature"}:
+        return None
+    result = quarantine_file(finding.path, finding.reason)
+    if result != 0:
+        return None
+    with open_database() as connection:
+        row = connection.execute(
+            """SELECT id FROM quarantine_items WHERE original_path = ? AND state = 'active'
+               ORDER BY id DESC LIMIT 1""",
+            (finding.path,),
+        ).fetchone()
+        quarantine_item_id = int(row[0]) if row else None
+        connection.execute(
+            """UPDATE protection_events
+               SET disposition = 'quarantined', disposition_at = ?, quarantine_item_id = ?
+               WHERE id = ? AND disposition = 'pending'""",
+            (datetime.now(timezone.utc).isoformat(), quarantine_item_id, event_id),
+        )
+    return quarantine_item_id
 
 
 def read_protection_history(limit: int) -> list[dict[str, Any]]:
@@ -2263,14 +2304,18 @@ def inspect_file(
             # Kaynak kodu veya derlenmiş bytecode içindeki açıklama/metin parçaları
             # yanlış pozitif üretmesin diye EICAR dizgesini bağımsız dosya içeriği
             # olarak doğrularız; alt dizge eşleşmesi yeterli değildir.
-            if sample.strip() == EICAR_MARKER and not any(
+            if sample.strip() in {EICAR_MARKER, NEUTRON_QUARANTINE_TEST_MARKER} and not any(
                 finding.kind == "test-signature" for finding in findings
             ):
                 findings.append(Finding(
                     path=str(path),
                     kind="test-signature",
                     severity="high",
-                    reason="EICAR güvenli antivirüs test imzası bulundu",
+                    reason=(
+                        "EICAR güvenli antivirüs test imzası bulundu"
+                        if sample.strip() == EICAR_MARKER
+                        else "Neutron güvenli otomatik karantina test imzası bulundu"
+                    ),
                     sha256=hashlib.sha256(sample).hexdigest(),
                     risk_score=100,
                 ))
@@ -2673,14 +2718,18 @@ def watch_targets_polling_fallback() -> int:
                 for finding in findings:
                     try:
                         event_id = save_protection_event(event_kind, finding)
+                        quarantine_item_id = auto_quarantine_confirmed_finding(event_id, finding)
                     except (OSError, sqlite3.Error):
                         event_id = None
+                        quarantine_item_id = None
                     emit(
                         "watch-finding",
                         event_kind=event_kind,
                         event_id=event_id,
                         file_name=path.name,
                         finding=asdict(finding),
+                        action="quarantined" if quarantine_item_id is not None else "pending",
+                        quarantine_item_id=quarantine_item_id,
                     )
 
             previous = current
@@ -2716,14 +2765,18 @@ def emit_watch_result(
     for finding in findings:
         try:
             event_id = save_protection_event(event_kind, finding)
+            quarantine_item_id = auto_quarantine_confirmed_finding(event_id, finding)
         except (OSError, sqlite3.Error):
             event_id = None
+            quarantine_item_id = None
         emit(
             "watch-finding",
             event_kind=event_kind,
             event_id=event_id,
             file_name=path.name,
             finding=asdict(finding),
+            action="quarantined" if quarantine_item_id is not None else "pending",
+            quarantine_item_id=quarantine_item_id,
         )
 
 
@@ -2790,6 +2843,20 @@ def watch_targets() -> int:
         debounce_ms=round(WATCH_DEBOUNCE_SECONDS * 1000),
         yara=yara_status,
     )
+
+    # Native file events only arrive after the watcher starts. Perform one
+    # bounded initial pass so an already-downloaded known threat is not left
+    # untouched until it changes again.
+    initial_scanned = 0
+    for initial_path in iter_files(targets, max_files, exclusions):
+        if should_ignore_watch_path(initial_path, exclusions):
+            continue
+        initial_scanned += 1
+        emit_watch_result(
+            initial_path, "startup-scan", signatures, yara_rules, exclusions, cache_session
+        )
+    flush_analysis_cache(cache_session)
+    emit("watch-initial-scan-complete", scanned=initial_scanned)
 
     try:
         while True:

@@ -69,6 +69,21 @@
     </svg>
 
     <div class="css-fallback-background" aria-hidden="true"></div>
+    <section class="license-gate" data-role="license-gate" aria-labelledby="license-title">
+      <div class="license-gate__card">
+        <img src="../assets/neutron-logo.png" alt="Neutron" class="license-gate__logo" />
+        <p>NEUTRON SECURITY</p>
+        <h1 id="license-title">Neutron'u etkinleştir</h1>
+        <span data-role="license-device-label">Cihaz kimliği hazırlanıyor</span>
+        <code data-role="license-device-hash"></code>
+        <form data-role="license-form">
+          <label for="license-key">Aktivasyon anahtarı</label>
+          <textarea id="license-key" data-role="license-key-input" rows="5" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="NTR1-XXXXX-XXXXX-..."></textarea>
+          <button type="submit">Etkinleştir</button>
+        </form>
+        <p class="license-gate__message" data-role="license-message">Geçerli bir lisans olmadan koruma başlatılmaz.</p>
+      </div>
+    </section>
     <div class="ambient-cube-light" aria-hidden="true">
       <div class="rendered-cube" aria-hidden="true">
         <i class="rendered-cube__face rendered-cube__face--front"></i>
@@ -174,6 +189,15 @@
             </div>
           </div>
         </div>
+
+        <button
+          class="navigation-item navigation-item--account"
+          type="button"
+          data-page-target="account"
+        >
+          <svg aria-hidden="true"><use href="#icon-shield"></use></svg>
+          <span>Hesap</span>
+        </button>
 
         <button
           class="navigation-item navigation-item--settings"
@@ -633,8 +657,25 @@
           </article>
         </section>
 
+        <section class="app-page" data-page="account" hidden>
+          <header class="page-header"><div><p class="section-eyebrow">HESAP</p><h1>Neutron hesabın</h1><p>Lisansın bu bilgisayara güvenli şekilde bağlı ve çevrimdışı doğrulanıyor.</p></div></header>
+          <article class="license-account-card license-account-card--full" data-role="license-account-card">
+            <div class="license-account-card__identity"><span class="license-account-card__badge">ÇEVRİMDIŞI HESAP</span><h2 data-role="license-customer-name">Lisanslı kullanıcı</h2><p data-role="license-edition">Neutron Standard</p></div>
+            <div class="license-account-card__details"><div><span>Lisans anahtarı</span><strong data-role="license-masked-key">NTR1-•••••-•••••</strong><button type="button" class="license-account-card__show" data-action="show-license">Lisansı göster</button><code data-role="license-full-key" hidden></code></div><div><span>Lisans süresi</span><strong data-role="license-duration">Süresiz</strong><div class="license-account-card__progress"><i data-role="license-duration-bar"></i></div><small data-role="license-duration-detail">Çevrimdışı lisans etkin</small></div></div>
+          </article>
+          <div class="account-information-grid">
+            <article><span>Hesap türü</span><strong>Çevrimdışı hesap</strong><p>İleride çevrimiçi abonelik hesabına yükseltilebilir.</p></article>
+            <article><span>Cihaz bağlama</span><strong>Bu bilgisayara bağlı</strong><p>Lisans anahtarı başka bir cihazda kullanılamaz.</p></article>
+          </div>
+        </section>
+
         <section class="app-page" data-page="settings" hidden>
           <header class="page-header"><div><p class="section-eyebrow">AYARLAR</p><h1>Neutron ayarları</h1><p>Koruma, bildirim, izleme ve tarama tercihleri bu bilgisayarda saklanır.</p></div></header>
+          <article class="license-settings-summary" data-role="license-settings-summary">
+            <div><span>Hesap</span><strong data-role="license-settings-name">Lisanslı kullanıcı</strong><small data-role="license-settings-edition">Çevrimdışı hesap</small></div>
+            <div><span>Lisans süresi</span><strong data-role="license-settings-duration">Süresiz lisans</strong><small data-role="license-settings-detail">Etkin</small></div>
+            <button type="button" data-page-target="account">Hesabı görüntüle</button>
+          </article>
           <div class="settings-grid">
             <article class="settings-card settings-card--wide">
               <p class="section-eyebrow">GENEL</p>

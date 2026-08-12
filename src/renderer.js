@@ -2,6 +2,12 @@
   'use strict';
 
   const engine = window.neutronEngine;
+  const licenseGate = document.querySelector('[data-role="license-gate"]');
+  const licenseForm = document.querySelector('[data-role="license-form"]');
+  const licenseInput = document.querySelector('[data-role="license-key-input"]');
+  const licenseMessage = document.querySelector('[data-role="license-message"]');
+  const licenseDeviceHash = document.querySelector('[data-role="license-device-hash"]');
+  const licenseAccountCard = document.querySelector('[data-role="license-account-card"]');
   const dashboard = document.querySelector('.dashboard');
   const pages = [...document.querySelectorAll('.app-page[data-page]')];
   const pageTargets = [...document.querySelectorAll('[data-page-target]')];
@@ -35,6 +41,88 @@
   let pendingProtectionEventId = null;
   let selectedScanMode = 'quick';
   let selectedFullScanDrive = null;
+  let activeThreatDetected = false;
+
+  const initializeLicense = async () => {
+    const status = await engine?.getLicenseStatus?.();
+    if (status?.active) {
+      licenseGate?.setAttribute('hidden', '');
+      return true;
+    }
+    if (licenseGate) licenseGate.removeAttribute('hidden');
+    if (licenseDeviceHash) licenseDeviceHash.textContent = status?.deviceHash || 'Cihaz kimliği alınamadı';
+    if (licenseMessage && status?.message && !/ENOENT/.test(status.message)) licenseMessage.textContent = status.message;
+    return false;
+  };
+
+  const maskLicenseKey = (key) => {
+    const chunks = String(key || '').split('-');
+    if (chunks.length < 3) return 'NTR1-•••••-•••••';
+    return `${chunks[0]}-${chunks[1]}-•••••-•••••-${chunks.at(-1)}`;
+  };
+
+  const renderLicenseAccount = async () => {
+    if (!engine?.getLicenseStatus) return;
+    const result = await engine.getLicenseStatus();
+    const settingsSummary = document.querySelector('[data-role="license-settings-summary"]');
+    if (!result?.active || !result.license) { if (licenseAccountCard) licenseAccountCard.hidden = true; if (settingsSummary) settingsSummary.hidden = true; return; }
+    if (licenseAccountCard) licenseAccountCard.hidden = false;
+    const license = result.license;
+    setText('license-customer-name', license.customerName || license.licenseId || 'Lisanslı kullanıcı');
+    setText('license-edition', `Neutron ${license.edition || 'Standard'} · Çevrimdışı hesap`);
+    setText('license-settings-name', license.customerName || license.licenseId || 'Lisanslı kullanıcı');
+    setText('license-settings-edition', `Neutron ${license.edition || 'Standard'} · Çevrimdışı hesap`);
+    const reveal = await engine.revealLicense?.();
+    const key = reveal?.ok ? reveal.key : '';
+    setText('license-masked-key', maskLicenseKey(key));
+    const expiry = license.expiresAt ? new Date(license.expiresAt) : null;
+    const issued = license.issuedAt ? new Date(license.issuedAt) : null;
+    if (!expiry || Number.isNaN(expiry.getTime())) {
+      setText('license-duration', 'Süresiz lisans'); setText('license-duration-detail', 'Çevrimdışı lisans etkin');
+      setText('license-settings-duration', 'Süresiz lisans'); setText('license-settings-detail', 'Çevrimdışı lisans etkin');
+      textTargets('license-duration-bar').forEach((bar) => { bar.style.width = '100%'; });
+      return;
+    }
+    const total = issued && !Number.isNaN(issued.getTime()) ? Math.max(1, expiry - issued) : 1;
+    const remaining = Math.max(0, expiry - Date.now());
+    const percent = Math.max(8, Math.min(100, (remaining / total) * 100));
+    const days = Math.max(0, Math.ceil(remaining / 86_400_000));
+    setText('license-duration', `${days} gün kaldı`);
+    setText('license-duration-detail', `Bitiş: ${new Intl.DateTimeFormat('tr-TR', { dateStyle: 'long' }).format(expiry)}`);
+    setText('license-settings-duration', `${days} gün kaldı`);
+    setText('license-settings-detail', `Bitiş: ${new Intl.DateTimeFormat('tr-TR', { dateStyle: 'medium' }).format(expiry)}`);
+    textTargets('license-duration-bar').forEach((bar) => { bar.style.width = `${percent}%`; });
+  };
+
+  document.addEventListener('click', async (event) => {
+    const target = event.target.closest('[data-action="show-license"]');
+    if (!target) return;
+    const output = document.querySelector('[data-role="license-full-key"]');
+    if (!output) return;
+    if (!output.hidden) { output.hidden = true; target.textContent = 'Lisansı göster'; return; }
+    const result = await engine?.revealLicense?.();
+    if (!result?.ok) return;
+    output.textContent = result.key; output.hidden = false; target.textContent = 'Lisansı gizle';
+  });
+
+  licenseForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!licenseInput?.value.trim() || !engine?.activateLicense) return;
+    const button = licenseForm.querySelector('button');
+    button.disabled = true;
+    licenseMessage?.classList.remove('is-error');
+    if (licenseMessage) licenseMessage.textContent = 'Lisans doğrulanıyor…';
+    const result = await engine.activateLicense(licenseInput.value);
+    button.disabled = false;
+    if (!result?.ok) {
+      if (licenseMessage) { licenseMessage.textContent = result?.message || 'Etkinleştirme başarısız.'; licenseMessage.classList.add('is-error'); }
+      return;
+    }
+    licenseInput.value = '';
+    licenseGate?.setAttribute('hidden', '');
+    window.location.hash = '#overview';
+    window.location.reload();
+  });
 
   const setText = (role, value) => textTargets(role).forEach((element) => {
     element.textContent = value;
@@ -199,6 +287,20 @@
     setText('scan-page-summary', `En fazla ${scanLimit.toLocaleString('tr-TR')} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
     setButtons('Hızlı tarama başlat', false);
     syncHeroPrimaryAction();
+    if (activeThreatDetected) applyThreatAlertState();
+  };
+
+  const applyThreatAlertState = () => {
+    document.body.classList.add('threat-alert');
+    setText('engine-state', 'Tehdit bulundu ve engellendi');
+    setText('protection-label', 'TEHDİT ENGELLENDİ');
+    setText('dashboard-state-heading', 'Tehdit bulundu ve engellendi.');
+    setText('dashboard-state-detail', 'Neutron tehdidi güvenli karantinaya aldı. Ayrıntıları Etkinlik ve Karantina sayfalarında görebilirsin.');
+    setText('scan-heading', 'Tehdit bulundu ve engellendi.');
+    setText('scan-summary', 'Son tespit karantinaya taşındı. Karantina sayfasından inceleyebilir veya geri yükleyebilirsin.');
+    setText('overview-file-protection-state', 'Tehdit engellendi');
+    setText('sidebar-protection-state', 'Tehdit engellendi');
+    setText('sidebar-protection-detail', 'Dosya güvenli karantinaya alındı');
   };
 
   const refreshProtectionVisualState = () => {
@@ -209,6 +311,11 @@
     document.body.classList.toggle('protection-warning', partiallyProtected);
     document.body.classList.toggle('behavior-protection-off', behaviorKnown && behaviorEnabled === false);
     document.body.classList.toggle('web-protection-off', typeof webEnabled === 'boolean' && webEnabled === false);
+
+    if (activeThreatDetected) {
+      applyThreatAlertState();
+      return;
+    }
 
     if (!protectionKnown || !behaviorKnown || protectionEnabled === false) return;
     if (partiallyProtected) {
@@ -231,16 +338,16 @@
     setText('file-protection-detail', detail);
     setText('sidebar-protection-state', enabled ? 'Koruma etkin' : 'Koruma kapalı');
     setText('sidebar-protection-detail', enabled ? 'Dosyalar gerçek zamanlı izleniyor' : 'Korumayı yeniden açın');
-    setText('dashboard-state-heading', enabled ? 'Bilgisayarınız izleniyor.' : 'Koruma kapalı.');
-    setText('dashboard-state-detail', enabled
-      ? 'Yeni ve değişen dosyalar Neutron tarafından yerel olarak denetleniyor.'
-      : 'Yeni ve değişen dosyalar izlenmiyor. Koruma sayfasından korumayı açın.');
+    setText('dashboard-state-heading', activeThreatDetected ? 'Tehdit bulundu ve engellendi.' : (enabled ? 'Bilgisayarınız izleniyor.' : 'Koruma kapalı.'));
+    setText('dashboard-state-detail', activeThreatDetected
+      ? 'Neutron tehdidi güvenli karantinaya aldı. Ayrıntıları Etkinlik ve Karantina sayfalarında görebilirsin.'
+      : (enabled ? 'Yeni ve değişen dosyalar Neutron tarafından yerel olarak denetleniyor.' : 'Yeni ve değişen dosyalar izlenmiyor. Koruma sayfasından korumayı açın.'));
     setText('overview-file-protection-state', enabled ? 'Koruma etkin' : 'Koruma kapalı');
     setText('protection-label', enabled ? 'KORUMA ETKİN' : 'KORUMA KAPALI');
-    setText('scan-heading', enabled ? 'Neutron seni koruyor.' : 'Korumayı açın.');
-    setText('scan-summary', enabled
-      ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.'
-      : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.');
+    setText('scan-heading', activeThreatDetected ? 'Tehdit bulundu ve engellendi.' : (enabled ? 'Neutron seni koruyor.' : 'Korumayı açın.'));
+    setText('scan-summary', activeThreatDetected
+      ? 'Son tespit karantinaya taşındı. Karantina sayfasından inceleyebilir veya geri yükleyebilirsin.'
+      : (enabled ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.' : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.'));
     setText('protection-toggle-label', enabled ? 'Kapat' : 'Aç');
     if (protectionToggle) {
       protectionToggle.classList.toggle('is-active', enabled);
@@ -434,14 +541,15 @@
     list.replaceChildren();
     const pendingEvents = events.filter((event) => (event.disposition || 'pending') === 'pending');
     const criticalPending = pendingEvents.some((event) => ['high', 'critical'].includes(event.severity));
-    const hadThreatAlert = document.body.classList.contains('threat-alert');
-    document.body.classList.toggle('threat-alert', criticalPending);
+    const latestQuarantined = events.find((event) => event.disposition === 'quarantined');
+    if (latestQuarantined) activeThreatDetected = true;
+    document.body.classList.toggle('threat-alert', criticalPending || activeThreatDetected);
     if (criticalPending) {
       setText('engine-state', 'Tehdit müdahalesi gerekiyor');
       setText('protection-label', 'TEHDİT BULUNDU');
       setText('file-protection-detail', `${pendingEvents.length} gerçek zamanlı koruma olayı işlem bekliyor.`);
-    } else if (hadThreatAlert && !scanning) {
-      setReadyState();
+    } else if (activeThreatDetected) {
+      applyThreatAlertState();
     }
     count.textContent = pendingEvents.length
       ? `${pendingEvents.length} müdahale bekliyor · ${events.length} olay`
@@ -944,11 +1052,24 @@
       return;
     }
 
+    if (event.type === 'watch-initial-scan-complete') {
+      setText('file-protection-detail', `Başlangıç denetimi tamamlandı · ${Number(event.scanned) || 0} mevcut dosya incelendi.`);
+      return;
+    }
+
     if (event.type === 'watch-finding') {
       const finding = event.finding || {};
-      setText('activity-title', `${event.file_name || 'Bir dosya'} işaretlendi`);
-      setText('activity-detail', `${finding.reason || 'İnceleme gerekiyor'}; otomatik işlem uygulanmadı.`);
-      setText('file-protection-detail', `${event.file_name || 'Dosya'} inceleme için işaretlendi.`);
+      const quarantined = event.action === 'quarantined';
+      if (quarantined) {
+        activeThreatDetected = true;
+        document.body.classList.add('threat-alert');
+      }
+      setText('activity-title', quarantined ? `${event.file_name || 'Bir dosya'} engellendi` : `${event.file_name || 'Bir dosya'} işaretlendi`);
+      setText('activity-detail', quarantined ? `${finding.reason || 'Kesin imza eşleşmesi'}; dosya güvenli karantinaya taşındı.` : `${finding.reason || 'İnceleme gerekiyor'}; otomatik işlem uygulanmadı.`);
+      setText('file-protection-detail', quarantined ? `${event.file_name || 'Dosya'} engellendi ve karantinaya alındı.` : `${event.file_name || 'Dosya'} inceleme için işaretlendi.`);
+      if (quarantined) applyQuarantine();
+      if (quarantined) setProtectionState(true, 'Tehdit engellendi', 'Kesin imza eşleşmesi güvenli karantinaya taşındı.');
+      if (quarantined) applyThreatAlertState();
       applyProtectionHistory();
       return;
     }
@@ -1372,6 +1493,7 @@
     }
   }));
 
+  initializeLicense();
   setReadyState();
   renderScanMode('quick');
   showPage(pageNameFromHash(), { updateHash: false });
@@ -1380,6 +1502,7 @@
   applySignatureStatus();
   applyYaraStatus();
   applySettings();
+  renderLicenseAccount();
   applyExclusions();
   applyAnalysisCacheStatus();
   applyProtectionStatus();

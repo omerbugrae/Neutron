@@ -44,6 +44,12 @@ def main() -> None:
             + words(b"wbadmin", b"delete", b"catalog", b"-quiet"),
             "Proton_Recovery_Inhibition_Command_Cluster",
         ),
+        "ransomware": (
+            words(b"vssadmin", b"delete", b"shadows", b"/all") + b"; "
+            + words(b"wevtutil", b"cl", b"System") + b"; "
+            + words(b"bcdedit", b"/set", b"recoveryenabled", b"no"),
+            "Proton_Ransomware_Recovery_Destruction_Chain",
+        ),
     }
     for label, (sample, expected) in positive_cases.items():
         matches = matched_names(rules, sample)
@@ -55,6 +61,8 @@ def main() -> None:
         b"powershell Write-Output hello",
         b"reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
         b"vssadmin list shadows",
+        b"wevtutil gli System",
+        b"bcdedit /enum all",
     )
     advanced_names = {expected for _sample, expected in positive_cases.values()}
     for sample in negative_samples:

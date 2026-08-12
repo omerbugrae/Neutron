@@ -39,6 +39,10 @@
     {
       "name": "proton_advanced_windows.yar",
       "path": "rules/proton_advanced_windows.yar"
+    },
+    {
+      "name": "proton_ransomware_windows.yar",
+      "path": "rules/proton_ransomware_windows.yar"
     }
   ]
 }

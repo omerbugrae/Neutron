@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('neutronWindow', {
 });
 
 contextBridge.exposeInMainWorld('neutronEngine', {
+  getLicenseStatus: () => ipcRenderer.invoke('license:status'),
+  activateLicense: (key) => ipcRenderer.invoke('license:activate', key),
+  deactivateLicense: () => ipcRenderer.invoke('license:deactivate'),
+  revealLicense: () => ipcRenderer.invoke('license:reveal'),
   startQuickScan: () => ipcRenderer.invoke('scan:start'),
   getScanDrives: () => ipcRenderer.invoke('scan:drives'),
   startFullScan: (targetPath) => ipcRenderer.invoke('scan:full', targetPath),

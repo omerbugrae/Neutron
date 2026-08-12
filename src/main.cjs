@@ -1,12 +1,11 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron');
 const { spawn } = require('child_process');
-const { existsSync } = require('fs');
+const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const path = require('path');
 const { ProtonUpdater } = require('./proton-updater.cjs');
+const { deviceHash, parseLicense } = require('./license.cjs');
 
-const WINDOWS_APP_USER_MODEL_ID = app.isPackaged
-  ? 'com.squirrel.neutron.Neutron'
-  : 'com.neutron.security.development';
+const WINDOWS_APP_USER_MODEL_ID = 'com.neutron.security.Neutron';
 const NEUTRON_LOGO_PATH = path.join(__dirname, '..', 'assets', 'neutron-logo.png');
 const NEUTRON_ICON_PATH = path.join(__dirname, '..', 'assets', 'neutron.ico');
 
@@ -33,6 +32,7 @@ let tray = null;
 let isQuitting = false;
 let hasShownTrayHint = false;
 let protonUpdatePromise = null;
+let activeLicense = null;
 let appSettings = {
   start_with_windows: false,
   protection_enabled: true,
@@ -85,6 +85,56 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
+function licensePath() {
+  return path.join(app.getPath('userData'), 'license', 'activation.key');
+}
+
+function licenseStatus() {
+  try {
+    const stored = readFileSync(licensePath(), 'utf8').trim();
+    activeLicense = parseLicense(stored);
+    return { ok: true, active: true, license: activeLicense };
+  } catch (error) {
+    activeLicense = null;
+    return { ok: true, active: false, deviceHash: deviceHash(), message: error.message };
+  }
+}
+
+function requireLicense() {
+  const status = licenseStatus();
+  return status.active ? null : { ok: false, code: 'LICENSE_REQUIRED', message: 'Neutron etkinleştirilmedi.' };
+}
+
+function saveLicense(key) {
+  try {
+    const license = parseLicense(String(key || ''));
+    const target = licensePath();
+    mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    writeFileSync(target, `${String(key).trim()}\n`, { encoding: 'utf8', mode: 0o600 });
+    activeLicense = license;
+    return { ok: true, active: true, license };
+  } catch (error) {
+    return { ok: false, active: false, deviceHash: deviceHash(), message: error.message };
+  }
+}
+
+function removeStoredLicense() {
+  try {
+    const target = licensePath();
+    if (existsSync(target)) require('fs').rmSync(target, { force: true });
+    activeLicense = null;
+    return { ok: true, active: false, deviceHash: deviceHash() };
+  } catch (error) {
+    return { ok: false, message: error.message };
+  }
+}
+
+function revealStoredLicense() {
+  const status = licenseStatus();
+  if (!status.active) return { ok: false, message: 'Gösterilecek etkin lisans yok.' };
+  return { ok: true, key: readFileSync(licensePath(), 'utf8').trim() };
+}
+
 function openProtectionEvent(eventId) {
   showMainWindow();
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -100,12 +150,17 @@ function openProtectionEvent(eventId) {
   }
 }
 
-function showFindingNotification(event, title = 'Neutron bir dosyayı işaretledi') {
+function showFindingNotification(event, title) {
   if (!appSettings.notifications_enabled || !Notification.isSupported()) return;
   const finding = event.finding || {};
+  const quarantined = event.action === 'quarantined';
+  const notificationTitle = title || (quarantined ? 'Neutron tehdidi engelledi' : 'Neutron tehdit buldu');
+  const actionDetail = quarantined
+    ? 'Dosya güvenli karantinaya alındı.'
+    : 'İnceleme ve işlem gerekiyor.';
   const notification = new Notification({
-    title,
-    body: `${event.file_name || 'Öğe'}: ${finding.reason || 'İnceleme gerekiyor'}`,
+    title: notificationTitle,
+    body: `${event.file_name || 'Öğe'}: ${finding.reason || 'Şüpheli öğe bulundu'} ${actionDetail}`,
     icon: neutronImage(64),
     silent: false,
   });
@@ -411,6 +466,8 @@ async function writeAppSetting(key, value) {
 }
 
 function startScan(webContents, options = {}) {
+  const licenseError = requireLicense();
+  if (licenseError) return licenseError;
   if (activeScan) {
     return {
       ok: false,
@@ -515,6 +572,7 @@ function protectionStatus() {
 }
 
 function startWebWatcher() {
+  if (requireLicense()) return;
   if (webWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-web']);
   const child = spawn(engine.command, engine.arguments, { cwd: engine.cwd, windowsHide: true, shell: false, env: engineEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
@@ -550,6 +608,7 @@ function stopWebWatcher(options = {}) {
 }
 
 function startBehaviorWatcher() {
+  if (requireLicense()) return;
   if (behaviorWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-behavior']);
   const child = spawn(engine.command, engine.arguments, {
@@ -615,6 +674,7 @@ function stopBehaviorWatcher(options = {}) {
 }
 
 function startProtectionWatcher() {
+  if (requireLicense()) return;
   if (protectionWatcher) return protectionStatus();
 
   const engine = resolveEngine(['--watch']);
@@ -768,9 +828,11 @@ async function createWindow() {
     }
   });
   await readAppSettings();
-  if (appSettings.protection_enabled) startProtectionWatcher();
-  if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
-  if (appSettings.web_protection_enabled) startWebWatcher();
+  if (licenseStatus().active) {
+    if (appSettings.protection_enabled) startProtectionWatcher();
+    if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
+    if (appSettings.web_protection_enabled) startWebWatcher();
+  }
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
@@ -793,8 +855,22 @@ ipcMain.on('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close();
 });
 
+ipcMain.handle('license:status', () => licenseStatus());
+ipcMain.handle('license:activate', (_event, key) => {
+  const result = saveLicense(key);
+  if (result.ok) {
+    if (appSettings.protection_enabled) startProtectionWatcher();
+    if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
+    if (appSettings.web_protection_enabled) startWebWatcher();
+  }
+  return result;
+});
+ipcMain.handle('license:deactivate', () => removeStoredLicense());
+ipcMain.handle('license:reveal', () => revealStoredLicense());
+
 ipcMain.handle('scan:start', (event) => startScan(event.sender));
 ipcMain.handle('scan:drives', () => {
+  const licenseError = requireLicense(); if (licenseError) return licenseError;
   const drives = [];
   if (process.platform === 'win32') {
     for (let code = 67; code <= 90; code += 1) {
@@ -827,10 +903,25 @@ ipcMain.handle('scan:choose-folder', async (event) => {
 ipcMain.handle('scan:choose-custom', async (event) => {
   if (activeScan) return { ok: false, message: 'Zaten çalışan bir tarama var.' };
   const window = BrowserWindow.fromWebContents(event.sender);
+  const choice = await dialog.showMessageBox(window, {
+    type: 'question',
+    title: 'Özel tarama',
+    message: 'Ne taramak istiyorsunuz?',
+    detail: 'Tek bir dosya veya bir klasör seçebilirsiniz.',
+    buttons: ['Dosya seç', 'Klasör seç', 'İptal'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  if (choice.response === 2) return { ok: false, cancelled: true };
+  const chooseFile = choice.response === 0;
   const selection = await dialog.showOpenDialog(window, {
-    title: 'Taranacak dosya veya klasörü seç',
+    title: chooseFile ? 'Taranacak dosyayı seç' : 'Taranacak klasörü seç',
     buttonLabel: 'Seçileni tara',
-    properties: ['openFile', 'openDirectory'],
+    properties: [chooseFile ? 'openFile' : 'openDirectory'],
+    filters: chooseFile ? [
+      { name: 'Tüm dosyalar', extensions: ['*'] },
+    ] : undefined,
   });
   if (selection.canceled || !selection.filePaths[0]) return { ok: false, cancelled: true };
   return startScan(event.sender, { targetPath: selection.filePaths[0] });
@@ -844,8 +935,8 @@ ipcMain.handle('protection:stop', async () => {
   const result = await updateApplicationSetting('protection_enabled', false);
   return result.ok ? protectionStatus() : result;
 });
-ipcMain.handle('protection:status', () => protectionStatus());
-ipcMain.handle('web:check-url', (_event, url) => runEngineAction(['--check-url', String(url || '')], 'url-reputation'));
+ipcMain.handle('protection:status', () => requireLicense() || protectionStatus());
+ipcMain.handle('web:check-url', (_event, url) => requireLicense() || runEngineAction(['--check-url', String(url || '')], 'url-reputation'));
 ipcMain.handle('web:open-url', async (_event, url) => {
   const result = await runEngineAction(['--check-url', String(url || '')], 'url-reputation');
   if (!result.ok || !result.safe) return result;

@@ -42,6 +42,73 @@ kullanılamaz.
 
 ## 3. Paketi oluşturma
 
+## Gerçek tehdit istihbaratı toplama
+
+`proton:collect`, API anahtarını yalnızca toplama makinesinin ortam değişkeninden alır;
+anahtarı ne aday tanım dosyasına ne de Proton paketine yazar. Malware örnek dosyalarını
+indirmez veya çalıştırmaz. URLhaus'tan yalnızca aktif `malware_download` URL'lerini,
+URLhaus ve MalwareBazaar'dan ise geçerli SHA-256 ve dosya boyutu bulunan metadataları alır.
+
+Önce [abuse.ch Authentication Portal](https://auth.abuse.ch/) üzerinden bir Auth-Key alın.
+PowerShell oturumunda (kalıcı olarak kaydetmeden) anahtarı verin:
+
+```powershell
+$env:NEUTRON_ABUSECH_AUTH_KEY = 'Auth-Key-buraya'
+```
+
+Ardından mevcut tanım kaynağından yeni bir *aday* sürüm üretin. Çıktı adı daha önce
+olmamalıdır; araç üzerine yazmaz:
+
+```powershell
+npm.cmd run proton:collect -- `
+  --source C:\Neutron-Proton-Source\definitions.json `
+  --version 1.00.007 `
+  --output C:\Neutron-Proton-Source\candidates\definitions-1.00.007.json
+```
+
+Çıkan adayı gözden geçirin. Ardından aynı dosyayı normal yayın zincirine verin:
+
+```powershell
+npm.cmd run proton:publish -- `
+  --source C:\Neutron-Proton-Source\candidates\definitions-1.00.007.json `
+  --keys C:\Users\omerb\Desktop\NeutronSecret `
+  --output C:\Users\omerb\Desktop\NeutronProtonRelease
+```
+
+Üretimde bunu zamanlanmış CI işi veya ayrı, korumalı bir toplama makinesinde çalıştırın.
+Neutron istemcileri bu API'lere bağlanmaz; sadece imzalanmış Release'i indirir. Bu sayede
+Auth-Key dağıtım paketine ve kullanıcı bilgisayarına girmez.
+
+İnceleme aşamasını atlamak istemezseniz yukarıdaki iki komutu kullanın. Aynı işlemi tek
+komutta yapmak için (yalnızca önce aday üretimini deneyip güvendiğinizde):
+
+```powershell
+npm.cmd run proton:sync -- `
+  --source C:\Neutron-Proton-Source\definitions.json `
+  --version 1.00.007 `
+  --keys C:\Users\omerb\Desktop\NeutronSecret `
+  --output C:\Users\omerb\Desktop\NeutronProtonRelease
+```
+
+`proton:sync`, geçici aday dosyasını yerel geçici klasörde oluşturur; imza doğrulaması
+başarılı olursa GitHub Release'i yayımlar ve ardından bu geçici dosyayı siler.
+
+## Otomatik günlük yayın (GitHub Actions)
+
+`.github/workflows/proton-feed.yml` her gün 03:17 UTC'de yeni Proton paketi oluşturur;
+ayrıca GitHub Actions ekranından **Run workflow** ile elle sürüm numarası vererek
+çalıştırılabilir. `NeutronProton` deposunda aşağıdaki Actions Secrets değerlerini ekleyin:
+
+- `NEUTRON_ABUSECH_AUTH_KEY`: abuse.ch Auth-Key.
+- `NEUTRON_PROTON_ENCRYPTION_KEY`: `proton-encryption.key` dosyasının tek satırlık içeriği.
+- `NEUTRON_PROTON_SIGNING_PRIVATE_KEY`: `proton-signing-private.pem` dosyasının tüm içeriği.
+- `NEUTRON_PROTON_SIGNING_PUBLIC_KEY`: `proton-signing-public.pem` dosyasının tüm içeriği.
+
+Bu workflow **NeutronProton** deposunda çalışmalıdır ve kendi deposuna Release oluşturur.
+Dosyayı NeutronProton deposuna koyun; Actions ayarlarında `Workflow permissions` değeri
+**Read and write permissions** olmalıdır. Böylece imzalama özel anahtarı, Neutron uygulama
+kodu deposunda veya kullanıcı bilgisayarlarında bulunmaz.
+
 ```powershell
 npm.cmd run proton:pack -- `
   --source C:\Neutron-Proton-Source\definitions.json `

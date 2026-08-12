@@ -14,6 +14,7 @@
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
     "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
+    "setup:test": "node tools/build-test-setup.cjs",
     "make:proton": "node tools/proton/make-with-runtime-key.cjs",
     "icon:build": "electron tools/build-windows-icon.cjs",
     "archive:check": "node --check src/neutron-archive.cjs",
@@ -27,7 +28,13 @@
     "proton:test": "node tools/proton/self-test.cjs",
     "proton:update-test": "node tools/proton/updater-self-test.cjs",
     "proton:publish": "node tools/proton/publish.cjs",
-    "proton:publish-test": "node tools/proton/publish-self-test.cjs"
+    "proton:publish-test": "node tools/proton/publish-self-test.cjs",
+    "proton:collect": "node tools/proton/collect-abusech.cjs",
+    "proton:collect-test": "node tools/proton/collect-self-test.cjs",
+    "proton:sync": "node tools/proton/collect-and-publish.cjs",
+    "license:keygen": "node tools/license/keygen.cjs",
+    "license:issue": "node tools/license/issue.cjs",
+    "license:test": "node tools/license/self-test.cjs"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",

@@ -12,8 +12,16 @@ data/*
 *.pdbx.sig
 proton-encryption.key
 proton-signing-private.pem
+license-signing-private.pem
+*-private.pem
+*LicenseSecret/
+*ProtonSecret/
+*ProtonRelease/
+*.license.key
+activation.key
 proton-secrets/
 proton-dist/
+proton-candidates/
 runtime/proton/
 requirements.txt
 tests/

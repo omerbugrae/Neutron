@@ -1,0 +1,24 @@
+{
+  "database_name": "Proton",
+  "version": "1.00.000",
+  "minimum_engine_version": "0.1.0",
+  "provenance": {
+    "source_name": "Neutron production feed base",
+    "source_url": "https://github.com/omerbugrae/Neutron",
+    "collected_at": "2026-08-12T00:00:00.000Z",
+    "license": "Metadata only",
+    "review_policy": "This base has no detection data. The collector replaces provenance and adds source-attributed indicators."
+  },
+  "signatures": [],
+  "web_indicators": [],
+  "yara_rules": [
+    {
+      "name": "proton_advanced_windows.yar",
+      "path": "rules/proton_advanced_windows.yar"
+    },
+    {
+      "name": "proton_ransomware_windows.yar",
+      "path": "rules/proton_ransomware_windows.yar"
+    }
+  ]
+}

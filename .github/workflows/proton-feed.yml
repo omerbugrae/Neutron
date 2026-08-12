@@ -1,0 +1,78 @@
+name: Proton threat-intelligence release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Yeni Proton sürümü (ör. 1.00.007)'
+        required: true
+        type: string
+      limit:
+        description: 'Kaynak başına en fazla kayıt (1-1000)'
+        required: false
+        default: '500'
+        type: string
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: proton-feed-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NEUTRON_ABUSECH_AUTH_KEY: ${{ secrets.NEUTRON_ABUSECH_AUTH_KEY }}
+      NEUTRON_PROTON_ENCRYPTION_KEY: ${{ secrets.NEUTRON_PROTON_ENCRYPTION_KEY }}
+      NEUTRON_PROTON_SIGNING_PRIVATE_KEY: ${{ secrets.NEUTRON_PROTON_SIGNING_PRIVATE_KEY }}
+      NEUTRON_PROTON_SIGNING_PUBLIC_KEY: ${{ secrets.NEUTRON_PROTON_SIGNING_PUBLIC_KEY }}
+      PROTON_VERSION: ${{ inputs.version }}
+      PROTON_LIMIT: ${{ inputs.limit || '500' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          test -n "$NEUTRON_ABUSECH_AUTH_KEY"
+          test -n "$NEUTRON_PROTON_ENCRYPTION_KEY"
+          test -n "$NEUTRON_PROTON_SIGNING_PRIVATE_KEY"
+          test -n "$NEUTRON_PROTON_SIGNING_PUBLIC_KEY"
+
+      - name: Calculate scheduled version
+        if: ${{ github.event_name == 'schedule' }}
+        shell: bash
+        run: echo "PROTON_VERSION=1.$(date -u +%y).$(date -u +%j)" >> "$GITHUB_ENV"
+
+      - name: Write publishing keys
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/proton-keys" "$RUNNER_TEMP/proton-release"
+          printf '%s\n' "$NEUTRON_PROTON_ENCRYPTION_KEY" > "$RUNNER_TEMP/proton-keys/proton-encryption.key"
+          printf '%s\n' "$NEUTRON_PROTON_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/proton-keys/proton-signing-private.pem"
+          printf '%s\n' "$NEUTRON_PROTON_SIGNING_PUBLIC_KEY" > "$RUNNER_TEMP/proton-keys/proton-signing-public.pem"
+          chmod 600 "$RUNNER_TEMP/proton-keys/proton-encryption.key" "$RUNNER_TEMP/proton-keys/proton-signing-private.pem"
+
+      - name: Collect, verify, sign and publish Proton
+        shell: bash
+        run: |
+          node tools/proton/collect-and-publish.cjs \
+            --source tools/proton/production-base/definitions.json \
+            --version "$PROTON_VERSION" \
+            --limit "$PROTON_LIMIT" \
+            --keys "$RUNNER_TEMP/proton-keys" \
+            --output "$RUNNER_TEMP/proton-release" \
+            --repo "${{ github.repository }}"
+
+      - name: Remove publishing keys
+        if: always()
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/proton-keys"
