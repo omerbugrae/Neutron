@@ -140,6 +140,24 @@
     syncHeroPrimaryAction();
   };
 
+  const refreshProtectionVisualState = () => {
+    const protectionKnown = typeof protectionEnabled === 'boolean';
+    const behaviorKnown = typeof behaviorEnabled === 'boolean';
+    const partiallyProtected = protectionEnabled === true && behaviorEnabled === false;
+
+    document.body.classList.toggle('protection-warning', partiallyProtected);
+    document.body.classList.toggle('behavior-protection-off', behaviorKnown && behaviorEnabled === false);
+
+    if (!protectionKnown || !behaviorKnown || protectionEnabled === false) return;
+    if (partiallyProtected) {
+      setText('protection-label', 'KORUMA KISMEN ETKİN');
+      setText('scan-heading', 'Koruma dikkat gerektiriyor.');
+      setText('scan-summary', 'Dosya koruması etkin; davranış izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.');
+      setText('sidebar-protection-state', 'Koruma kısmen etkin');
+      setText('sidebar-protection-detail', 'Davranış izleme kapalı');
+    }
+  };
+
   const setProtectionState = (enabled, heading, detail) => {
     protectionEnabled = enabled;
     document.body.classList.remove('protection-pending');
@@ -167,6 +185,7 @@
       protectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       protectionToggle.disabled = false;
     }
+    refreshProtectionVisualState();
     syncHeroPrimaryAction();
   };
 
@@ -186,6 +205,46 @@
       behaviorProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       behaviorProtectionToggle.disabled = false;
     }
+    refreshProtectionVisualState();
+  };
+
+  const applyEngineStatus = async () => {
+    const overviewStatus = document.querySelector('[data-role="overview-engine-status"]');
+    const overviewCard = overviewStatus?.closest('.protection-module');
+    const detailCard = document.querySelector('[data-glass-id="detail-engine"]');
+    try {
+      const result = await engine?.getEngineStatus?.();
+      if (!result?.ok || !result.version) throw new Error('Motor durumu okunamadı');
+      const yaraReady = Boolean(result.yara?.ok && result.yara?.available);
+      const ruleFiles = Number(result.yara?.rule_files) || 0;
+      const protonVersion = result.proton?.version || 'bilinmiyor';
+      const activeModules = [
+        result.protection?.enabled,
+        result.protection?.behaviorConfigured,
+      ].filter(Boolean).length;
+      const healthy = yaraReady && ruleFiles > 0;
+
+      setText('overview-engine-state', healthy ? 'Çalışıyor' : 'Sınırlı');
+      setText('overview-engine-detail', healthy
+        ? `Motor ${result.version} · YARA ${ruleFiles} kural dosyasıyla etkin.`
+        : `Motor ${result.version} çalışıyor; YARA kuralları kullanılamıyor.`);
+      setText('engine-card-heading', `Neutron Engine ${result.version}`);
+      setText('engine-card-detail', healthy
+        ? `Proton ${protonVersion} · ${ruleFiles} YARA dosyası · ${activeModules}/2 canlı koruma modülü etkin.`
+        : `Proton ${protonVersion} yüklü; YARA motoru veya kural dosyaları kullanılamıyor.`);
+      overviewStatus?.classList.toggle('module-status--pending', !healthy);
+      overviewCard?.classList.remove('protection-module--pending', 'engine-unavailable');
+      overviewCard?.classList.toggle('engine-limited', !healthy);
+      detailCard?.classList.remove('engine-unavailable');
+      detailCard?.classList.toggle('engine-limited', !healthy);
+    } catch {
+      setText('overview-engine-state', 'Kullanılamıyor');
+      setText('overview-engine-detail', 'Yerel tarama motoruna bağlanılamadı.');
+      setText('engine-card-heading', 'Motor kullanılamıyor');
+      setText('engine-card-detail', 'Neutron Engine durum bilgisi alınamadı. Uygulamayı yeniden başlatın.');
+      overviewCard?.classList.add('engine-unavailable');
+      detailCard?.classList.add('engine-unavailable');
+    }
   };
 
   const applyProtectionStatus = async () => {
@@ -199,7 +258,12 @@
       } else {
         setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
       }
-      if (status.behaviorEnabled) {
+      // The persisted setting is the source of truth while the watcher is starting.
+      // A just-enabled watcher may not have spawned by the first status read yet.
+      const behaviorConfigured = typeof status.behaviorConfigured === 'boolean'
+        ? status.behaviorConfigured
+        : Boolean(status.behaviorEnabled);
+      if (behaviorConfigured) {
         setBehaviorProtectionState(
           true,
           Boolean(status.behaviorReady),
@@ -211,6 +275,7 @@
       } else {
         setBehaviorProtectionState(false, false, 'Kapalı', 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.');
       }
+      await applyEngineStatus();
     } catch {
       setProtectionState(false, 'Koruma kullanılamıyor', 'Python motoruna bağlanılamadı.');
       setBehaviorProtectionState(false, false, 'Kullanılamıyor', 'Davranış izleme motoruna bağlanılamadı.');
@@ -524,6 +589,17 @@
       return false;
     }
     renderSettings(result.settings);
+    if (key === 'behavior_protection_enabled') {
+      const enabled = Boolean(result.settings.behavior_protection_enabled);
+      setBehaviorProtectionState(
+        enabled,
+        false,
+        enabled ? 'Başlatılıyor' : 'Kapalı',
+        enabled
+          ? 'Davranış izleme başlatılıyor.'
+          : 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.',
+      );
+    }
     if (key === 'protection_enabled' || key === 'behavior_protection_enabled') {
       await applyProtectionStatus();
     }
@@ -853,6 +929,7 @@
     if (!state) return;
     if (signatureUpdateButton) signatureUpdateButton.textContent = state[0];
     setText('signature-detail', state[1]);
+    if (event.stage === 'complete' || event.stage === 'current') applyEngineStatus();
   });
 
   protectionToggle?.addEventListener('click', async () => {

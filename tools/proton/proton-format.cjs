@@ -18,6 +18,7 @@ const MAX_TOTAL_RULE_BYTES = 16 * 1024 * 1024;
 const MAX_SIGNATURES = 1_000_000;
 const MAX_RULES = 256;
 const MAX_HEADER_BYTES = 64 * 1024;
+const SOURCE_URL_PATTERN = /^https:\/\/[^\s/$.?#][^\s]*$/i;
 
 function fail(message) {
   throw new Error(message);
@@ -89,6 +90,21 @@ function normalizeSeverity(value) {
   return severity;
 }
 
+function normalizeProvenance(value) {
+  assertPlainObject(value, 'provenance');
+  const collectedAt = cleanText(value.collected_at, 'provenance.collected_at', 64);
+  if (Number.isNaN(Date.parse(collectedAt))) fail('provenance.collected_at must be an ISO timestamp.');
+  const sourceUrl = cleanText(value.source_url, 'provenance.source_url', 1024);
+  if (!SOURCE_URL_PATTERN.test(sourceUrl)) fail('provenance.source_url must be an HTTPS URL.');
+  return {
+    source_name: cleanText(value.source_name, 'provenance.source_name', 120),
+    source_url: sourceUrl,
+    collected_at: collectedAt,
+    license: cleanText(value.license, 'provenance.license', 160),
+    review_policy: cleanText(value.review_policy, 'provenance.review_policy', 240),
+  };
+}
+
 function resolveContainedPath(baseDirectory, relativePath, label) {
   const cleanRelative = cleanText(relativePath, label, 240);
   if (path.isAbsolute(cleanRelative)) fail(`${label} mutlak yol olamaz.`);
@@ -112,6 +128,7 @@ function normalizeSource(source, sourcePath) {
     'minimum_engine_version',
     32,
   );
+  const provenance = normalizeProvenance(source.provenance);
 
   if (!Array.isArray(source.signatures)) fail('signatures bir dizi olmalı.');
   if (source.signatures.length > MAX_SIGNATURES) fail('Çok fazla hash imzası var.');
@@ -171,6 +188,7 @@ function normalizeSource(source, sourcePath) {
     database_name: databaseName,
     version,
     minimum_engine_version: minimumEngineVersion,
+    provenance,
     created_at: new Date().toISOString(),
     signatures,
     yara_rules: yaraRules,
@@ -328,6 +346,7 @@ module.exports = {
   decryptPackage,
   keyIdFromPublicKey,
   normalizeSource,
+  normalizeProvenance,
   parsePackage,
   readEncryptionKey,
   readJsonFile,

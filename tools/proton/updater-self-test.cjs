@@ -30,6 +30,7 @@ async function main() {
       database_name: 'Proton',
       version: '1.00.002',
       minimum_engine_version: '0.1.0',
+      provenance: { source_name: 'Updater self test', source_url: 'https://example.invalid/proton', collected_at: '2026-08-11T00:00:00.000Z', license: 'Test only', review_policy: 'Automated verification only' },
       created_at: '2026-08-11T00:00:00.000Z',
       signatures: [{
         sha256: '275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f',
@@ -111,6 +112,8 @@ async function main() {
     assert.equal(installEvent.version, '1.00.002');
     assert.equal(installEvent.source, 'github-release');
     assert.equal(installEvent.yara_rule_files, 1);
+    assert.equal(installEvent.provenance.source_name, 'Updater self test');
+    assert.equal(installEvent.provenance.source_url, 'https://example.invalid/proton');
 
     const invalidYara = 'rule Proton_Broken { condition: }';
     const invalidPayload = {

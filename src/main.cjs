@@ -503,6 +503,7 @@ function protectionStatus() {
     ready: Boolean(protectionWatcher?.ready),
     behaviorEnabled: Boolean(behaviorWatcher),
     behaviorReady: Boolean(behaviorWatcher?.ready),
+    behaviorConfigured: Boolean(appSettings.behavior_protection_enabled),
   };
 }
 
@@ -546,14 +547,15 @@ function startBehaviorWatcher() {
     sendProtectionEvent({ type: 'behavior-error', message: 'Davranış izleme motoru başlatılamadı.' });
   });
   child.once('close', (code) => {
-    if (behaviorWatcher === watcher) behaviorWatcher = null;
+    const isCurrentWatcher = behaviorWatcher === watcher;
+    if (isCurrentWatcher) behaviorWatcher = null;
     updateTrayMenu();
-    if (!watcher.stopping && code !== 0) {
+    if (isCurrentWatcher && !watcher.stopping && code !== 0) {
       sendProtectionEvent({
         type: 'behavior-error',
         message: watcher.stderr.trim() || 'Davranış izleme beklenmeyen şekilde durdu.',
       });
-    } else if (!watcher.silent) {
+    } else if (isCurrentWatcher && !watcher.silent) {
       sendProtectionEvent({ type: 'behavior-stopped' });
     }
   });
@@ -616,14 +618,15 @@ function startProtectionWatcher() {
     sendProtectionEvent({ type: 'watch-error', message: 'Gerçek zamanlı koruma motoru başlatılamadı.' });
   });
   child.once('close', (code) => {
-    if (protectionWatcher === watcher) protectionWatcher = null;
+    const isCurrentWatcher = protectionWatcher === watcher;
+    if (isCurrentWatcher) protectionWatcher = null;
     updateTrayMenu();
-    if (!watcher.stopping && code !== 0) {
+    if (isCurrentWatcher && !watcher.stopping && code !== 0) {
       sendProtectionEvent({
         type: 'watch-error',
         message: watcher.stderr.trim() || 'Gerçek zamanlı koruma beklenmeyen şekilde durdu.',
       });
-    } else if (!watcher.silent) {
+    } else if (isCurrentWatcher && !watcher.silent) {
       sendProtectionEvent({ type: 'watch-stopped' });
     }
   });
@@ -783,6 +786,21 @@ ipcMain.handle('protection:action', async (_event, itemId, action) => {
   }
 });
 ipcMain.handle('signature:status', () => runEngineAction(['--signature-status'], 'signature-status'));
+ipcMain.handle('engine:status', async () => {
+  const [engineVersion, yaraStatus, signatureStatus] = await Promise.all([
+    runEngineAction(['--engine-version'], 'engine-version'),
+    runEngineAction(['--yara-status'], 'yara-status'),
+    runEngineAction(['--signature-status'], 'signature-status'),
+  ]);
+  return {
+    ok: Boolean(engineVersion.ok),
+    version: engineVersion.version || null,
+    frozen: Boolean(engineVersion.frozen),
+    yara: yaraStatus,
+    proton: signatureStatus,
+    protection: protectionStatus(),
+  };
+});
 ipcMain.handle('yara:status', () => runEngineAction(['--yara-status'], 'yara-status'));
 ipcMain.handle('cache:status', () => runEngineAction(['--cache-status'], 'cache-status'));
 ipcMain.handle('cache:clear', async () => {

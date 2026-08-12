@@ -32,6 +32,11 @@ Gerçek tanım kaynağını public repoda tutmayın. Biçim için
 `tools/proton/examples/definitions.json` dosyasını örnek alın. YARA yolları JSON
 dosyasının bulunduğu klasöre göre çözülür ve bu klasörün dışına çıkamaz.
 
+Her sürümde zorunlu olan `provenance` kaydı veri setinin kaynağını, HTTPS adresini,
+toplanma zamanını, lisansını ve insan inceleme politikasını içerir. Üretim paketine
+yalnızca kaynak-atıflı, yinelenmeyen, YARA ile derlenmiş ve temiz dosya korpusunda
+yanlış-pozitif testi yapılmış göstergeler alınmalıdır.
+
 Sürüm biçimi `x.xx.xxx` olmalıdır. Aynı SHA-256 veya YARA dosya adı iki defa
 kullanılamaz.
 
@@ -51,7 +56,7 @@ proton-1.00.002.pdbx
 proton-1.00.002.pdbx.sig
 ```
 
-Bu iki dosya `NeutronProton` GitHub deposundaki `proton-v1.00.004` Release'ine
+Bu iki dosya `NeutronProton` GitHub deposundaki `proton-v1.00.005` Release'ine
 yüklenebilir.
 
 ## Tek komutla oluşturma ve GitHub'da yayımlama
@@ -78,8 +83,8 @@ yalnız `.pdbx` ile `.pdbx.sig` dosyaları yüklenir.
 
 ```powershell
 npm.cmd run proton:verify -- `
-  --package C:\Neutron-Proton-Release\proton-1.00.004.pdbx `
-  --signature C:\Neutron-Proton-Release\proton-1.00.004.pdbx.sig `
+  --package C:\Neutron-Proton-Release\proton-1.00.005.pdbx `
+  --signature C:\Neutron-Proton-Release\proton-1.00.005.pdbx.sig `
   --public-key C:\Neutron-Secrets\proton-signing-public.pem `
   --encryption-key C:\Neutron-Secrets\proton-encryption.key
 ```

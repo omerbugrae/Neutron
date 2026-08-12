@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   getProtectionStatus: () => ipcRenderer.invoke('protection:status'),
   getProtectionHistory: () => ipcRenderer.invoke('protection:history'),
   applyProtectionAction: (itemId, action) => ipcRenderer.invoke('protection:action', itemId, action),
+  getEngineStatus: () => ipcRenderer.invoke('engine:status'),
   getSignatureStatus: () => ipcRenderer.invoke('signature:status'),
   getYaraStatus: () => ipcRenderer.invoke('yara:status'),
   getAnalysisCacheStatus: () => ipcRenderer.invoke('cache:status'),

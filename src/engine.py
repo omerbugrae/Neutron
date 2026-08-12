@@ -286,6 +286,16 @@ def open_database() -> Iterator[sqlite3.Connection]:
           installed_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS proton_provenance (
+          id INTEGER PRIMARY KEY CHECK(id = 1),
+          source_name TEXT NOT NULL,
+          source_url TEXT NOT NULL,
+          collected_at TEXT NOT NULL,
+          license TEXT NOT NULL,
+          review_policy TEXT NOT NULL,
+          installed_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS app_settings (
           key TEXT PRIMARY KEY,
           value_json TEXT NOT NULL,
@@ -441,12 +451,16 @@ def load_signatures() -> dict[int, dict[str, dict[str, Any]]]:
 
 def signature_status_payload() -> dict[str, Any]:
     with open_database() as connection:
+        connection.row_factory = sqlite3.Row
         count = int(connection.execute(
             "SELECT COUNT(*) FROM signatures WHERE enabled = 1"
         ).fetchone()[0])
         metadata = dict(connection.execute(
             "SELECT key, value FROM signature_metadata"
         ).fetchall())
+        provenance = connection.execute(
+            "SELECT source_name, source_url, collected_at, license, review_policy FROM proton_provenance WHERE id = 1"
+        ).fetchone()
     return {
         "database_name": metadata.get("database_name", SIGNATURE_DATABASE_NAME),
         "version": metadata.get("version", BUILTIN_SIGNATURE_VERSION),
@@ -454,6 +468,7 @@ def signature_status_payload() -> dict[str, Any]:
         "signature_count": count,
         "source": metadata.get("source", "builtin"),
         "network_used": metadata.get("source") == "github-release",
+        "provenance": dict(provenance) if provenance else None,
     }
 
 
@@ -2800,6 +2815,21 @@ def validate_proton_payload(payload: Any) -> dict[str, Any]:
     if not created_at or len(created_at) > 64:
         raise ValueError("Proton oluşturma zamanı geçersiz")
 
+    raw_provenance = payload.get("provenance")
+    if not isinstance(raw_provenance, dict):
+        raise ValueError("Proton provenance is invalid")
+    provenance = {key: str(raw_provenance.get(key, "")).strip() for key in (
+        "source_name", "source_url", "collected_at", "license", "review_policy"
+    )}
+    if (not all(provenance.values()) or len(provenance["source_name"]) > 120
+            or len(provenance["source_url"]) > 1024 or not provenance["source_url"].startswith("https://")
+            or len(provenance["license"]) > 160 or len(provenance["review_policy"]) > 240):
+        raise ValueError("Proton provenance is incomplete or invalid")
+    try:
+        datetime.fromisoformat(provenance["collected_at"].replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("Proton provenance timestamp is invalid") from None
+
     raw_signatures = payload.get("signatures")
     if not isinstance(raw_signatures, list) or len(raw_signatures) > MAX_PROTON_SIGNATURES:
         raise ValueError("Proton hash imzası listesi geçersiz")
@@ -2857,6 +2887,7 @@ def validate_proton_payload(payload: Any) -> dict[str, Any]:
     return {
         "version": version,
         "created_at": created_at,
+        "provenance": provenance,
         "signatures": signatures,
         "rules": rules,
     }
@@ -2910,6 +2941,22 @@ def install_proton_from_stdin() -> int:
                     (rule["name"], rule["sha256"], rule["content"], payload["created_at"])
                     for rule in payload["rules"]
                 ],
+            )
+            connection.execute(
+                """
+                INSERT INTO proton_provenance (
+                  id, source_name, source_url, collected_at, license, review_policy, installed_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  source_name=excluded.source_name, source_url=excluded.source_url,
+                  collected_at=excluded.collected_at, license=excluded.license,
+                  review_policy=excluded.review_policy, installed_at=excluded.installed_at
+                """,
+                (
+                    payload["provenance"]["source_name"], payload["provenance"]["source_url"],
+                    payload["provenance"]["collected_at"], payload["provenance"]["license"],
+                    payload["provenance"]["review_policy"], datetime.now(timezone.utc).isoformat(),
+                ),
             )
             for key, value in {
                 "version": payload["version"],

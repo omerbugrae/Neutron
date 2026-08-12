@@ -25,6 +25,11 @@ body.flat-ui.protection-off {
   --flat-accent-hover: #ff7884;
 }
 
+body.flat-ui.protection-warning {
+  --flat-accent: #f5c451;
+  --flat-accent-hover: #ffda78;
+}
+
 body.flat-ui.threat-alert {
   --flat-accent: #ff5e6c;
   --flat-accent-hover: #ff7884;
@@ -48,6 +53,21 @@ body.flat-ui.protection-pending {
 .flat-ui.protection-off .ambient-cube-light::after {
   background: radial-gradient(circle at 35% 22%, rgba(255, 70, 91, 0.25), rgba(135, 14, 37, 0.1) 38%, transparent 70%);
 }
+
+.flat-ui.protection-warning .ambient-cube-light::after {
+  background: radial-gradient(circle at 35% 22%, rgba(245, 196, 81, 0.28), rgba(113, 72, 8, 0.12) 38%, transparent 70%);
+}
+
+.flat-ui.protection-warning .rendered-cube__face--front { background: linear-gradient(145deg, #ffdc74 0%, #c88a1c 52%, #613b08 100%); }
+.flat-ui.protection-warning .rendered-cube__face--back { background: linear-gradient(145deg, #825812, #3e2806); }
+.flat-ui.protection-warning .rendered-cube__face--right { background: linear-gradient(145deg, #eeb43d 0%, #a66c12 48%, #4e3005 100%); }
+.flat-ui.protection-warning .rendered-cube__face--left { background: linear-gradient(155deg, #ffe39a 0%, #d79a26 44%, #694209 100%); }
+.flat-ui.protection-warning .rendered-cube__face--top { background: radial-gradient(circle at 18% 15%, #fff7d6 0%, #ffe6a0 18%, #f6c24b 48%, #a36a10 100%); }
+.flat-ui.protection-warning .ambient-cube-light .rendered-cube { filter: blur(28px) drop-shadow(0 0 90px rgba(245, 183, 51, 0.54)); }
+.flat-ui.protection-warning .hero-cube .rendered-cube { filter: blur(2px) drop-shadow(-12px -12px 28px rgba(245, 190, 68, 0.46)); }
+.flat-ui.protection-warning .live-dot,
+.flat-ui.protection-warning .titlebar-state__dot,
+.flat-ui.protection-warning .sidebar-health__indicator > span { background: var(--flat-accent) !important; }
 
 .flat-ui.threat-alert .ambient-cube-light::after {
   background: radial-gradient(circle at 35% 22%, rgba(255, 70, 91, 0.3), rgba(135, 14, 37, 0.12) 38%, transparent 70%);
@@ -294,6 +314,27 @@ body.flat-ui.protection-pending {
 .flat-ui .detail-module.is-behavior-active .module-icon {
   border-color: #315f50 !important;
   color: #9ff5d8;
+}
+
+.flat-ui.behavior-protection-off .protection-module:has([data-role="overview-behavior-state"]),
+.flat-ui.behavior-protection-off .detail-module:has([data-role="behavior-protection-state"]) {
+  border-color: #6e2d38 !important;
+  background: #1d1015 !important;
+}
+
+.flat-ui.behavior-protection-off .protection-module:has([data-role="overview-behavior-state"]) .module-icon,
+.flat-ui.behavior-protection-off .detail-module:has([data-role="behavior-protection-state"]) .module-icon {
+  border-color: #7b3340 !important;
+  color: #ff7b88 !important;
+}
+
+.flat-ui.behavior-protection-off .protection-module:has([data-role="overview-behavior-state"]) .module-status i,
+.flat-ui.behavior-protection-off .detail-module:has([data-role="behavior-protection-state"]) .section-eyebrow {
+  color: #ff7b88 !important;
+}
+
+.flat-ui.behavior-protection-off .protection-module:has([data-role="overview-behavior-state"]) .module-status i {
+  background-color: #ff5e6c !important;
 }
 
 .flat-ui.protection-off .sidebar {
@@ -831,6 +872,108 @@ body.flat-ui.protection-pending {
 .flat-ui .settings-select:disabled {
   cursor: wait;
   opacity: 0.6;
+}
+
+/* Protection state must reach controls that otherwise use fixed green colors. */
+.flat-ui.protection-warning .protection-toggle.is-active,
+.flat-ui.protection-warning .settings-switch.is-active {
+  color: #f5c451;
+}
+
+.flat-ui.protection-warning .protection-toggle.is-active .protection-toggle__track,
+.flat-ui.protection-warning .settings-switch.is-active i {
+  background: #514116;
+  border-color: #b88722;
+}
+
+.flat-ui.protection-warning .protection-toggle.is-active .protection-toggle__track i,
+.flat-ui.protection-warning .settings-switch.is-active i::after {
+  background: #f5c451;
+}
+
+.flat-ui.protection-off .protection-toggle.is-active,
+.flat-ui.protection-off .settings-switch.is-active {
+  color: #ff5e6c;
+}
+
+.flat-ui.protection-off .protection-toggle.is-active .protection-toggle__track,
+.flat-ui.protection-off .settings-switch.is-active i {
+  background: #501b25;
+  border-color: #a43b4a;
+}
+
+.flat-ui.protection-off .protection-toggle.is-active .protection-toggle__track i,
+.flat-ui.protection-off .settings-switch.is-active i::after {
+  background: #ff5e6c;
+}
+
+.flat-ui.protection-off .protection-toggle__track,
+.flat-ui.protection-off .settings-switch i {
+  background: #32171e;
+  border-color: #73313d;
+}
+
+.flat-ui.protection-off .protection-toggle__track i,
+.flat-ui.protection-off .settings-switch i::after {
+  background: #ff7b88;
+}
+
+.flat-ui.behavior-protection-off .detail-module:has([data-role="behavior-protection-state"]) .protection-toggle {
+  color: #ff7b88;
+}
+
+.flat-ui.behavior-protection-off .detail-module:has([data-role="behavior-protection-state"]) .protection-toggle__track {
+  background: #32171e;
+  border-color: #73313d;
+}
+
+.flat-ui.behavior-protection-off .detail-module:has([data-role="behavior-protection-state"]) .protection-toggle__track i {
+  background: #ff7b88;
+}
+
+.flat-ui.behavior-protection-off [data-setting-toggle="behavior_protection_enabled"] {
+  color: #ff7b88;
+}
+
+.flat-ui.behavior-protection-off [data-setting-toggle="behavior_protection_enabled"] i {
+  background: #32171e;
+  border-color: #73313d;
+}
+
+.flat-ui.behavior-protection-off [data-setting-toggle="behavior_protection_enabled"] i::after {
+  background: #ff7b88;
+}
+
+.flat-ui .protection-module.engine-limited,
+.flat-ui .detail-module.engine-limited {
+  background: #1d1910 !important;
+  border-color: #685225 !important;
+}
+
+.flat-ui .protection-module.engine-limited .module-icon,
+.flat-ui .detail-module.engine-limited .module-icon {
+  border-color: #8a6a28 !important;
+  color: #f5c451 !important;
+}
+
+.flat-ui .protection-module.engine-limited .module-status i {
+  background: #f5c451 !important;
+}
+
+.flat-ui .protection-module.engine-unavailable,
+.flat-ui .detail-module.engine-unavailable {
+  background: #1d1015 !important;
+  border-color: #6e2d38 !important;
+}
+
+.flat-ui .protection-module.engine-unavailable .module-icon,
+.flat-ui .detail-module.engine-unavailable .module-icon {
+  border-color: #7b3340 !important;
+  color: #ff7b88 !important;
+}
+
+.flat-ui .protection-module.engine-unavailable .module-status i {
+  background: #ff5e6c !important;
 }
 
 .flat-ui .settings-select {
