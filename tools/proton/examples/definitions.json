@@ -1,6 +1,6 @@
 {
   "database_name": "Proton",
-  "version": "1.00.005",
+  "version": "1.00.006",
   "minimum_engine_version": "0.1.0",
   "provenance": {
     "source_name": "Neutron curated behavioral detection set",
@@ -20,6 +20,14 @@
       "sha256": "96151f3c6fceb5cffb71df47340886a1e96fc95972ec7c065be52c25dcb4aa70",
       "file_size": 27,
       "name": "Proton güvenli hash entegrasyon testi",
+      "severity": "low"
+    }
+  ],
+  "web_indicators": [
+    {
+      "type": "domain",
+      "value": "neutron-malware-test.invalid",
+      "name": "Neutron güvenli web koruması entegrasyon testi",
       "severity": "low"
     }
   ],

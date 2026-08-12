@@ -17,6 +17,7 @@ const MAX_RULE_BYTES = 2 * 1024 * 1024;
 const MAX_TOTAL_RULE_BYTES = 16 * 1024 * 1024;
 const MAX_SIGNATURES = 1_000_000;
 const MAX_RULES = 256;
+const MAX_WEB_INDICATORS = 500_000;
 const MAX_HEADER_BYTES = 64 * 1024;
 const SOURCE_URL_PATTERN = /^https:\/\/[^\s/$.?#][^\s]*$/i;
 
@@ -180,7 +181,23 @@ function normalizeSource(source, sourcePath) {
     };
   });
 
-  if (signatures.length === 0 && yaraRules.length === 0) {
+  const rawWebIndicators = source.web_indicators || [];
+  if (!Array.isArray(rawWebIndicators) || rawWebIndicators.length > MAX_WEB_INDICATORS) fail('web_indicators listesi geçersiz.');
+  const seenWebIndicators = new Set();
+  const webIndicators = rawWebIndicators.map((entry, index) => {
+    assertPlainObject(entry, `web_indicators[${index}]`);
+    const type = cleanText(entry.type, `web_indicators[${index}].type`, 16).toLowerCase();
+    if (!['domain', 'url'].includes(type)) fail(`Desteklenmeyen web göstergesi türü: ${type}`);
+    let value = cleanText(entry.value, `web_indicators[${index}].value`, 2048).toLowerCase();
+    if (type === 'domain') value = value.replace(/^\.+|\.+$/g, '');
+    if ((type === 'url' && !/^https?:\/\//.test(value)) || (type === 'domain' && !/^[a-z0-9.-]+$/.test(value))) fail(`Geçersiz web göstergesi: ${index}`);
+    const identity = `${type}:${value}`;
+    if (seenWebIndicators.has(identity)) fail(`Yinelenen web göstergesi: ${value}`);
+    seenWebIndicators.add(identity);
+    return { type, value, name: cleanText(entry.name, `web_indicators[${index}].name`, 160), severity: normalizeSeverity(entry.severity) };
+  });
+
+  if (signatures.length === 0 && yaraRules.length === 0 && webIndicators.length === 0) {
     fail('Proton paketi en az bir hash imzası veya YARA kuralı içermeli.');
   }
   return {
@@ -192,6 +209,7 @@ function normalizeSource(source, sourcePath) {
     created_at: new Date().toISOString(),
     signatures,
     yara_rules: yaraRules,
+    web_indicators: webIndicators,
   };
 }
 

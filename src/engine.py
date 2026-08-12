@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Neutron'un salt-okunur hızlı tarama motoru.
 
-Bu ilk sürüm bir antivirüs iddiasında bulunmaz. Yalnızca kullanıcının Masaüstü
-ve İndirilenler klasörlerinde sınırlı bir tarama yapar; dosya silmez, taşımaz,
+Bu ilk sürüm bir antivirüs iddiasında bulunmaz. Kullanıcının profil ve geçici dosya
+klasörlerinde sınırlı bir tarama yapar; dosya silmez, taşımaz,
 karantinaya almaz veya ağ üzerinden veri göndermez. Electron ile standart
 çıktıdaki JSON Lines olayları üzerinden konuşur.
 """
@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from urllib.parse import urlsplit
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -58,6 +59,7 @@ except ImportError:
 
 
 MAX_FILES = 1_500
+MAX_FULL_SCAN_FILES = 1_000_000
 MAX_DEPTH = 8
 MAX_HASH_BYTES = 25 * 1024 * 1024
 MAX_CONTENT_BYTES = 1 * 1024 * 1024
@@ -75,6 +77,7 @@ MAX_ARCHIVE_FINDINGS = 50
 MAX_PROTON_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_PROTON_SIGNATURES = 1_000_000
 MAX_PROTON_RULES = 256
+MAX_PROTON_WEB_INDICATORS = 500_000
 MAX_PROTON_RULE_BYTES = 2 * 1024 * 1024
 MAX_PROTON_TOTAL_RULE_BYTES = 16 * 1024 * 1024
 MAX_ANALYSIS_CACHE_ENTRIES = 25_000
@@ -96,6 +99,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "start_with_windows": False,
     "protection_enabled": True,
     "behavior_protection_enabled": True,
+    "web_protection_enabled": True,
     "notifications_enabled": True,
     "watch_paths": [],
     "scan_max_files": MAX_FILES,
@@ -296,6 +300,15 @@ def open_database() -> Iterator[sqlite3.Connection]:
           installed_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS proton_web_indicators (
+          indicator_type TEXT NOT NULL CHECK(indicator_type IN ('domain', 'url')),
+          value TEXT NOT NULL,
+          name TEXT NOT NULL,
+          severity TEXT NOT NULL,
+          installed_at TEXT NOT NULL,
+          PRIMARY KEY(indicator_type, value)
+        );
+
         CREATE TABLE IF NOT EXISTS app_settings (
           key TEXT PRIMARY KEY,
           value_json TEXT NOT NULL,
@@ -455,6 +468,7 @@ def signature_status_payload() -> dict[str, Any]:
         count = int(connection.execute(
             "SELECT COUNT(*) FROM signatures WHERE enabled = 1"
         ).fetchone()[0])
+        web_count = int(connection.execute("SELECT COUNT(*) FROM proton_web_indicators").fetchone()[0])
         metadata = dict(connection.execute(
             "SELECT key, value FROM signature_metadata"
         ).fetchall())
@@ -466,6 +480,7 @@ def signature_status_payload() -> dict[str, Any]:
         "version": metadata.get("version", BUILTIN_SIGNATURE_VERSION),
         "updated_at": metadata.get("updated_at"),
         "signature_count": count,
+        "web_indicator_count": web_count,
         "source": metadata.get("source", "builtin"),
         "network_used": metadata.get("source") == "github-release",
         "provenance": dict(provenance) if provenance else None,
@@ -476,7 +491,7 @@ def normalize_app_setting(key: str, value: Any) -> Any:
     if key not in DEFAULT_APP_SETTINGS:
         raise ValueError("Bilinmeyen ayar")
     if key in {
-        "start_with_windows", "protection_enabled", "behavior_protection_enabled",
+        "start_with_windows", "protection_enabled", "behavior_protection_enabled", "web_protection_enabled",
         "notifications_enabled",
     }:
         if not isinstance(value, bool):
@@ -1205,9 +1220,8 @@ def emit(event_type: str, **payload: Any) -> None:
 
 def home_scan_targets() -> list[Path]:
     home = Path.home()
-    candidates = [home / "Desktop", home / "Downloads"]
-    # Türkçe Windows klasör adları manuel taşınmış profillerde görülebilir.
-    candidates.extend([home / "Masaüstü", home / "İndirilenler"])
+    candidates = [home]
+    candidates.extend(Path(value) for value in (os.environ.get("TEMP"), os.environ.get("TMP")) if value)
 
     targets: list[Path] = []
     seen: set[Path] = set()
@@ -1242,6 +1256,7 @@ def iter_files(
     targets: list[Path],
     max_files: int = MAX_FILES,
     exclusions: ExclusionSet | None = None,
+    max_depth: int = MAX_DEPTH,
 ) -> Iterator[Path]:
     """Sembolik bağları takip etmeden, derinliği ve sayıyı sınırlı tutar."""
     yielded = 0
@@ -1250,6 +1265,11 @@ def iter_files(
 
     while stack and yielded < max_files:
         directory, depth = stack.pop()
+        if directory.is_file():
+            if not is_path_excluded(directory, active_exclusions):
+                yielded += 1
+                yield directory
+            continue
         if is_path_excluded(directory, active_exclusions, include_extension=False):
             continue
         try:
@@ -1263,7 +1283,7 @@ def iter_files(
                         if entry.is_dir(follow_symlinks=False):
                             child_path = Path(entry.path)
                             if (
-                                depth < MAX_DEPTH
+                                depth < max_depth
                                 and entry.name.casefold() not in SKIP_DIRECTORIES
                                 and not is_path_excluded(child_path, active_exclusions, include_extension=False)
                             ):
@@ -2515,6 +2535,93 @@ def watch_behavior() -> int:
         return 0
 
 
+def web_reputation(raw_url: str) -> dict[str, Any]:
+    try:
+        parsed = urlsplit(raw_url.strip())
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Geçerli bir HTTP veya HTTPS adresi gerekli")
+    normalized_url = raw_url.strip().lower()
+    host = parsed.hostname.rstrip(".").lower()
+    with open_database() as connection:
+        url_match = connection.execute(
+            "SELECT name, severity FROM proton_web_indicators WHERE indicator_type = 'url' AND value = ?",
+            (normalized_url,),
+        ).fetchone()
+        domain_rows = connection.execute(
+            "SELECT value, name, severity FROM proton_web_indicators WHERE indicator_type = 'domain'"
+        ).fetchall()
+    match = url_match
+    matched_value = normalized_url if url_match else None
+    if match is None:
+        for domain, name, severity in domain_rows:
+            if host == domain or host.endswith(f".{domain}"):
+                match = (name, severity)
+                matched_value = domain
+                break
+    return {
+        "safe": match is None,
+        "url": raw_url,
+        "host": host,
+        "matched_value": matched_value,
+        "name": str(match[0]) if match else None,
+        "severity": str(match[1]) if match else None,
+    }
+
+
+def download_source_urls(path: Path) -> list[str]:
+    if os.name != "nt":
+        return []
+    try:
+        content = Path(f"{path}:Zone.Identifier").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    return [value.strip() for key, value in re.findall(r"(?mi)^(HostUrl|ReferrerUrl)=(.+)$", content) if value.strip()]
+
+
+def watch_web() -> int:
+    downloads = Path.home() / "Downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    exclusions = load_exclusion_set()
+    signatures = load_signatures()
+    yara_rules, yara_status = load_yara_rules()
+    cache_session = open_analysis_cache_session(str(yara_status.get("fingerprint", "none")))
+    known = snapshot_targets([downloads], MAX_FULL_SCAN_FILES, exclusions)
+    emit("web-ready", target=str(downloads), tracked=len(known))
+    try:
+        while True:
+            time.sleep(WATCH_INTERVAL_SECONDS)
+            current = snapshot_targets([downloads], MAX_FULL_SCAN_FILES, load_exclusion_set())
+            for raw_path, signature in current.items():
+                if known.get(raw_path) == signature:
+                    continue
+                path = Path(raw_path)
+                file_findings = inspect_file_cached(path, signatures, yara_rules, exclusions, cache_session)
+                blocked = None
+                for source_url in download_source_urls(path):
+                    result = web_reputation(source_url)
+                    if not result["safe"]:
+                        blocked = result
+                        break
+                if blocked:
+                    finding = Finding(str(path), "web-reputation", blocked["severity"] or "high", f"Zararlı indirme kaynağı: {blocked['name']}")
+                    event_id = save_protection_event("web-download-blocked", finding)
+                    emit("web-finding", event_id=event_id, file_name=path.name, source_url=blocked["url"], finding=asdict(finding))
+                elif file_findings:
+                    for finding in file_findings:
+                        event_id = save_protection_event("web-download-finding", finding)
+                        emit("web-finding", event_id=event_id, file_name=path.name, source_url=None, finding=asdict(finding))
+                else:
+                    emit("web-checked", file_name=path.name, file_path=str(path))
+            known = current
+            flush_analysis_cache(cache_session)
+    except KeyboardInterrupt:
+        flush_analysis_cache(cache_session)
+        emit("web-stopped")
+        return 0
+
+
 def watch_targets_polling_fallback() -> int:
     """Poll the user's common download locations without changing any files."""
     settings = read_app_settings()
@@ -2830,6 +2937,29 @@ def validate_proton_payload(payload: Any) -> dict[str, Any]:
     except ValueError:
         raise ValueError("Proton provenance timestamp is invalid") from None
 
+    raw_web_indicators = payload.get("web_indicators", [])
+    if not isinstance(raw_web_indicators, list) or len(raw_web_indicators) > MAX_PROTON_WEB_INDICATORS:
+        raise ValueError("Proton web göstergesi listesi geçersiz")
+    web_indicators: list[dict[str, str]] = []
+    seen_web: set[tuple[str, str]] = set()
+    for index, entry in enumerate(raw_web_indicators):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Proton web göstergesi {index} geçersiz")
+        indicator_type = str(entry.get("type", "")).lower()
+        value = str(entry.get("value", "")).strip().lower()
+        name = str(entry.get("name", "")).strip()
+        severity = str(entry.get("severity", "")).lower()
+        identity = (indicator_type, value)
+        if (indicator_type not in {"domain", "url"} or not value or len(value) > 2048 or identity in seen_web
+                or not name or len(name) > 160 or severity not in {"low", "medium", "high", "critical"}):
+            raise ValueError(f"Proton web göstergesi {index} alanları geçersiz")
+        if indicator_type == "domain" and not re.fullmatch(r"[a-z0-9.-]+", value):
+            raise ValueError(f"Proton domain göstergesi {index} geçersiz")
+        if indicator_type == "url" and urlsplit(value).scheme not in {"http", "https"}:
+            raise ValueError(f"Proton URL göstergesi {index} geçersiz")
+        seen_web.add(identity)
+        web_indicators.append({"type": indicator_type, "value": value, "name": name, "severity": severity})
+
     raw_signatures = payload.get("signatures")
     if not isinstance(raw_signatures, list) or len(raw_signatures) > MAX_PROTON_SIGNATURES:
         raise ValueError("Proton hash imzası listesi geçersiz")
@@ -2882,12 +3012,13 @@ def validate_proton_payload(payload: Any) -> dict[str, Any]:
             raise ValueError(f"Proton YARA özeti {index} uyuşmuyor")
         rules.append({"name": name, "sha256": digest, "content": content})
 
-    if not signatures and not rules:
+    if not signatures and not rules and not web_indicators:
         raise ValueError("Proton paketi boş")
     return {
         "version": version,
         "created_at": created_at,
         "provenance": provenance,
+        "web_indicators": web_indicators,
         "signatures": signatures,
         "rules": rules,
     }
@@ -2958,6 +3089,12 @@ def install_proton_from_stdin() -> int:
                     payload["provenance"]["review_policy"], datetime.now(timezone.utc).isoformat(),
                 ),
             )
+            connection.execute("DELETE FROM proton_web_indicators")
+            connection.executemany(
+                "INSERT INTO proton_web_indicators (indicator_type, value, name, severity, installed_at) VALUES (?, ?, ?, ?, ?)",
+                [(item["type"], item["value"], item["name"], item["severity"], payload["created_at"])
+                 for item in payload["web_indicators"]],
+            )
             for key, value in {
                 "version": payload["version"],
                 "database_name": SIGNATURE_DATABASE_NAME,
@@ -3023,14 +3160,17 @@ def yara_status() -> int:
     return 0 if status.get("available") and status.get("rule_files", 0) > 0 and _compiled else 2
 
 
-def scan_targets(targets: list[Path], mode: str) -> int:
+def scan_targets(
+    targets: list[Path], mode: str, maximum_files: int | None = None,
+    maximum_depth: int = MAX_DEPTH,
+) -> int:
     started_at = time.monotonic()
     completed_at = datetime.now(timezone.utc).isoformat()
     if not targets:
         emit("error", code="NO_TARGETS", message="Taranacak klasör bulunamadı.")
         return 2
 
-    max_files = int(read_app_settings()["scan_max_files"])
+    max_files = maximum_files or int(read_app_settings()["scan_max_files"])
     emit("started", mode=mode, targets=[target.name for target in targets], max_files=max_files)
     scanned = 0
     findings: list[Finding] = []
@@ -3041,7 +3181,7 @@ def scan_targets(targets: list[Path], mode: str) -> int:
     emit("engine-status", yara=yara_status)
 
     try:
-        for file_path in iter_files(targets, max_files, exclusions):
+        for file_path in iter_files(targets, max_files, exclusions, maximum_depth):
             scanned += 1
             findings.extend(inspect_file_cached(
                 file_path, signatures, yara_rules, exclusions, cache_session
@@ -3099,7 +3239,7 @@ def scan_targets(targets: list[Path], mode: str) -> int:
 
 
 def quick_scan() -> int:
-    return scan_targets(configured_scan_targets(), "quick")
+    return scan_targets(home_scan_targets(), "quick")
 
 
 def custom_scan(raw_target: str) -> int:
@@ -3110,10 +3250,22 @@ def custom_scan(raw_target: str) -> int:
         emit("error", code="INVALID_TARGET", message="Seçilen klasör kullanılamıyor.")
         return 2
 
-    if not target.is_dir():
-        emit("error", code="INVALID_TARGET", message="Seçilen konum bir klasör değil.")
+    if not target.is_dir() and not target.is_file():
+        emit("error", code="INVALID_TARGET", message="Seçilen dosya veya klasör kullanılamıyor.")
         return 2
     return scan_targets([target], "custom")
+
+
+def full_scan(raw_target: str) -> int:
+    try:
+        target = Path(raw_target).resolve(strict=True)
+    except (OSError, RuntimeError):
+        emit("error", code="INVALID_TARGET", message="Seçilen sürücü kullanılamıyor.")
+        return 2
+    if not target.is_dir():
+        emit("error", code="INVALID_TARGET", message="Tam tarama hedefi bir sürücü olmalı.")
+        return 2
+    return scan_targets([target], "full", MAX_FULL_SCAN_FILES, 64)
 
 
 def history(limit: int) -> int:
@@ -3128,12 +3280,15 @@ def history(limit: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Neutron salt-okunur hızlı tarama motoru")
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--quick-scan", action="store_true", help="Masaüstü ve İndirilenler klasörlerini tara")
+    action.add_argument("--quick-scan", action="store_true", help="Aktif kullanıcı profili ve Temp klasörlerini tara")
     action.add_argument("--engine-version", action="store_true", help="Neutron motor sürümünü göster")
-    action.add_argument("--scan-path", metavar="KLASOR", help="Kullanıcının seçtiği tek klasörü tara")
+    action.add_argument("--scan-path", metavar="HEDEF", help="Kullanıcının seçtiği tek dosya veya klasörü tara")
+    action.add_argument("--full-scan", metavar="SURUCU", help="Seçilen sürücüyü tam tara")
     action.add_argument("--history", action="store_true", help="Yerel tarama geçmişini oku")
     action.add_argument("--watch", action="store_true", help="Yeni ve değişen dosyaları izle")
     action.add_argument("--watch-behavior", action="store_true", help="Süreçleri ve kalıcılık noktalarını izle")
+    action.add_argument("--watch-web", action="store_true", help="İndirilen dosyaları ve kaynak adreslerini izle")
+    action.add_argument("--check-url", metavar="URL", help="URL veya domain itibarını yerel Proton verisinde denetle")
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
     action.add_argument("--protection-action", metavar="ID", type=int, help="Gerçek zamanlı koruma olayına işlem uygula")
     action.add_argument("--signature-status", action="store_true", help="Yerel imza veritabanı durumunu oku")
@@ -3166,6 +3321,8 @@ def main() -> int:
         return 0
     if args.history:
         return history(args.limit)
+    if args.full_scan:
+        return full_scan(args.full_scan)
     if args.protection_history:
         return protection_history(args.limit)
     if args.protection_action is not None:
@@ -3202,6 +3359,15 @@ def main() -> int:
         return watch_targets()
     if args.watch_behavior:
         return watch_behavior()
+    if args.watch_web:
+        return watch_web()
+    if args.check_url:
+        try:
+            emit("url-reputation", **web_reputation(args.check_url))
+            return 0
+        except ValueError as error:
+            emit("error", code="INVALID_URL", message=str(error))
+            return 2
     if args.scan_path:
         return custom_scan(args.scan_path)
     if args.quarantine:

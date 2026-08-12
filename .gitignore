@@ -14,6 +14,7 @@ proton-encryption.key
 proton-signing-private.pem
 proton-secrets/
 proton-dist/
+runtime/proton/
 requirements.txt
 tests/
 requirements-build.txt

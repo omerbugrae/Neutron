@@ -8,11 +8,16 @@ contextBridge.exposeInMainWorld('neutronWindow', {
 
 contextBridge.exposeInMainWorld('neutronEngine', {
   startQuickScan: () => ipcRenderer.invoke('scan:start'),
+  getScanDrives: () => ipcRenderer.invoke('scan:drives'),
+  startFullScan: (targetPath) => ipcRenderer.invoke('scan:full', targetPath),
+  chooseCustomScan: () => ipcRenderer.invoke('scan:choose-custom'),
   chooseFolderAndScan: () => ipcRenderer.invoke('scan:choose-folder'),
   getScanHistory: () => ipcRenderer.invoke('scan:history'),
   startProtection: () => ipcRenderer.invoke('protection:start'),
   stopProtection: () => ipcRenderer.invoke('protection:stop'),
   getProtectionStatus: () => ipcRenderer.invoke('protection:status'),
+  checkUrlReputation: (url) => ipcRenderer.invoke('web:check-url', url),
+  openSafeUrl: (url) => ipcRenderer.invoke('web:open-url', url),
   getProtectionHistory: () => ipcRenderer.invoke('protection:history'),
   applyProtectionAction: (itemId, action) => ipcRenderer.invoke('protection:action', itemId, action),
   getEngineStatus: () => ipcRenderer.invoke('engine:status'),

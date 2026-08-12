@@ -56,7 +56,7 @@ proton-1.00.002.pdbx
 proton-1.00.002.pdbx.sig
 ```
 
-Bu iki dosya `NeutronProton` GitHub deposundaki `proton-v1.00.005` Release'ine
+Bu iki dosya `NeutronProton` GitHub deposundaki `proton-v1.00.006` Release'ine
 yüklenebilir.
 
 ## Tek komutla oluşturma ve GitHub'da yayımlama
@@ -83,8 +83,8 @@ yalnız `.pdbx` ile `.pdbx.sig` dosyaları yüklenir.
 
 ```powershell
 npm.cmd run proton:verify -- `
-  --package C:\Neutron-Proton-Release\proton-1.00.005.pdbx `
-  --signature C:\Neutron-Proton-Release\proton-1.00.005.pdbx.sig `
+  --package C:\Neutron-Proton-Release\proton-1.00.006.pdbx `
+  --signature C:\Neutron-Proton-Release\proton-1.00.006.pdbx.sig `
   --public-key C:\Neutron-Secrets\proton-signing-public.pem `
   --encryption-key C:\Neutron-Secrets\proton-encryption.key
 ```

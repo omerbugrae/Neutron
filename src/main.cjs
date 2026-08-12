@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, Tray } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron');
 const { spawn } = require('child_process');
 const { existsSync } = require('fs');
 const path = require('path');
@@ -27,6 +27,7 @@ if (!hasSingleInstanceLock) {
 let activeScan = null;
 let protectionWatcher = null;
 let behaviorWatcher = null;
+let webWatcher = null;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -36,6 +37,7 @@ let appSettings = {
   start_with_windows: false,
   protection_enabled: true,
   behavior_protection_enabled: true,
+  web_protection_enabled: true,
   notifications_enabled: true,
   watch_paths: [],
   scan_max_files: 1500,
@@ -309,7 +311,7 @@ function createProtonUpdater() {
   return new ProtonUpdater({
     releasesUrl: process.env.NEUTRON_PROTON_RELEASES_URL || undefined,
     publicKeyPath: path.join(__dirname, 'security', 'proton-signing-public.pem'),
-    packagedKeyPath: path.join(process.resourcesPath, 'proton', 'proton-runtime.key'),
+    packagedKeyPath: path.join(process.resourcesPath, 'runtime', 'proton', 'proton-runtime.key'),
     updateDirectory: path.join(app.getPath('userData'), 'proton-updates'),
     userAgent: `Neutron/${app.getVersion()}`,
     appVersion: app.getVersion(),
@@ -418,7 +420,9 @@ function startScan(webContents, options = {}) {
 
   const scanId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const engine = resolveEngine(
-    options.targetPath ? ['--scan-path', options.targetPath] : ['--quick-scan']
+    options.targetPath
+      ? [options.fullScan ? '--full-scan' : '--scan-path', options.targetPath]
+      : ['--quick-scan']
   );
   const child = spawn(
     engine.command,
@@ -504,7 +508,45 @@ function protectionStatus() {
     behaviorEnabled: Boolean(behaviorWatcher),
     behaviorReady: Boolean(behaviorWatcher?.ready),
     behaviorConfigured: Boolean(appSettings.behavior_protection_enabled),
+    webEnabled: Boolean(webWatcher),
+    webReady: Boolean(webWatcher?.ready),
+    webConfigured: Boolean(appSettings.web_protection_enabled),
   };
+}
+
+function startWebWatcher() {
+  if (webWatcher) return protectionStatus();
+  const engine = resolveEngine(['--watch-web']);
+  const child = spawn(engine.command, engine.arguments, { cwd: engine.cwd, windowsHide: true, shell: false, env: engineEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
+  const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
+  webWatcher = watcher;
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    watcher.pending += chunk;
+    const lines = watcher.pending.split(/\r?\n/); watcher.pending = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'web-ready') watcher.ready = true;
+        sendProtectionEvent(event);
+        if (event.type === 'web-finding') showFindingNotification(event, 'Neutron zararlı indirme kaynağı algıladı');
+      } catch { sendProtectionEvent({ type: 'web-error', message: 'Web korumasından geçersiz yanıt alındı.' }); }
+    }
+  });
+  child.stderr.setEncoding('utf8'); child.stderr.on('data', (chunk) => { watcher.stderr = `${watcher.stderr}${chunk}`.slice(-2000); });
+  child.once('close', (code) => {
+    const current = webWatcher === watcher; if (current) webWatcher = null;
+    if (current && !watcher.stopping && code !== 0) sendProtectionEvent({ type: 'web-error', message: watcher.stderr.trim() || 'Web koruması durdu.' });
+    else if (current && !watcher.silent) sendProtectionEvent({ type: 'web-stopped' });
+  });
+  return protectionStatus();
+}
+
+function stopWebWatcher(options = {}) {
+  if (!webWatcher) return protectionStatus();
+  webWatcher.stopping = true; webWatcher.silent = Boolean(options.silent); webWatcher.child.kill(); webWatcher = null;
+  return protectionStatus();
 }
 
 function startBehaviorWatcher() {
@@ -649,6 +691,7 @@ async function updateApplicationSetting(key, value) {
     'start_with_windows',
     'protection_enabled',
     'behavior_protection_enabled',
+    'web_protection_enabled',
     'notifications_enabled',
     'watch_paths',
     'scan_max_files',
@@ -671,6 +714,8 @@ async function updateApplicationSetting(key, value) {
     appSettings.protection_enabled ? startProtectionWatcher() : stopProtectionWatcher();
   } else if (key === 'behavior_protection_enabled') {
     appSettings.behavior_protection_enabled ? startBehaviorWatcher() : stopBehaviorWatcher();
+  } else if (key === 'web_protection_enabled') {
+    appSettings.web_protection_enabled ? startWebWatcher() : stopWebWatcher();
   } else if ((key === 'watch_paths' || key === 'scan_max_files') && protectionWatcher) {
     stopProtectionWatcher({ silent: true });
     startProtectionWatcher();
@@ -725,6 +770,7 @@ async function createWindow() {
   await readAppSettings();
   if (appSettings.protection_enabled) startProtectionWatcher();
   if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
+  if (appSettings.web_protection_enabled) startWebWatcher();
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
@@ -748,6 +794,25 @@ ipcMain.on('window:close', (event) => {
 });
 
 ipcMain.handle('scan:start', (event) => startScan(event.sender));
+ipcMain.handle('scan:drives', () => {
+  const drives = [];
+  if (process.platform === 'win32') {
+    for (let code = 67; code <= 90; code += 1) {
+      const root = `${String.fromCharCode(code)}:\\`;
+      if (existsSync(root)) drives.push({ path: root, label: `Yerel Disk (${root.slice(0, 2)})` });
+    }
+  } else {
+    drives.push({ path: '/', label: 'Sistem diski (/)' });
+  }
+  return { ok: true, drives };
+});
+ipcMain.handle('scan:full', (event, targetPath) => {
+  const allowed = process.platform === 'win32'
+    ? /^[A-Z]:\\$/i.test(String(targetPath || ''))
+    : targetPath === '/';
+  if (!allowed || !existsSync(targetPath)) return { ok: false, message: 'Seçilen sürücü kullanılamıyor.' };
+  return startScan(event.sender, { targetPath, fullScan: true });
+});
 ipcMain.handle('scan:choose-folder', async (event) => {
   if (activeScan) return { ok: false, message: 'Zaten çalışan bir tarama var.' };
   const window = BrowserWindow.fromWebContents(event.sender);
@@ -755,6 +820,17 @@ ipcMain.handle('scan:choose-folder', async (event) => {
     title: 'Taranacak klasörü seç',
     buttonLabel: 'Bu klasörü tara',
     properties: ['openDirectory'],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { ok: false, cancelled: true };
+  return startScan(event.sender, { targetPath: selection.filePaths[0] });
+});
+ipcMain.handle('scan:choose-custom', async (event) => {
+  if (activeScan) return { ok: false, message: 'Zaten çalışan bir tarama var.' };
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const selection = await dialog.showOpenDialog(window, {
+    title: 'Taranacak dosya veya klasörü seç',
+    buttonLabel: 'Seçileni tara',
+    properties: ['openFile', 'openDirectory'],
   });
   if (selection.canceled || !selection.filePaths[0]) return { ok: false, cancelled: true };
   return startScan(event.sender, { targetPath: selection.filePaths[0] });
@@ -769,6 +845,13 @@ ipcMain.handle('protection:stop', async () => {
   return result.ok ? protectionStatus() : result;
 });
 ipcMain.handle('protection:status', () => protectionStatus());
+ipcMain.handle('web:check-url', (_event, url) => runEngineAction(['--check-url', String(url || '')], 'url-reputation'));
+ipcMain.handle('web:open-url', async (_event, url) => {
+  const result = await runEngineAction(['--check-url', String(url || '')], 'url-reputation');
+  if (!result.ok || !result.safe) return result;
+  await shell.openExternal(result.url);
+  return { ...result, opened: true };
+});
 ipcMain.handle('protection:history', () => runEngineAction(['--protection-history', '--limit', '20'], 'protection-history'));
 ipcMain.handle('protection:action', async (_event, itemId, action) => {
   if (!Number.isInteger(itemId) || itemId < 1 || !['quarantine', 'trust', 'ignore'].includes(action)) {
@@ -903,6 +986,11 @@ app.on('before-quit', () => {
     behaviorWatcher.stopping = true;
     behaviorWatcher.child.kill();
     behaviorWatcher = null;
+  }
+  if (webWatcher) {
+    webWatcher.stopping = true;
+    webWatcher.child.kill();
+    webWatcher = null;
   }
   tray?.destroy();
   tray = null;

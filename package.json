@@ -14,6 +14,7 @@
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
     "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
+    "make:proton": "node tools/proton/make-with-runtime-key.cjs",
     "icon:build": "electron tools/build-windows-icon.cjs",
     "archive:check": "node --check src/neutron-archive.cjs",
     "archive:version": "node src/neutron-archive.cjs --version",

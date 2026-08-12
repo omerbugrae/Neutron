@@ -8,8 +8,11 @@
   const quickScanButtons = [...document.querySelectorAll('[data-action="quick-scan"]')];
   const heroPrimaryAction = document.querySelector('.hero-actions [data-action="quick-scan"]');
   const folderScanButtons = [...document.querySelectorAll('[data-action="choose-folder-scan"]')];
+  const scanModeTabs = [...document.querySelectorAll('[data-scan-mode]')];
+  const scanModeOptions = document.querySelector('[data-role="scan-mode-options"]');
   const protectionToggle = document.querySelector('[data-action="toggle-protection"]');
   const behaviorProtectionToggle = document.querySelector('[data-action="toggle-behavior-protection"]');
+  const webProtectionToggle = document.querySelector('[data-action="toggle-web-protection"]');
   const signatureUpdateButton = document.querySelector('[data-action="update-signatures"]');
   const clearAnalysisCacheButton = document.querySelector('[data-action="clear-analysis-cache"]');
   const settingToggles = [...document.querySelectorAll('[data-setting-toggle]')];
@@ -18,14 +21,20 @@
   const addExclusionFolderButton = document.querySelector('[data-action="add-exclusion-folder"]');
   const exclusionExtensionForm = document.querySelector('[data-role="exclusion-extension-form"]');
   const exclusionExtensionInput = document.querySelector('[data-role="exclusion-extension-input"]');
+  const webCheckForm = document.querySelector('[data-role="web-check-form"]');
+  const webCheckInput = document.querySelector('[data-role="web-check-input"]');
   const textTargets = (role) => [...document.querySelectorAll(`[data-role="${role}"]`)];
   let scanning = false;
   let protectionEnabled = null;
   let behaviorEnabled = null;
   let behaviorReady = null;
+  let webEnabled = null;
+  let webReady = null;
   let signatureLabel = 'Proton hazırlanıyor';
   let currentSettings = null;
   let pendingProtectionEventId = null;
+  let selectedScanMode = 'quick';
+  let selectedFullScanDrive = null;
 
   const setText = (role, value) => textTargets(role).forEach((element) => {
     element.textContent = value;
@@ -62,6 +71,58 @@
     folderScanButtons.forEach((button) => { button.disabled = disabled; });
   };
 
+  const renderScanMode = async (mode) => {
+    selectedScanMode = mode;
+    scanModeTabs.forEach((tab) => {
+      const active = tab.dataset.scanMode === mode;
+      tab.classList.toggle('is-active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    if (!scanModeOptions) return;
+    scanModeOptions.replaceChildren();
+    scanModeOptions.classList.remove('is-entering');
+    void scanModeOptions.offsetWidth;
+    scanModeOptions.classList.add('is-entering');
+    const primaryLabel = quickScanButtons.find((button) => button !== heroPrimaryAction)?.querySelector('[data-action-label]');
+    if (mode === 'quick') {
+      setText('scan-page-label', 'HIZLI TARAMA');
+      setText('scan-page-heading', 'Kritik alanlar');
+      setText('scan-page-summary', 'Zararlıların sık kullandığı önemli kullanıcı alanları hızlıca incelenir.');
+      if (primaryLabel) primaryLabel.textContent = 'Hızlı tarama başlat';
+      return;
+    }
+    if (mode === 'custom') {
+      setText('scan-page-label', 'ÖZEL TARAMA');
+      setText('scan-page-heading', 'Dosya veya klasör seçin');
+      setText('scan-page-summary', 'Tek bir dosyayı ya da seçtiğiniz klasörün içeriğini ayrıntılı tarayın.');
+      if (primaryLabel) primaryLabel.textContent = 'Dosya veya klasör seç';
+      return;
+    }
+    setText('scan-page-label', 'TAM TARAMA');
+    setText('scan-page-heading', 'Taranacak sürücüyü seçin');
+    setText('scan-page-summary', 'Seçilen sürücü erişilebilen tüm klasörleriyle taranır; işlem uzun sürebilir.');
+    if (primaryLabel) primaryLabel.textContent = 'Tam taramayı başlat';
+    const result = await engine?.getScanDrives?.();
+    for (const drive of result?.drives || []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'scan-drive-card';
+      button.classList.toggle('is-selected', selectedFullScanDrive === drive.path);
+      button.innerHTML = '<span class="scan-drive-icon"><svg aria-hidden="true"><use href="#icon-drive"></use></svg></span><span><strong></strong><small></small></span><i></i>';
+      button.querySelector('strong').textContent = drive.label;
+      button.querySelector('small').textContent = drive.path;
+      button.addEventListener('click', () => {
+        selectedFullScanDrive = drive.path;
+        renderScanMode('full');
+      });
+      scanModeOptions.append(button);
+    }
+    if (!selectedFullScanDrive && result?.drives?.[0]) {
+      selectedFullScanDrive = result.drives[0].path;
+      renderScanMode('full');
+    }
+  };
+
   const syncHeroPrimaryAction = () => {
     if (!heroPrimaryAction || scanning) return;
     const label = heroPrimaryAction.querySelector('[data-action-label]');
@@ -76,7 +137,7 @@
     heroPrimaryAction.disabled = false;
     heroPrimaryAction.title = shouldEnableProtection
       ? 'Gerçek zamanlı dosya korumasını etkinleştir'
-      : 'Masaüstü ve İndirilenler için salt-okunur hızlı tarama';
+      : 'Kritik kullanıcı alanları için salt-okunur hızlı tarama';
   };
 
   const pageNameFromHash = () => window.location.hash.slice(1);
@@ -134,7 +195,7 @@
       : protectionEnabled
       ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.'
       : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.');
-    setText('scan-page-heading', 'Masaüstü ve İndirilenler');
+    setText('scan-page-heading', 'Kritik alanlar');
     setText('scan-page-summary', `En fazla ${scanLimit.toLocaleString('tr-TR')} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
     setButtons('Hızlı tarama başlat', false);
     syncHeroPrimaryAction();
@@ -143,10 +204,11 @@
   const refreshProtectionVisualState = () => {
     const protectionKnown = typeof protectionEnabled === 'boolean';
     const behaviorKnown = typeof behaviorEnabled === 'boolean';
-    const partiallyProtected = protectionEnabled === true && behaviorEnabled === false;
+    const partiallyProtected = protectionEnabled === true && (behaviorEnabled === false || webEnabled === false);
 
     document.body.classList.toggle('protection-warning', partiallyProtected);
     document.body.classList.toggle('behavior-protection-off', behaviorKnown && behaviorEnabled === false);
+    document.body.classList.toggle('web-protection-off', typeof webEnabled === 'boolean' && webEnabled === false);
 
     if (!protectionKnown || !behaviorKnown || protectionEnabled === false) return;
     if (partiallyProtected) {
@@ -208,6 +270,21 @@
     refreshProtectionVisualState();
   };
 
+  const setWebProtectionState = (enabled, ready, heading, detail) => {
+    webEnabled = enabled; webReady = ready;
+    setText('overview-web-state', enabled ? (ready ? 'Etkin' : 'Başlatılıyor') : 'Kapalı');
+    setText('overview-web-detail', detail);
+    setText('web-protection-state', heading);
+    setText('web-protection-detail', detail);
+    setText('web-toggle-label', enabled ? 'Kapat' : 'Aç');
+    if (webProtectionToggle) {
+      webProtectionToggle.classList.toggle('is-active', enabled);
+      webProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      webProtectionToggle.disabled = false;
+    }
+    refreshProtectionVisualState();
+  };
+
   const applyEngineStatus = async () => {
     const overviewStatus = document.querySelector('[data-role="overview-engine-status"]');
     const overviewCard = overviewStatus?.closest('.protection-module');
@@ -221,6 +298,7 @@
       const activeModules = [
         result.protection?.enabled,
         result.protection?.behaviorConfigured,
+        result.protection?.webConfigured,
       ].filter(Boolean).length;
       const healthy = yaraReady && ruleFiles > 0;
 
@@ -230,7 +308,7 @@
         : `Motor ${result.version} çalışıyor; YARA kuralları kullanılamıyor.`);
       setText('engine-card-heading', `Neutron Engine ${result.version}`);
       setText('engine-card-detail', healthy
-        ? `Proton ${protonVersion} · ${ruleFiles} YARA dosyası · ${activeModules}/2 canlı koruma modülü etkin.`
+        ? `Proton ${protonVersion} · ${ruleFiles} YARA dosyası · ${activeModules}/3 canlı koruma modülü etkin.`
         : `Proton ${protonVersion} yüklü; YARA motoru veya kural dosyaları kullanılamıyor.`);
       overviewStatus?.classList.toggle('module-status--pending', !healthy);
       overviewCard?.classList.remove('protection-module--pending', 'engine-unavailable');
@@ -275,6 +353,15 @@
       } else {
         setBehaviorProtectionState(false, false, 'Kapalı', 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.');
       }
+      const webConfigured = typeof status.webConfigured === 'boolean' ? status.webConfigured : Boolean(status.webEnabled);
+      setWebProtectionState(
+        webConfigured,
+        Boolean(status.webReady),
+        webConfigured ? (status.webReady ? 'Etkin' : 'Başlatılıyor') : 'Kapalı',
+        webConfigured
+          ? (status.webReady ? 'İndirilen dosyalar ve kaynak adresleri yerel olarak denetleniyor.' : 'Web koruması başlatılıyor.')
+          : 'İndirme ve bağlantı itibarı denetimi kapalı.',
+      );
       await applyEngineStatus();
     } catch {
       setProtectionState(false, 'Koruma kullanılamıyor', 'Python motoruna bağlanılamadı.');
@@ -600,7 +687,7 @@
           : 'Süreçler ve kalıcılık noktaları şu anda izlenmiyor.',
       );
     }
-    if (key === 'protection_enabled' || key === 'behavior_protection_enabled') {
+    if (key === 'protection_enabled' || key === 'behavior_protection_enabled' || key === 'web_protection_enabled') {
       await applyProtectionStatus();
     }
     return true;
@@ -829,6 +916,10 @@
     showPage(target.dataset.pageTarget);
   }));
 
+  scanModeTabs.forEach((tab) => tab.addEventListener('click', () => {
+    if (!scanning) renderScanMode(tab.dataset.scanMode || 'quick');
+  }));
+
   window.addEventListener('hashchange', () => showPage(pageNameFromHash(), { updateHash: false }));
 
   engine?.onProtectionEvent?.((event) => {
@@ -892,6 +983,30 @@
         false, false, 'Kullanılamıyor',
         event.message || 'Davranış izleme motoru başlatılamadı.',
       );
+      return;
+    }
+
+    if (event.type === 'web-ready') {
+      setWebProtectionState(true, true, 'Etkin', 'İndirilen dosyalar ve kaynak adresleri yerel olarak denetleniyor.');
+      return;
+    }
+    if (event.type === 'web-checked') {
+      setText('overview-web-detail', `Son indirme denetlendi: ${event.file_name || 'dosya'}.`);
+      return;
+    }
+    if (event.type === 'web-finding') {
+      setText('overview-web-state', 'Uyarı');
+      setText('overview-web-detail', `${event.file_name || 'İndirme'} zararlı kaynakla eşleşti.`);
+      setText('web-protection-detail', event.finding?.reason || 'Zararlı indirme kaynağı algılandı.');
+      applyProtectionHistory();
+      return;
+    }
+    if (event.type === 'web-stopped') {
+      setWebProtectionState(false, false, 'Kapalı', 'İndirme ve bağlantı itibarı denetimi kapalı.');
+      return;
+    }
+    if (event.type === 'web-error') {
+      setWebProtectionState(false, false, 'Kullanılamıyor', event.message || 'Web koruması başlatılamadı.');
       return;
     }
 
@@ -964,6 +1079,43 @@
       setText('behavior-protection-detail', error?.message || 'Davranış izleme değiştirilemedi.');
       behaviorProtectionToggle.disabled = false;
       setText('behavior-toggle-label', behaviorEnabled ? 'Kapat' : 'Aç');
+    }
+  });
+
+  webProtectionToggle?.addEventListener('click', async () => {
+    if (!engine?.updateSetting || typeof webEnabled !== 'boolean') return;
+    webProtectionToggle.disabled = true;
+    setText('web-toggle-label', webEnabled ? 'Kapatılıyor' : 'Başlatılıyor');
+    try {
+      const result = await engine.updateSetting('web_protection_enabled', !webEnabled);
+      if (!result?.ok) throw new Error(result?.message || 'Web koruması değiştirilemedi.');
+      if (result.settings) renderSettings(result.settings);
+      await applyProtectionStatus();
+    } catch (error) {
+      setText('web-protection-detail', error?.message || 'Web koruması değiştirilemedi.');
+      webProtectionToggle.disabled = false;
+    }
+  });
+
+  webCheckForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const url = webCheckInput?.value?.trim();
+    if (!url || !engine?.openSafeUrl) return;
+    const submit = webCheckForm.querySelector('button');
+    if (submit) submit.disabled = true;
+    setText('web-check-result', 'Bağlantı yerel veritabanında denetleniyor…');
+    try {
+      const result = await engine.openSafeUrl(url);
+      if (!result?.ok) throw new Error(result?.message || 'Bağlantı denetlenemedi.');
+      setText('web-check-result', result.safe
+        ? `Temiz: ${result.host} denetlendi ve tarayıcıda açıldı.`
+        : `ENGELLENDİ: ${result.name || result.matched_value} · ${result.severity || 'yüksek'} risk.`);
+      webCheckForm.classList.toggle('is-danger', !result.safe);
+      webCheckForm.classList.toggle('is-safe', result.safe);
+    } catch (error) {
+      setText('web-check-result', error?.message || 'Bağlantı denetlenemedi.');
+    } finally {
+      if (submit) submit.disabled = false;
     }
   });
 
@@ -1084,15 +1236,16 @@
 
     if (event.type === 'started') {
       scanning = true;
-      setText('engine-state', 'Hızlı tarama sürüyor');
+      const modeLabel = event.mode === 'full' ? 'Tam tarama' : event.mode === 'custom' ? 'Özel tarama' : 'Hızlı tarama';
+      setText('engine-state', `${modeLabel} sürüyor`);
       setText('protection-label', 'TARAMA SÜRÜYOR');
       setText('scan-heading', 'Neutron dosyaları inceliyor.');
       setText('scan-summary', 'Dosyalar yalnız okunuyor; hiçbir dosya silinmez veya taşınmaz.');
       setText('scan-page-heading', 'Tarama devam ediyor');
       setText('scan-page-summary', 'Dosyalar yalnız okunuyor. Tarama sırasında hiçbir işlem uygulanmaz.');
-      setText('activity-title', 'Tarama başlatıldı');
-      setText('activity-detail', `${event.targets.join(' ve ')} klasörleri inceleniyor.`);
-      updateScanResult('Tarama başlatıldı', 'Dosya listesi hazırlanıyor.');
+      setText('activity-title', `${modeLabel} başlatıldı`);
+      setText('activity-detail', `${event.targets.join(' ve ')} hedefi inceleniyor.`);
+      updateScanResult(`${modeLabel} başlatıldı`, 'Dosya listesi hazırlanıyor.');
       renderFindings([]);
       return;
     }
@@ -1115,6 +1268,7 @@
       const resultTitle = confirmed > 0 ? `${confirmed} imza eşleşmesi bulundu` : 'Doğrulanmış tehdit bulunmadı';
       const detail = `${event.scanned} dosya ${formatDuration(event.elapsed_ms)} içinde incelendi.${cacheHits ? ` ${cacheHits} değişmeyen dosya önbellekten doğrulandı.` : ''}${event.limited ? ' Tarama güvenlik sınırına ulaştı.' : ''}`;
       setReadyState();
+      renderScanMode(selectedScanMode);
       setText('last-scan', 'Az önce');
       setText('threat-count', String(confirmed));
       setText('scan-page-heading', resultTitle);
@@ -1130,6 +1284,7 @@
     if (event.type === 'error') {
       scanning = false;
       setReadyState();
+      renderScanMode(selectedScanMode);
       const message = event.message || 'Beklenmeyen bir motor hatası oluştu.';
       setText('engine-state', 'Tarama başlatılamadı');
       setText('scan-page-heading', 'Tarama tamamlanamadı');
@@ -1154,6 +1309,36 @@
       }
       applySettings();
       await applyProtectionStatus();
+      return;
+    }
+    const scanPageButton = button !== heroPrimaryAction;
+    if (scanPageButton && selectedScanMode === 'custom') {
+      showPage('scan');
+      setButtons('Seçim bekleniyor', true);
+      const result = await engine?.chooseCustomScan?.();
+      if (result?.cancelled) {
+        setButtons('Hızlı tarama başlat', false);
+        renderScanMode('custom');
+        return;
+      }
+      if (!result?.ok) {
+        setReadyState();
+        updateScanResult('Tarama başlatılamadı', result?.message || 'Dosya veya klasör seçilemedi.');
+      }
+      return;
+    }
+    if (scanPageButton && selectedScanMode === 'full') {
+      if (!selectedFullScanDrive) {
+        updateScanResult('Sürücü seçilmedi', 'Tam tarama için önce bir sürücü seçin.');
+        return;
+      }
+      showPage('scan');
+      setButtons('Tarama hazırlanıyor', true);
+      const result = await engine?.startFullScan?.(selectedFullScanDrive);
+      if (!result?.ok) {
+        setReadyState();
+        updateScanResult('Tarama başlatılamadı', result?.message || 'Sürücü taraması başlatılamadı.');
+      }
       return;
     }
     if (!engine?.startQuickScan) return;
@@ -1188,6 +1373,7 @@
   }));
 
   setReadyState();
+  renderScanMode('quick');
   showPage(pageNameFromHash(), { updateHash: false });
   applyHistory();
   applyProtectionHistory();
