@@ -19,6 +19,10 @@
   const protectionToggle = document.querySelector('[data-action="toggle-protection"]');
   const behaviorProtectionToggle = document.querySelector('[data-action="toggle-behavior-protection"]');
   const webProtectionToggle = document.querySelector('[data-action="toggle-web-protection"]');
+  const amsiProtectionToggle = document.querySelector('[data-action="toggle-amsi-protection"]');
+  const watchdogProtectionToggle = document.querySelector('[data-action="toggle-watchdog-protection"]');
+  const wscProtectionToggle = document.querySelector('[data-action="toggle-wsc-protection"]');
+  const serviceProtectionToggle = document.querySelector('[data-action="toggle-service-protection"]');
   const signatureUpdateButton = document.querySelector('[data-action="update-signatures"]');
   const clearAnalysisCacheButton = document.querySelector('[data-action="clear-analysis-cache"]');
   const settingToggles = [...document.querySelectorAll('[data-setting-toggle]')];
@@ -27,6 +31,10 @@
   const addExclusionFolderButton = document.querySelector('[data-action="add-exclusion-folder"]');
   const exclusionExtensionForm = document.querySelector('[data-role="exclusion-extension-form"]');
   const exclusionExtensionInput = document.querySelector('[data-role="exclusion-extension-input"]');
+  const vtApiKeyForm = document.querySelector('[data-role="vt-api-key-form"]');
+  const vtApiKeyInput = document.querySelector('[data-role="vt-api-key-input"]');
+  const mbApiKeyForm = document.querySelector('[data-role="mb-api-key-form"]');
+  const mbApiKeyInput = document.querySelector('[data-role="mb-api-key-input"]');
   const webCheckForm = document.querySelector('[data-role="web-check-form"]');
   const webCheckInput = document.querySelector('[data-role="web-check-input"]');
   const textTargets = (role) => [...document.querySelectorAll(`[data-role="${role}"]`)];
@@ -36,6 +44,11 @@
   let behaviorReady = null;
   let webEnabled = null;
   let webReady = null;
+  let amsiEnabled = null;
+  let amsiReady = null;
+  let watchdogEnabled = null;
+  let wscEnabled = null;
+  let serviceEnabled = null;
   let signatureLabel = 'Proton hazırlanıyor';
   let currentSettings = null;
   let pendingProtectionEventId = null;
@@ -392,6 +405,68 @@
     refreshProtectionVisualState();
   };
 
+  const setAmsiProtectionState = (enabled, ready, heading, detail) => {
+    amsiEnabled = enabled; amsiReady = ready;
+    setText('amsi-protection-state', heading);
+    setText('amsi-protection-detail', detail);
+    setText('amsi-toggle-label', enabled ? 'Kapat' : 'Aç');
+    if (amsiProtectionToggle) {
+      amsiProtectionToggle.classList.toggle('is-active', enabled);
+      amsiProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      amsiProtectionToggle.disabled = false;
+    }
+  };
+
+  const setWatchdogProtectionState = (enabled, heading, detail) => {
+    watchdogEnabled = enabled;
+    setText('watchdog-protection-state', heading);
+    setText('watchdog-protection-detail', detail);
+    setText('watchdog-toggle-label', enabled ? 'Kapat' : 'Aç');
+    if (watchdogProtectionToggle) {
+      watchdogProtectionToggle.classList.toggle('is-active', enabled);
+      watchdogProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      watchdogProtectionToggle.disabled = false;
+    }
+  };
+
+  const setWscProtectionState = (enabled, heading, detail) => {
+    wscEnabled = enabled;
+    setText('wsc-protection-state', heading);
+    setText('wsc-protection-detail', detail);
+    setText('wsc-toggle-label', enabled ? 'Kapat' : 'Aç');
+    if (wscProtectionToggle) {
+      wscProtectionToggle.classList.toggle('is-active', enabled);
+      wscProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      wscProtectionToggle.disabled = false;
+    }
+  };
+
+  const setServiceProtectionState = (enabled, heading, detail) => {
+    serviceEnabled = enabled;
+    setText('service-protection-state', heading);
+    setText('service-protection-detail', detail);
+    setText('service-toggle-label', enabled ? 'Kapat' : 'Aç');
+    if (serviceProtectionToggle) {
+      serviceProtectionToggle.classList.toggle('is-active', enabled);
+      serviceProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+      serviceProtectionToggle.disabled = false;
+    }
+  };
+
+  const applyAppVersion = async () => {
+    try {
+      const result = await engine?.getAppVersion?.();
+      if (!result?.ok) throw new Error();
+      setText('update-heading', `Neutron ${result.version}`);
+      setText('update-detail', result.packaged
+        ? 'Güncellemeler otomatik denetlenir. Elle de kontrol edebilirsiniz.'
+        : 'Geliştirme modu — güncelleme denetimi yalnızca kurulu sürümde çalışır.');
+    } catch {
+      setText('update-heading', 'Neutron');
+      setText('update-detail', 'Sürüm bilgisi alınamadı.');
+    }
+  };
+
   const applyEngineStatus = async () => {
     const overviewStatus = document.querySelector('[data-role="overview-engine-status"]');
     const overviewCard = overviewStatus?.closest('.protection-module');
@@ -468,6 +543,42 @@
         webConfigured
           ? (status.webReady ? 'İndirilen dosyalar ve kaynak adresleri yerel olarak denetleniyor.' : 'Web koruması başlatılıyor.')
           : 'İndirme ve bağlantı itibarı denetimi kapalı.',
+      );
+      const amsiConfigured = typeof status.amsiConfigured === 'boolean' ? status.amsiConfigured : Boolean(status.amsiEnabled);
+      setAmsiProtectionState(
+        amsiConfigured,
+        Boolean(status.amsiReady),
+        amsiConfigured ? (status.amsiReady ? 'Etkin' : 'Başlatılıyor') : 'Kapalı',
+        amsiConfigured
+          ? (status.amsiReady ? 'Betikler çalışmadan önce yerel olarak denetleniyor.' : 'Çalıştırma öncesi koruma başlatılıyor.')
+          : 'Betik çalıştırma koruması kapalı. Etkinleştirmek yönetici izni gerektirir.',
+      );
+      const watchdogConfigured = typeof status.watchdogConfigured === 'boolean' ? status.watchdogConfigured : false;
+      setWatchdogProtectionState(
+        watchdogConfigured,
+        watchdogConfigured ? 'Etkin' : 'Kapalı',
+        watchdogConfigured
+          ? 'Neutron kapatılırsa 2 dakika içinde otomatik olarak yeniden başlatılır.'
+          : 'Otomatik yeniden başlatma kapalı. Etkinleştirmek yönetici izni gerektirir.',
+      );
+      const wscConfigured = typeof status.wscConfigured === 'boolean' ? status.wscConfigured : false;
+      setWscProtectionState(
+        wscConfigured,
+        wscConfigured ? 'Kayıtlı (deneysel)' : 'Kapalı',
+        wscConfigured
+          ? 'Neutron, Windows Güvenlik Merkezi\'ne bildirildi. Defender\'ın pasif moda geçip geçmediği cihaza bağlıdır.'
+          : 'Windows Güvenlik Merkezi kaydı kapalı. Etkinleştirmek yönetici izni gerektirir.',
+      );
+      const serviceConfigured = typeof status.serviceConfigured === 'boolean' ? status.serviceConfigured : false;
+      const serviceConnected = typeof status.serviceConnected === 'boolean' ? status.serviceConnected : false;
+      setServiceProtectionState(
+        serviceConfigured,
+        serviceConfigured ? (serviceConnected ? 'Etkin' : 'Bağlanıyor') : 'Kapalı',
+        serviceConfigured
+          ? (serviceConnected
+            ? 'Koruma motoru Windows servisi olarak çalışıyor.'
+            : 'Servise bağlanılıyor…')
+          : 'Sistem servisi modu kapalı. Etkinleştirmek yönetici izni gerektirir.',
       );
       await applyEngineStatus();
     } catch {
@@ -733,6 +844,12 @@
       scanLimitSelect.disabled = false;
     }
     renderWatchPaths(Array.isArray(settings.watch_paths) ? settings.watch_paths : []);
+    if (vtApiKeyInput && document.activeElement !== vtApiKeyInput) {
+      vtApiKeyInput.value = typeof settings.virustotal_api_key === 'string' ? settings.virustotal_api_key : '';
+    }
+    if (mbApiKeyInput && document.activeElement !== mbApiKeyInput) {
+      mbApiKeyInput.value = typeof settings.malwarebazaar_api_key === 'string' ? settings.malwarebazaar_api_key : '';
+    }
     setText('settings-save-state', 'Tüm ayarlar bu bilgisayarda saklanıyor');
     if (!scanning) {
       const limit = Number(settings.scan_max_files) || 1500;
@@ -1176,6 +1293,10 @@
       ? await engine.stopProtection()
       : await engine.startProtection();
     if (!result?.ok) {
+      if (result?.code === 'CONFIRMATION_CANCELLED') {
+        await applyProtectionStatus();
+        return;
+      }
       setProtectionState(false, 'Koruma başlatılamadı', result?.message || 'Koruma motoru kullanılamıyor.');
       return;
     }
@@ -1215,6 +1336,98 @@
     } catch (error) {
       setText('web-protection-detail', error?.message || 'Web koruması değiştirilemedi.');
       webProtectionToggle.disabled = false;
+    }
+  });
+
+  amsiProtectionToggle?.addEventListener('click', async () => {
+    if (!engine?.registerAmsiProtection || !engine?.unregisterAmsiProtection) return;
+    amsiProtectionToggle.disabled = true;
+    setText('amsi-toggle-label', amsiEnabled ? 'Kapatılıyor' : 'Etkinleştiriliyor');
+    try {
+      const result = amsiEnabled
+        ? await engine.unregisterAmsiProtection()
+        : await engine.registerAmsiProtection();
+      if (!result?.ok) {
+        const message = result?.code === 'ELEVATION_CANCELLED'
+          ? 'Yönetici izni verilmedi, betik koruması açılamadı.'
+          : (result?.message || 'Betik koruması değiştirilemedi.');
+        throw new Error(message);
+      }
+      if (result.settings) currentSettings = result.settings;
+      await applyProtectionStatus();
+    } catch (error) {
+      setText('amsi-protection-detail', error?.message || 'Betik koruması değiştirilemedi.');
+      amsiProtectionToggle.disabled = false;
+      setText('amsi-toggle-label', amsiEnabled ? 'Kapat' : 'Aç');
+    }
+  });
+
+  watchdogProtectionToggle?.addEventListener('click', async () => {
+    if (!engine?.registerWatchdogProtection || !engine?.unregisterWatchdogProtection) return;
+    watchdogProtectionToggle.disabled = true;
+    setText('watchdog-toggle-label', watchdogEnabled ? 'Kapatılıyor' : 'Etkinleştiriliyor');
+    try {
+      const result = watchdogEnabled
+        ? await engine.unregisterWatchdogProtection()
+        : await engine.registerWatchdogProtection();
+      if (!result?.ok) {
+        const message = result?.code === 'ELEVATION_CANCELLED'
+          ? 'Yönetici izni verilmedi, watchdog açılamadı.'
+          : (result?.message || 'Watchdog değiştirilemedi.');
+        throw new Error(message);
+      }
+      if (result.settings) currentSettings = result.settings;
+      await applyProtectionStatus();
+    } catch (error) {
+      setText('watchdog-protection-detail', error?.message || 'Watchdog değiştirilemedi.');
+      watchdogProtectionToggle.disabled = false;
+      setText('watchdog-toggle-label', watchdogEnabled ? 'Kapat' : 'Aç');
+    }
+  });
+
+  wscProtectionToggle?.addEventListener('click', async () => {
+    if (!engine?.registerWscProtection || !engine?.unregisterWscProtection) return;
+    wscProtectionToggle.disabled = true;
+    setText('wsc-toggle-label', wscEnabled ? 'Kapatılıyor' : 'Etkinleştiriliyor');
+    try {
+      const result = wscEnabled
+        ? await engine.unregisterWscProtection()
+        : await engine.registerWscProtection();
+      if (!result?.ok) {
+        const message = result?.code === 'ELEVATION_CANCELLED'
+          ? 'Yönetici izni verilmedi, kayıt yapılamadı.'
+          : (result?.message || 'Güvenlik Merkezi kaydı değiştirilemedi.');
+        throw new Error(message);
+      }
+      if (result.settings) currentSettings = result.settings;
+      await applyProtectionStatus();
+    } catch (error) {
+      setText('wsc-protection-detail', error?.message || 'Güvenlik Merkezi kaydı değiştirilemedi.');
+      wscProtectionToggle.disabled = false;
+      setText('wsc-toggle-label', wscEnabled ? 'Kapat' : 'Aç');
+    }
+  });
+
+  serviceProtectionToggle?.addEventListener('click', async () => {
+    if (!engine?.installProtectionService || !engine?.uninstallProtectionService) return;
+    serviceProtectionToggle.disabled = true;
+    setText('service-toggle-label', serviceEnabled ? 'Kapatılıyor' : 'Kuruluyor');
+    try {
+      const result = serviceEnabled
+        ? await engine.uninstallProtectionService()
+        : await engine.installProtectionService();
+      if (!result?.ok) {
+        const message = result?.code === 'ELEVATION_CANCELLED'
+          ? 'Yönetici izni verilmedi, servis kurulamadı.'
+          : (result?.message || 'Sistem servisi modu değiştirilemedi.');
+        throw new Error(message);
+      }
+      if (result.settings) currentSettings = result.settings;
+      await applyProtectionStatus();
+    } catch (error) {
+      setText('service-protection-detail', error?.message || 'Sistem servisi modu değiştirilemedi.');
+      serviceProtectionToggle.disabled = false;
+      setText('service-toggle-label', serviceEnabled ? 'Kapat' : 'Aç');
     }
   });
 
@@ -1352,6 +1565,32 @@
     }
   });
 
+  mbApiKeyForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submit = mbApiKeyForm.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    setText('mb-api-key-state', 'Kaydediliyor…');
+    try {
+      const saved = await saveSetting('malwarebazaar_api_key', mbApiKeyInput?.value?.trim() || '');
+      setText('mb-api-key-state', saved ? 'Anahtar kaydedildi.' : 'Anahtar kaydedilemedi.');
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
+
+  vtApiKeyForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submit = vtApiKeyForm.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    setText('vt-api-key-state', 'Kaydediliyor…');
+    try {
+      const saved = await saveSetting('virustotal_api_key', vtApiKeyInput?.value?.trim() || '');
+      setText('vt-api-key-state', saved ? 'Anahtar kaydedildi.' : 'Anahtar kaydedilemedi.');
+    } finally {
+      if (submit) submit.disabled = false;
+    }
+  });
+
   engine?.onScanEvent?.((event) => {
     if (!event || typeof event.type !== 'string') return;
 
@@ -1476,6 +1715,20 @@
     }
   }));
 
+  document.querySelector('[data-action="check-for-update"]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    setText('update-detail', 'Güncellemeler denetleniyor…');
+    try {
+      const result = await engine?.checkForAppUpdate?.();
+      setText('update-detail', result?.ok
+        ? 'Denetim başlatıldı. Güncelleme bulunursa bildirim gösterilecek.'
+        : (result?.message || 'Güncelleme denetimi yalnızca kurulu sürümde çalışır.'));
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   folderScanButtons.forEach((button) => button.addEventListener('click', async () => {
     if (scanning || !engine?.chooseFolderAndScan) return;
     setButtons('Klasör seçiliyor', true);
@@ -1506,4 +1759,5 @@
   applyExclusions();
   applyAnalysisCacheStatus();
   applyProtectionStatus();
+  applyAppVersion();
 })();

@@ -2,8 +2,8 @@ venv/
 node_modules/
 out/
 build/
-runtime/engine/
-bypass.ps1
+runtime/
+bypass.md
 __pycache__/
 data/*
 !data/rules/
@@ -22,7 +22,7 @@ activation.key
 proton-secrets/
 proton-dist/
 proton-candidates/
-runtime/proton/
 requirements.txt
 tests/
 requirements-build.txt
+plan.md

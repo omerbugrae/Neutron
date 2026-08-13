@@ -19,9 +19,12 @@ import queue
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
+import struct
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import urlsplit
 from collections.abc import Iterator
@@ -86,6 +89,7 @@ ANALYSIS_CACHE_REVISION = "static-analysis-v2-archive"
 PROGRESS_INTERVAL = 25
 WATCH_INTERVAL_SECONDS = 5.0
 BEHAVIOR_INTERVAL_SECONDS = 3.0
+NETWORK_INTERVAL_SECONDS = 10.0
 WATCH_DEBOUNCE_SECONDS = 0.9
 WATCH_SETTLE_SECONDS = 0.65
 SIGNATURE_DATABASE_NAME = "Proton"
@@ -100,6 +104,16 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "protection_enabled": True,
     "behavior_protection_enabled": True,
     "web_protection_enabled": True,
+    "amsi_protection_enabled": False,
+    "watchdog_protection_enabled": False,
+    "wsc_registration_enabled": False,
+    "network_protection_enabled": False,
+    "service_mode_enabled": False,
+    "memory_scan_enabled": False,
+    "usb_protection_enabled": True,
+    "cloud_lookup_enabled": False,
+    "malwarebazaar_api_key": "",
+    "virustotal_api_key": "",
     "notifications_enabled": True,
     "watch_paths": [],
     "scan_max_files": MAX_FILES,
@@ -368,6 +382,21 @@ def open_database() -> Iterator[sqlite3.Connection]:
           stores INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS cloud_reputation_cache (
+          sha256 TEXT PRIMARY KEY,
+          verdict TEXT NOT NULL,
+          source TEXT NOT NULL,
+          reason TEXT,
+          checked_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS network_ip_indicators (
+          value TEXT PRIMARY KEY,
+          name TEXT,
+          severity TEXT NOT NULL,
+          installed_at TEXT NOT NULL
+        );
         """
     )
     protection_columns = {
@@ -496,11 +525,20 @@ def normalize_app_setting(key: str, value: Any) -> Any:
         raise ValueError("Bilinmeyen ayar")
     if key in {
         "start_with_windows", "protection_enabled", "behavior_protection_enabled", "web_protection_enabled",
-        "notifications_enabled",
+        "amsi_protection_enabled", "watchdog_protection_enabled", "wsc_registration_enabled",
+        "network_protection_enabled", "service_mode_enabled", "memory_scan_enabled", "usb_protection_enabled",
+        "cloud_lookup_enabled", "notifications_enabled",
     }:
         if not isinstance(value, bool):
             raise ValueError("Ayar true veya false olmalı")
         return value
+    if key in {"malwarebazaar_api_key", "virustotal_api_key"}:
+        if not isinstance(value, str):
+            raise ValueError("API anahtarı metin olmalı")
+        cleaned = value.strip()
+        if len(cleaned) > 128:
+            raise ValueError("API anahtarı çok uzun")
+        return cleaned
     if key == "scan_max_files":
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("Tarama sınırı sayı olmalı")
@@ -878,6 +916,9 @@ def inspect_file_cached(
     yara_rules: Any | None,
     exclusions: ExclusionSet,
     session: AnalysisCacheSession,
+    cloud_lookup: bool = False,
+    malwarebazaar_api_key: str = "",
+    virustotal_api_key: str = "",
 ) -> list[Finding]:
     if is_path_excluded(path, exclusions):
         return []
@@ -901,7 +942,9 @@ def inspect_file_cached(
             return cached
 
     session.misses += 1
-    findings = inspect_file(path, signatures, yara_rules, exclusions)
+    findings = inspect_file(
+        path, signatures, yara_rules, exclusions, cloud_lookup, malwarebazaar_api_key, virustotal_api_key,
+    )
     try:
         final_stat = path.stat()
     except (OSError, PermissionError):
@@ -1223,10 +1266,20 @@ def update_quarantine_item(item_id: int, action: str) -> int:
         return 2
 
 
+_emit_sink: Any = None  # set by service_host() to route events over the
+# service pipe instead of stdout; every existing watch_*() function keeps
+# calling emit() completely unchanged, so no other code needed to know
+# it's now running as a thread inside the service instead of its own
+# stdout-JSON-lines subprocess.
+
+
 def emit(event_type: str, **payload: Any) -> None:
     """Tek bir JSON Lines olayı yazar; protokol dışında çıktı üretmez."""
     message = {"type": event_type, **payload}
-    print(json.dumps(message, ensure_ascii=False), flush=True)
+    if _emit_sink is not None:
+        _emit_sink(message)
+    else:
+        print(json.dumps(message, ensure_ascii=False), flush=True)
 
 
 def home_scan_targets() -> list[Path]:
@@ -2211,11 +2264,139 @@ def inspect_archive_bytes(
     return []
 
 
+# Unknown/no-result verdicts are re-checked periodically (a hash absent
+# today may be added to a database tomorrow); "malicious" verdicts never
+# expire since content doesn't un-become malware.
+CLOUD_REPUTATION_CACHE_TTL_HOURS = 24 * 7
+MALWAREBAZAAR_API_URL = "https://mb-api.abuse.ch/api/v1/"
+CLOUD_LOOKUP_TIMEOUT_SECONDS = 5
+
+
+def read_cloud_reputation_cache(sha256: str) -> dict[str, Any] | None:
+    with open_database() as connection:
+        row = connection.execute(
+            "SELECT verdict, source, reason, checked_at FROM cloud_reputation_cache WHERE sha256 = ?",
+            (sha256,),
+        ).fetchone()
+    if row is None:
+        return None
+    verdict, source, reason, checked_at = row
+    if verdict != "malicious":
+        try:
+            checked = datetime.fromisoformat(checked_at)
+        except ValueError:
+            return None
+        if datetime.now(timezone.utc) - checked > timedelta(hours=CLOUD_REPUTATION_CACHE_TTL_HOURS):
+            return None
+    return {"verdict": verdict, "source": source, "reason": reason}
+
+
+def write_cloud_reputation_cache(sha256: str, verdict: str, source: str, reason: str | None) -> None:
+    checked_at = datetime.now(timezone.utc).isoformat()
+    with open_database() as connection:
+        connection.execute(
+            """INSERT INTO cloud_reputation_cache (sha256, verdict, source, reason, checked_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(sha256) DO UPDATE SET
+                 verdict = excluded.verdict, source = excluded.source,
+                 reason = excluded.reason, checked_at = excluded.checked_at""",
+            (sha256, verdict, source, reason, checked_at),
+        )
+
+
+def query_malwarebazaar(sha256: str, api_key: str) -> dict[str, Any] | None:
+    """Free but requires a personal Auth-Key since abuse.ch tightened API
+    access in 2024 -- get one at https://auth.abuse.ch/, never a key
+    embedded in the app (same reasoning as the VirusTotal key below)."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    if not api_key:
+        return None
+    data = urllib.parse.urlencode({"query": "get_info", "hash": sha256}).encode("ascii")
+    request = urllib.request.Request(
+        MALWAREBAZAAR_API_URL, data=data, method="POST", headers={"Auth-Key": api_key},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=CLOUD_LOOKUP_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    status = payload.get("query_status")
+    if status in {"hash_not_found", "no_results"}:
+        return {"verdict": "unknown", "source": "malwarebazaar", "reason": None}
+    if status != "ok":
+        return None
+    entries = payload.get("data") or []
+    if not entries:
+        return {"verdict": "unknown", "source": "malwarebazaar", "reason": None}
+    family = entries[0].get("signature") or "bilinmeyen aile"
+    return {"verdict": "malicious", "source": "malwarebazaar", "reason": f"MalwareBazaar: {family}"}
+
+
+def query_virustotal(sha256: str, api_key: str) -> dict[str, Any] | None:
+    """Optional secondary lookup, only used if the user supplies their own
+    free API key -- never a key embedded in the app, to avoid one shared
+    key's rate limit being exhausted by every Neutron install."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"https://www.virustotal.com/api/v3/files/{sha256}",
+        headers={"x-apikey": api_key},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=CLOUD_LOOKUP_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    stats = payload.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
+    malicious = int(stats.get("malicious") or 0)
+    if malicious == 0:
+        return {"verdict": "unknown", "source": "virustotal", "reason": None}
+    return {
+        "verdict": "malicious", "source": "virustotal",
+        "reason": f"VirusTotal: {malicious} motor kötü amaçlı olarak işaretledi",
+    }
+
+
+def cloud_reputation_lookup(
+    sha256: str, malwarebazaar_api_key: str = "", virustotal_api_key: str = "",
+) -> dict[str, Any] | None:
+    """Consults free public threat-intel APIs by hash only -- file content
+    is never uploaded. Both sources require the user's own free API key
+    (neither service allows keyless access anymore); if neither key is
+    configured this is a no-op. Fails open on any network error: returns
+    None, caller treats that as "no cloud data" and never blocks/slows the
+    scan on a failed lookup."""
+    if not malwarebazaar_api_key and not virustotal_api_key:
+        return None
+    cached = read_cloud_reputation_cache(sha256)
+    if cached is not None:
+        return cached
+
+    result = query_malwarebazaar(sha256, malwarebazaar_api_key) if malwarebazaar_api_key else None
+    if (result is None or result["verdict"] == "unknown") and virustotal_api_key:
+        vt_result = query_virustotal(sha256, virustotal_api_key)
+        if vt_result is not None:
+            result = vt_result
+
+    if result is None:
+        return None  # network failure: don't cache a failure, just retry next time
+
+    write_cloud_reputation_cache(sha256, result["verdict"], result["source"], result.get("reason"))
+    return result
+
+
 def inspect_file(
     path: Path,
     signatures: dict[int, dict[str, dict[str, Any]]] | None = None,
     yara_rules: Any | None = None,
     exclusions: ExclusionSet | None = None,
+    cloud_lookup: bool = False,
+    malwarebazaar_api_key: str = "",
+    virustotal_api_key: str = "",
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
@@ -2364,6 +2545,20 @@ def inspect_file(
                     sha256=None, risk_score=0, container_path=str(path),
                 ))
 
+    # Only consulted when nothing local (signature/EICAR/YARA/archive) has
+    # already found something -- a confirmed local hit needs no outside
+    # confirmation, and this keeps outbound calls to a minimum.
+    if cloud_lookup and not findings and size <= MAX_CONTENT_BYTES:
+        digest = file_digest()
+        if digest:
+            cloud_result = cloud_reputation_lookup(digest, malwarebazaar_api_key, virustotal_api_key)
+            if cloud_result is not None and cloud_result["verdict"] == "malicious":
+                findings.append(Finding(
+                    path=str(path), kind="cloud-reputation", severity="high",
+                    reason=cloud_result.get("reason") or "Bulut itibar sorgusunda kötü amaçlı olarak işaretlendi",
+                    sha256=digest, risk_score=90,
+                ))
+
     combine_static_risk(findings)
     return findings
 
@@ -2411,6 +2606,238 @@ def windows_process_snapshot() -> dict[int, str]:
         finally:
             kernel32.CloseHandle(handle)
     return result
+
+
+def active_tcp_connections() -> list[tuple[int, str, int]]:
+    """Enumerate active IPv4 TCP connections as (pid, remote_ip, remote_port)
+    via iphlpapi's GetExtendedTcpTable. No admin privileges required. This
+    is the driver-free approximation of network visibility: a poll-based
+    snapshot, not packet inspection -- see watch_network() for context."""
+    if os.name != "nt":
+        return []
+    from ctypes import wintypes
+
+    AF_INET = 2
+    TCP_TABLE_OWNER_PID_ALL = 5
+    ERROR_INSUFFICIENT_BUFFER = 122
+
+    class MibTcpRowOwnerPid(ctypes.Structure):
+        _fields_ = [
+            ("dwState", wintypes.DWORD),
+            ("dwLocalAddr", wintypes.DWORD),
+            ("dwLocalPort", wintypes.DWORD),
+            ("dwRemoteAddr", wintypes.DWORD),
+            ("dwRemotePort", wintypes.DWORD),
+            ("dwOwningPid", wintypes.DWORD),
+        ]
+
+    iphlpapi = ctypes.WinDLL("iphlpapi", use_last_error=True)
+    iphlpapi.GetExtendedTcpTable.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+        wintypes.ULONG, ctypes.c_int, wintypes.ULONG,
+    ]
+    iphlpapi.GetExtendedTcpTable.restype = wintypes.DWORD
+
+    size = wintypes.DWORD(0)
+    status = iphlpapi.GetExtendedTcpTable(
+        None, ctypes.byref(size), False, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
+    )
+    if status != ERROR_INSUFFICIENT_BUFFER or size.value == 0:
+        return []
+    buffer = ctypes.create_string_buffer(size.value)
+    status = iphlpapi.GetExtendedTcpTable(
+        buffer, ctypes.byref(size), False, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
+    )
+    if status != 0:
+        return []
+
+    entry_count = ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0]
+    row_size = ctypes.sizeof(MibTcpRowOwnerPid)
+    rows_offset = ctypes.sizeof(wintypes.DWORD)
+
+    connections: list[tuple[int, str, int]] = []
+    for index in range(entry_count):
+        offset = rows_offset + index * row_size
+        if offset + row_size > len(buffer.raw):
+            break
+        row = MibTcpRowOwnerPid.from_buffer_copy(buffer.raw[offset:offset + row_size])
+        if row.dwRemoteAddr == 0:
+            continue
+        remote_ip = socket.inet_ntoa(struct.pack("<L", row.dwRemoteAddr))
+        remote_port = socket.ntohs(row.dwRemotePort & 0xFFFF)
+        connections.append((int(row.dwOwningPid), remote_ip, int(remote_port)))
+    return connections
+
+
+def enable_debug_privilege() -> None:
+    """Best-effort SeDebugPrivilege enable so process-memory reads below
+    can reach processes outside the caller's own session (other users,
+    higher-integrity levels). Silently does nothing if not available --
+    running unprivileged just means rwx_private_region_count()/YARA
+    memory scans only succeed for same-privilege processes, same
+    limitation windows_process_snapshot() already has."""
+    if os.name != "nt":
+        return
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", LUID), ("Attributes", wintypes.DWORD)]
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+
+    TOKEN_ADJUST_PRIVILEGES = 0x0020
+    TOKEN_QUERY = 0x0008
+    SE_PRIVILEGE_ENABLED = 0x00000002
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ctypes.byref(token)
+    ):
+        return
+    try:
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(None, "SeDebugPrivilege", ctypes.byref(luid)):
+            return
+        privileges = TOKEN_PRIVILEGES()
+        privileges.PrivilegeCount = 1
+        privileges.Privileges[0].Luid = luid
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+        advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(privileges), 0, None, None)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def rwx_private_region_count(pid: int) -> int:
+    """Counts committed, private (not file/module-backed), read+write+
+    execute memory regions in a process -- a classic process-hollowing /
+    shellcode-injection indicator, since legitimately loaded code is
+    backed by a mapped module, not raw private memory. Not proof by
+    itself (JIT engines in browsers/.NET/Java legitimately allocate RWX),
+    which is why callers treat a nonzero count as "worth a closer look",
+    not an automatic verdict."""
+    if os.name != "nt":
+        return 0
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+    MEM_COMMIT = 0x1000
+    MEM_PRIVATE = 0x20000
+    PAGE_EXECUTE_READWRITE = 0x40
+
+    class MEMORY_BASIC_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BaseAddress", ctypes.c_void_p),
+            ("AllocationBase", ctypes.c_void_p),
+            ("AllocationProtect", wintypes.DWORD),
+            ("RegionSize", ctypes.c_size_t),
+            ("State", wintypes.DWORD),
+            ("Protect", wintypes.DWORD),
+            ("Type", wintypes.DWORD),
+        ]
+
+    kernel32.VirtualQueryEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t,
+    ]
+    kernel32.VirtualQueryEx.restype = ctypes.c_size_t
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+    if not handle:
+        return 0
+    try:
+        count = 0
+        address = 0
+        mbi = MEMORY_BASIC_INFORMATION()
+        scanned_regions = 0
+        while scanned_regions < 20_000:  # bounded: never hang on a pathological address space
+            written = kernel32.VirtualQueryEx(handle, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi))
+            if written == 0:
+                break
+            scanned_regions += 1
+            if mbi.State == MEM_COMMIT and mbi.Type == MEM_PRIVATE and mbi.Protect == PAGE_EXECUTE_READWRITE:
+                count += 1
+            next_address = (mbi.BaseAddress or 0) + mbi.RegionSize
+            if next_address <= address:
+                break
+            address = next_address
+        return count
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def watch_memory() -> int:
+    """Runs as a service_host() thread: on each newly-started process
+    (same new-process detection approach as watch_behavior(), kept as its
+    own independent loop rather than modified into watch_behavior()
+    itself to avoid touching an already-working function), scans that
+    process's memory with the existing YARA rule set and flags a high
+    private-RWX-region count. Reactive, not preventive -- by the time a
+    process is scanned it has already started; there is no blocking here,
+    only detection. Full visibility (other users' / higher-integrity
+    processes) needs SeDebugPrivilege, only reliably available when this
+    runs inside the LocalSystem service, not a plain user session."""
+    if os.name != "nt":
+        emit("memory-error", code="UNSUPPORTED_PLATFORM", message="Bellek taraması yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    enable_debug_privilege()
+    yara_rules, yara_status = load_yara_rules()
+    exclusions = load_exclusion_set()
+    processes = windows_process_snapshot()
+    emit("memory-ready", backend="windows-native", process_count=len(processes), yara=yara_status)
+
+    try:
+        while True:
+            time.sleep(BEHAVIOR_INTERVAL_SECONDS)
+            current_processes = windows_process_snapshot()
+            for pid, raw_path in current_processes.items():
+                if pid in processes:
+                    continue
+                image_path = Path(raw_path)
+                if is_path_excluded(image_path, exclusions):
+                    continue
+
+                yara_hits: list[str] = []
+                if yara_rules is not None:
+                    try:
+                        for match in yara_rules.match(pid=pid, timeout=2):
+                            metadata = match.meta or {}
+                            yara_hits.append(str(metadata.get("description") or match.rule))
+                    except Exception:  # noqa: BLE001 -- a process can exit/deny access mid-scan
+                        pass
+
+                rwx_count = rwx_private_region_count(pid)
+                if not yara_hits and rwx_count < 3:
+                    continue
+
+                severity = "critical" if yara_hits else "medium"
+                reason_parts = []
+                if yara_hits:
+                    reason_parts.append(f"YARA belleği eşleşmesi: {', '.join(yara_hits[:3])}")
+                if rwx_count >= 3:
+                    reason_parts.append(f"{rwx_count} adet şüpheli RWX özel bellek bölgesi (process hollowing/injection izi olabilir)")
+                finding = Finding(
+                    path=str(image_path), kind="memory-injection", severity=severity,
+                    reason=f"{image_path.name}: " + "; ".join(reason_parts),
+                    sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("memory-scan", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit("memory-finding", event_id=event_id, process_id=pid, file_name=image_path.name, finding=asdict(finding))
+            processes = current_processes
+    except KeyboardInterrupt:
+        emit("memory-stopped")
+        return 0
 
 
 def persistence_snapshot() -> dict[str, str]:
@@ -2580,6 +3007,350 @@ def watch_behavior() -> int:
         return 0
 
 
+def load_network_indicators() -> dict[str, dict[str, str]]:
+    with open_database() as connection:
+        rows = connection.execute(
+            "SELECT value, name, severity FROM network_ip_indicators"
+        ).fetchall()
+    return {str(value): {"name": name or "", "severity": severity} for value, name, severity in rows}
+
+
+def watch_network() -> int:
+    """Poll-based, driver-free approximation of network monitoring: no
+    packet inspection, no DNS visibility, no blocking -- just periodic
+    connection enumeration (active_tcp_connections) checked against a
+    local IP reputation list. A real kernel-mode filter would see far
+    more; this is what's achievable without one (see plan notes)."""
+    if os.name != "nt":
+        emit("network-error", code="UNSUPPORTED_PLATFORM", message="Ağ izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    indicators = load_network_indicators()
+    exclusions = load_exclusion_set()
+    alerted: set[tuple[int, str]] = set()
+    emit(
+        "network-ready",
+        backend="windows-native",
+        indicator_count=len(indicators),
+        interval_seconds=NETWORK_INTERVAL_SECONDS,
+    )
+    try:
+        while True:
+            time.sleep(NETWORK_INTERVAL_SECONDS)
+            connections = active_tcp_connections()
+            if not connections:
+                continue
+            # Dedup on (pid, ip) as connections are found, not just
+            # up front -- the same process can hold several simultaneous
+            # connections (different ports) to the same flagged IP within
+            # one poll, and without this a single poll would otherwise
+            # emit one finding per port instead of one per process+IP.
+            flagged: list[tuple[int, str, int]] = []
+            for pid, ip, port in connections:
+                if ip not in indicators or (pid, ip) in alerted:
+                    continue
+                alerted.add((pid, ip))
+                flagged.append((pid, ip, port))
+            if not flagged:
+                continue
+            processes = windows_process_snapshot()
+            for pid, ip, port in flagged:
+                image_path = processes.get(pid, "")
+                if image_path and is_path_excluded(Path(image_path), exclusions):
+                    continue
+                indicator = indicators[ip]
+                process_label = Path(image_path).name if image_path else f"PID {pid}"
+                finding = Finding(
+                    path=image_path or process_label,
+                    kind="network-reputation",
+                    severity=indicator["severity"] or "high",
+                    reason=(
+                        f"{process_label}, bilinen kötü amaçlı IP adresine bağlandı: "
+                        f"{ip}:{port}" + (f" ({indicator['name']})" if indicator["name"] else "")
+                    ),
+                    sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("network-connection", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit(
+                    "network-finding",
+                    event_id=event_id,
+                    process_id=pid,
+                    remote_ip=ip,
+                    remote_port=port,
+                    finding=asdict(finding),
+                )
+            if len(alerted) > 2000:
+                alerted.clear()
+    except KeyboardInterrupt:
+        emit("network-stopped")
+        return 0
+
+
+USB_POLL_INTERVAL_SECONDS = 3.0
+
+
+def removable_drive_letters() -> set[str]:
+    """Polls currently-attached removable drives (USB sticks, SD cards --
+    not fixed disks, not optical/network drives) via GetLogicalDrives +
+    GetDriveTypeW. No admin required, same ctypes style as the other
+    Win32 introspection helpers in this file."""
+    if os.name != "nt":
+        return set()
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetLogicalDrives.restype = wintypes.DWORD
+    kernel32.GetDriveTypeW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetDriveTypeW.restype = wintypes.UINT
+    DRIVE_REMOVABLE = 2
+
+    mask = kernel32.GetLogicalDrives()
+    drives: set[str] = set()
+    for index in range(26):
+        if not (mask & (1 << index)):
+            continue
+        letter = f"{chr(65 + index)}:\\"
+        if kernel32.GetDriveTypeW(letter) == DRIVE_REMOVABLE:
+            drives.add(letter)
+    return drives
+
+
+def watch_usb() -> int:
+    """Poll-based (no WM_DEVICECHANGE window needed) removable-media
+    watcher: on each newly-attached drive, flags an autorun.inf (the
+    classic USB-autorun malware vector -- Windows itself has ignored
+    autorun.inf on non-optical media by default since Vista/7, this is
+    defense in depth / visibility, not reliance on autorun actually
+    firing) and runs a bounded scan of the drive's root-level files
+    through the same inspect_file_cached pipeline as everything else."""
+    if os.name != "nt":
+        emit("usb-error", code="UNSUPPORTED_PLATFORM", message="USB izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    signatures = load_signatures()
+    yara_rules, yara_status = load_yara_rules()
+    exclusions = load_exclusion_set()
+    cache_session = open_analysis_cache_session(str(yara_status.get("fingerprint", "none")))
+    known_drives = removable_drive_letters()
+    emit("usb-ready", backend="windows-native", attached=len(known_drives))
+
+    try:
+        while True:
+            time.sleep(USB_POLL_INTERVAL_SECONDS)
+            current_drives = removable_drive_letters()
+            for drive in current_drives - known_drives:
+                root = Path(drive)
+                emit("usb-attached", drive=drive)
+                autorun_path = root / "autorun.inf"
+                if autorun_path.exists():
+                    finding = Finding(
+                        path=str(autorun_path), kind="usb-autorun", severity="high",
+                        reason="Çıkarılabilir medyada autorun.inf bulundu (bilinen USB yayılma vektörü)",
+                        sha256=sha256_for(autorun_path, autorun_path.stat().st_size) if autorun_path.is_file() else None,
+                    )
+                    try:
+                        event_id = save_protection_event("usb-autorun", finding)
+                    except (OSError, sqlite3.Error):
+                        event_id = None
+                    emit("usb-finding", event_id=event_id, drive=drive, finding=asdict(finding))
+
+                scanned = 0
+                for file_path in iter_files([root], 500, exclusions, maximum_depth=2):
+                    scanned += 1
+                    findings = inspect_file_cached(file_path, signatures, yara_rules, exclusions, cache_session)
+                    for finding in findings:
+                        try:
+                            event_id = save_protection_event("usb-scan", finding)
+                            quarantine_item_id = auto_quarantine_confirmed_finding(event_id, finding)
+                        except (OSError, sqlite3.Error):
+                            event_id = None
+                            quarantine_item_id = None
+                        emit(
+                            "usb-finding", event_id=event_id, drive=drive, finding=asdict(finding),
+                            action="quarantined" if quarantine_item_id is not None else "pending",
+                        )
+                flush_analysis_cache(cache_session)
+                emit("usb-scan-complete", drive=drive, scanned=scanned)
+            for drive in known_drives - current_drives:
+                emit("usb-detached", drive=drive)
+            known_drives = current_drives
+    except KeyboardInterrupt:
+        emit("usb-stopped")
+        return 0
+
+
+SERVICE_PIPE_NAME = r"\\.\pipe\neutron-service"
+
+
+def service_host() -> int:
+    """Runs as LocalSystem under NeutronServiceHost.exe (see tools/service/).
+    Consolidates the watch_* loops into daemon threads of one process
+    instead of five separate subprocesses, and hosts a named pipe
+    (SERVICE_PIPE_NAME) the Electron UI connects to for live events and
+    control commands. Each watch_*() function is used completely
+    unmodified -- they already call the module-level emit(), which this
+    function retargets (via _emit_sink) to the pipe instead of stdout.
+
+    Known v1 limitation, documented rather than silently accepted: which
+    optional watchers (web/network/amsi) start is decided once at service
+    startup from the persisted settings. Toggling those settings from the
+    UI while the service is already running updates the database (so it
+    takes effect on the next service restart) but does not hot-start/stop
+    the corresponding thread -- the existing watch_*() functions have no
+    cooperative-cancellation support, and adding it to five functions
+    already built this session was out of scope for an already-large
+    architecture change. protection_enabled/behavior_protection_enabled
+    (the always-on-by-default core) start unconditionally.
+    """
+    if os.name != "nt":
+        return 2
+
+    global _pipe_handle
+    _pipe_handle = None
+    pipe_lock = threading.Lock()
+
+    def broadcast(message: dict[str, Any]) -> None:
+        global _pipe_handle
+        with pipe_lock:
+            handle = _pipe_handle
+            if handle is None:
+                return
+            data = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+            written = wintypes.DWORD(0)
+            ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+            if not ok:
+                _pipe_handle = None
+
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    PIPE_ACCESS_DUPLEX = 0x3
+    PIPE_TYPE_BYTE = 0x0
+    PIPE_READMODE_BYTE = 0x0
+    PIPE_WAIT = 0x0
+    PIPE_REJECT_REMOTE_CLIENTS = 0x8
+    PIPE_UNLIMITED_INSTANCES = 255
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+    ERROR_PIPE_CONNECTED = 535
+
+    kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel32.CreateNamedPipeW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+    ]
+    kernel32.ConnectNamedPipe.restype = wintypes.BOOL
+    kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    ]
+    kernel32.WriteFile.restype = wintypes.BOOL
+    kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    ]
+    kernel32.DisconnectNamedPipe.restype = wintypes.BOOL
+    kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    global _emit_sink
+    _emit_sink = broadcast
+
+    def handle_command(command: dict[str, Any]) -> dict[str, Any]:
+        action = command.get("cmd")
+        try:
+            if action == "get_settings":
+                return {"type": "settings", "settings": read_app_settings()}
+            if action == "update_setting":
+                settings = write_app_setting(str(command.get("key")), command.get("value"))
+                return {"type": "settings-updated", "settings": settings, "changed_key": command.get("key")}
+            if action == "run_scan":
+                mode = str(command.get("mode") or "quick")
+                if mode == "full" and command.get("drive"):
+                    return {"type": "scan-result", "code": full_scan(str(command["drive"]))}
+                if mode == "custom" and command.get("path"):
+                    return {"type": "scan-result", "code": scan_targets([Path(str(command["path"]))], "custom")}
+                return {"type": "scan-result", "code": quick_scan()}
+            return {"type": "error", "code": "UNKNOWN_COMMAND", "message": f"Bilinmeyen komut: {action}"}
+        except Exception as error:  # noqa: BLE001 -- a bad command must never take the service down
+            return {"type": "error", "code": "COMMAND_FAILED", "message": str(error)}
+
+    def pipe_server() -> None:
+        global _pipe_handle
+        first_instance = True
+        while True:
+            open_mode = PIPE_ACCESS_DUPLEX | (0x00080000 if first_instance else 0)
+            pipe = kernel32.CreateNamedPipeW(
+                SERVICE_PIPE_NAME, open_mode,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_UNLIMITED_INSTANCES, 1 << 16, 1 << 16, 0, None,
+            )
+            first_instance = False
+            if pipe == INVALID_HANDLE_VALUE:
+                time.sleep(1)
+                continue
+            connected = kernel32.ConnectNamedPipe(pipe, None)
+            if not connected and ctypes.get_last_error() != ERROR_PIPE_CONNECTED:
+                kernel32.CloseHandle(pipe)
+                continue
+            with pipe_lock:
+                _pipe_handle = pipe
+            pending = b""
+            try:
+                while True:
+                    buffer = ctypes.create_string_buffer(1 << 16)
+                    read = wintypes.DWORD(0)
+                    ok = kernel32.ReadFile(pipe, buffer, len(buffer), ctypes.byref(read), None)
+                    if not ok or read.value == 0:
+                        break
+                    pending += buffer.raw[: read.value]
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        if not line.strip():
+                            continue
+                        try:
+                            command = json.loads(line.decode("utf-8"))
+                        except (ValueError, UnicodeDecodeError):
+                            continue
+                        response = handle_command(command)
+                        broadcast(response)
+            finally:
+                with pipe_lock:
+                    if _pipe_handle == pipe:
+                        _pipe_handle = None
+                kernel32.DisconnectNamedPipe(pipe)
+                kernel32.CloseHandle(pipe)
+
+    settings = read_app_settings()
+    watchers = [("watch", watch_targets, True)]
+    watchers.append(("watch-behavior", watch_behavior, bool(settings.get("behavior_protection_enabled"))))
+    watchers.append(("watch-web", watch_web, bool(settings.get("web_protection_enabled"))))
+    watchers.append(("watch-network", watch_network, bool(settings.get("network_protection_enabled"))))
+    watchers.append(("amsi-service", amsi_service, bool(settings.get("amsi_protection_enabled"))))
+    watchers.append(("watch-memory", watch_memory, bool(settings.get("memory_scan_enabled"))))
+    watchers.append(("watch-usb", watch_usb, bool(settings.get("usb_protection_enabled"))))
+
+    for name, target, enabled in watchers:
+        if not enabled:
+            continue
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        thread.start()
+
+    threading.Thread(target=pipe_server, name="service-pipe", daemon=True).start()
+    emit("service-ready", pipe=SERVICE_PIPE_NAME, active_watchers=[n for n, _, e in watchers if e])
+
+    # The process stays alive purely to host the threads above; it is
+    # stopped externally by NeutronServiceHost.exe (TerminateProcess) on
+    # SERVICE_CONTROL_STOP, not by anything in this loop.
+    while True:
+        time.sleep(3600)
+
+
 def web_reputation(raw_url: str) -> dict[str, Any]:
     try:
         parsed = urlsplit(raw_url.strip())
@@ -2664,6 +3435,221 @@ def watch_web() -> int:
     except KeyboardInterrupt:
         flush_analysis_cache(cache_session)
         emit("web-stopped")
+        return 0
+
+
+AMSI_PIPE_NAME = r"\\.\pipe\neutron-amsi"
+AMSI_FIELD_SEPARATOR = "\x1f"
+AMSI_MAX_BUFFER_BYTES = 8 * 1024 * 1024
+
+
+def inspect_amsi_buffer(
+    content_name: str,
+    buffer: bytes,
+    signatures: dict[int, dict[str, dict[str, Any]]],
+    yara_rules: Any | None,
+) -> Finding | None:
+    """Score a script/macro buffer handed over by the AMSI provider DLL.
+
+    Unlike inspect_file, there may be no file on disk to point at (inline
+    -Command text, in-memory Office macros) -- content_name is whatever the
+    host process reported (often a path, sometimes a synthetic label like
+    "Inline PowerShell Script"), used only for display/logging.
+    """
+    display_path = content_name or "AMSI-arabellek"
+    digest = hashlib.sha256(buffer).hexdigest()
+    size = len(buffer)
+
+    signature = signatures.get(size, {}).get(digest)
+    if signature:
+        return Finding(
+            path=display_path,
+            kind="test-signature" if signature["source"] == "builtin" else "signature",
+            severity=str(signature["severity"]),
+            reason=f'{signature["name"]} eşleşmesi AMSI arabelleğinde bulundu',
+            sha256=digest,
+            risk_score=100,
+        )
+
+    if buffer.strip() == EICAR_MARKER:
+        return Finding(
+            path=display_path, kind="test-signature", severity="high",
+            reason="EICAR güvenli antivirüs test imzası AMSI arabelleğinde bulundu",
+            sha256=digest, risk_score=100,
+        )
+
+    if yara_rules is not None and size <= MAX_YARA_BYTES:
+        try:
+            for match in yara_rules.match(data=buffer, timeout=2):
+                metadata = match.meta or {}
+                description = str(metadata.get("description") or match.rule)
+                severity = str(metadata.get("severity") or "medium").casefold()
+                if severity not in {"low", "medium", "high", "critical"}:
+                    severity = "medium"
+                return Finding(
+                    path=display_path, kind="yara", severity=severity,
+                    reason=f"YARA kuralı eşleşti: {description}",
+                    sha256=digest, risk_score=80,
+                )
+        except Exception:
+            pass
+
+    return None
+
+
+def _amsi_decode_request(line: str) -> tuple[str, str, bytes] | None:
+    parts = line.split(AMSI_FIELD_SEPARATOR)
+    if len(parts) != 4 or parts[0] != "SCAN":
+        return None
+    _, content_name, app_name, encoded_buffer = parts
+    try:
+        buffer = base64.b64decode(encoded_buffer, validate=False)
+    except (ValueError, TypeError):
+        return None
+    if len(buffer) > AMSI_MAX_BUFFER_BYTES:
+        buffer = buffer[:AMSI_MAX_BUFFER_BYTES]
+    return content_name, app_name, buffer
+
+
+def amsi_service() -> int:
+    """Pre-execution protection: serve verdicts to the native AMSI provider
+    DLL (tools/amsi) over a named pipe so PowerShell/VBScript/JScript/Office
+    macro content can be scored before it runs, not just after it lands on
+    disk. See tools/amsi/PipeClient.cpp for the client side of this
+    protocol and its fail-open timeout behaviour.
+
+    Known hardening gaps (acceptable for a first pass, not for the long
+    term): the pipe uses the default DACL (same-user + admins only, so
+    SYSTEM-context hosts cannot reach it yet) and nothing stops another
+    local process from squatting on the pipe name before this service
+    starts. Both should be addressed with an explicit security descriptor
+    and a startup ordering/health-check story before this is relied on.
+    """
+    if os.name != "nt":
+        emit("amsi-error", code="UNSUPPORTED_PLATFORM", message="AMSI koruması yalnızca Windows üzerinde çalışır.")
+        return 2
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    PIPE_ACCESS_DUPLEX = 0x3
+    FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000
+    PIPE_TYPE_BYTE = 0x0
+    PIPE_READMODE_BYTE = 0x0
+    PIPE_WAIT = 0x0
+    PIPE_REJECT_REMOTE_CLIENTS = 0x8
+    PIPE_UNLIMITED_INSTANCES = 255
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+    ERROR_PIPE_CONNECTED = 535
+
+    # Explicit argtypes/restype on every kernel32 call: without them ctypes
+    # guesses a C int (32-bit) for bare Python int arguments, which would
+    # silently truncate 64-bit HANDLE values on 64-bit Python and corrupt
+    # every call below. Matches the ctypes style already used for
+    # verify_authenticode's WinVerifyTrust call.
+    kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel32.CreateNamedPipeW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+    ]
+    kernel32.ConnectNamedPipe.restype = wintypes.BOOL
+    kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    ]
+    kernel32.WriteFile.restype = wintypes.BOOL
+    kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    ]
+    kernel32.FlushFileBuffers.restype = wintypes.BOOL
+    kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    kernel32.DisconnectNamedPipe.restype = wintypes.BOOL
+    kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    signatures = load_signatures()
+    yara_rules, yara_status = load_yara_rules()
+    emit("amsi-ready", pipe=AMSI_PIPE_NAME, yara=yara_status)
+
+    # Only the very first instance needs FILE_FLAG_FIRST_PIPE_INSTANCE (it
+    # rejects creation if some other local process already squats on this
+    # pipe name). Re-requesting it on every loop iteration is unnecessary
+    # once Neutron owns the name and risks a spurious ERROR_ACCESS_DENIED
+    # if the previous handle hasn't finished tearing down yet.
+    first_instance = True
+    try:
+        while True:
+            open_mode = PIPE_ACCESS_DUPLEX | (FILE_FLAG_FIRST_PIPE_INSTANCE if first_instance else 0)
+            pipe = kernel32.CreateNamedPipeW(
+                AMSI_PIPE_NAME,
+                open_mode,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_UNLIMITED_INSTANCES,
+                1 << 16,
+                1 << 16,
+                0,
+                None,
+            )
+            first_instance = False
+            if pipe == INVALID_HANDLE_VALUE:
+                emit("amsi-error", code="PIPE_CREATE_FAILED", message=f"Boru hattı oluşturulamadı: {ctypes.get_last_error()}")
+                return 2
+            try:
+                connected = kernel32.ConnectNamedPipe(pipe, None)
+                if not connected and ctypes.get_last_error() != ERROR_PIPE_CONNECTED:
+                    continue
+
+                chunks: list[bytes] = []
+                while True:
+                    buffer = ctypes.create_string_buffer(1 << 16)
+                    read = wintypes.DWORD(0)
+                    ok = kernel32.ReadFile(pipe, buffer, len(buffer), ctypes.byref(read), None)
+                    if not ok or read.value == 0:
+                        break
+                    chunk = buffer.raw[: read.value]
+                    chunks.append(chunk)
+                    if b"\n" in chunk:
+                        break
+
+                raw = b"".join(chunks)
+                newline = raw.find(b"\n")
+                if newline == -1:
+                    continue
+                request_line = raw[:newline].decode("utf-8", errors="replace")
+                decoded = _amsi_decode_request(request_line)
+
+                if decoded is None:
+                    response = f"VERDICT{AMSI_FIELD_SEPARATOR}clean{AMSI_FIELD_SEPARATOR}\n".encode("utf-8")
+                else:
+                    content_name, app_name, script_buffer = decoded
+                    finding = inspect_amsi_buffer(content_name, script_buffer, signatures, yara_rules)
+                    if finding is not None:
+                        event_id = save_protection_event("amsi-block", finding)
+                        emit(
+                            "amsi-finding",
+                            event_id=event_id,
+                            app_name=app_name,
+                            content_name=content_name,
+                            finding=asdict(finding),
+                        )
+                        response = f"VERDICT{AMSI_FIELD_SEPARATOR}detected{AMSI_FIELD_SEPARATOR}{finding.reason}\n".encode("utf-8")
+                    else:
+                        response = f"VERDICT{AMSI_FIELD_SEPARATOR}clean{AMSI_FIELD_SEPARATOR}\n".encode("utf-8")
+
+                written = wintypes.DWORD(0)
+                kernel32.WriteFile(pipe, response, len(response), ctypes.byref(written), None)
+                kernel32.FlushFileBuffers(pipe)
+            finally:
+                kernel32.DisconnectNamedPipe(pipe)
+                kernel32.CloseHandle(pipe)
+    except KeyboardInterrupt:
+        emit("amsi-stopped")
         return 0
 
 
@@ -3237,7 +4223,15 @@ def scan_targets(
         emit("error", code="NO_TARGETS", message="Taranacak klasör bulunamadı.")
         return 2
 
-    max_files = maximum_files or int(read_app_settings()["scan_max_files"])
+    settings = read_app_settings()
+    max_files = maximum_files or int(settings["scan_max_files"])
+    # Cloud lookup only ever runs from explicit user-triggered scans, never
+    # from --watch/--watch-web real-time protection -- see
+    # cloud_reputation_lookup for why (avoids adding network latency to
+    # every real-time file event).
+    cloud_lookup = bool(settings.get("cloud_lookup_enabled"))
+    malwarebazaar_api_key = str(settings.get("malwarebazaar_api_key") or "")
+    virustotal_api_key = str(settings.get("virustotal_api_key") or "")
     emit("started", mode=mode, targets=[target.name for target in targets], max_files=max_files)
     scanned = 0
     findings: list[Finding] = []
@@ -3251,7 +4245,8 @@ def scan_targets(
         for file_path in iter_files(targets, max_files, exclusions, maximum_depth):
             scanned += 1
             findings.extend(inspect_file_cached(
-                file_path, signatures, yara_rules, exclusions, cache_session
+                file_path, signatures, yara_rules, exclusions, cache_session,
+                cloud_lookup, malwarebazaar_api_key, virustotal_api_key,
             ))
             if scanned % PROGRESS_INTERVAL == 0:
                 emit(
@@ -3355,6 +4350,11 @@ def main() -> int:
     action.add_argument("--watch", action="store_true", help="Yeni ve değişen dosyaları izle")
     action.add_argument("--watch-behavior", action="store_true", help="Süreçleri ve kalıcılık noktalarını izle")
     action.add_argument("--watch-web", action="store_true", help="İndirilen dosyaları ve kaynak adreslerini izle")
+    action.add_argument("--watch-network", action="store_true", help="Bilinen kötü amaçlı IP adreslerine giden bağlantıları izle")
+    action.add_argument("--service-host", action="store_true", help="Tüm koruma bileşenlerini LocalSystem servisi olarak tek süreçte çalıştır")
+    action.add_argument("--watch-memory", action="store_true", help="Yeni başlayan süreçlerin belleğini YARA ve RWX-özel-bölge sezgisiyle tara")
+    action.add_argument("--watch-usb", action="store_true", help="Takılan çıkarılabilir medyayı autorun.inf ve dosyalar için tara")
+    action.add_argument("--amsi-service", action="store_true", help="AMSI ön-çalıştırma koruma servisini başlat")
     action.add_argument("--check-url", metavar="URL", help="URL veya domain itibarını yerel Proton verisinde denetle")
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
     action.add_argument("--protection-action", metavar="ID", type=int, help="Gerçek zamanlı koruma olayına işlem uygula")
@@ -3426,8 +4426,18 @@ def main() -> int:
         return watch_targets()
     if args.watch_behavior:
         return watch_behavior()
+    if args.watch_network:
+        return watch_network()
+    if args.service_host:
+        return service_host()
+    if args.watch_memory:
+        return watch_memory()
+    if args.watch_usb:
+        return watch_usb()
     if args.watch_web:
         return watch_web()
+    if args.amsi_service:
+        return amsi_service()
     if args.check_url:
         try:
             emit("url-reputation", **web_reputation(args.check_url))

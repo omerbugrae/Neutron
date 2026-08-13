@@ -626,9 +626,60 @@
               <p class="web-check-result" data-role="web-check-result">Adres yalnızca yerel Proton veritabanında kontrol edilir.</p>
               <div class="module-control-row"><span>İndirme ve bağlantı koruması</span><button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-web-protection" aria-pressed="false" disabled><span class="protection-toggle__track" aria-hidden="true"><i></i></span><span data-role="web-toggle-label">Aç</span></button></div>
             </article>
+            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-amsi" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+              <span class="module-icon"><svg aria-hidden="true"><use href="#icon-shield"></use></svg></span>
+              <p class="section-eyebrow">ÇALIŞTIRMA ÖNCESİ KORUMA</p><h2 data-role="amsi-protection-state">Kapalı</h2><p data-role="amsi-protection-detail">PowerShell, VBScript ve Office makroları çalışmadan önce denetlenir. Etkinleştirmek yönetici izni gerektirir.</p>
+              <div class="module-control-row">
+                <span>Betik çalıştırma koruması (AMSI)</span>
+                <button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-amsi-protection" aria-pressed="false" disabled>
+                  <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
+                  <span data-role="amsi-toggle-label">Aç</span>
+                </button>
+              </div>
+            </article>
+            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-watchdog" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+              <span class="module-icon"><svg aria-hidden="true"><use href="#icon-history"></use></svg></span>
+              <p class="section-eyebrow">KURCALAMAYA KARŞI KORUMA</p><h2 data-role="watchdog-protection-state">Kapalı</h2><p data-role="watchdog-protection-detail">Neutron kapatılırsa otomatik olarak yeniden başlatılır. Etkinleştirmek yönetici izni gerektirir.</p>
+              <div class="module-control-row">
+                <span>Otomatik yeniden başlatma (Watchdog)</span>
+                <button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-watchdog-protection" aria-pressed="false" disabled>
+                  <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
+                  <span data-role="watchdog-toggle-label">Aç</span>
+                </button>
+              </div>
+            </article>
+            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-wsc" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+              <span class="module-icon"><svg aria-hidden="true"><use href="#icon-bell"></use></svg></span>
+              <p class="section-eyebrow">WINDOWS GÜVENLİK MERKEZİ (DENEYSEL)</p><h2 data-role="wsc-protection-state">Kapalı</h2><p data-role="wsc-protection-detail">Neutron'u Windows'a kayıtlı antivirüs olarak bildirir. Windows Defender'ın pasif moda geçmesi garanti değildir. Etkinleştirmek yönetici izni gerektirir.</p>
+              <div class="module-control-row">
+                <span>Güvenlik Merkezi kaydı</span>
+                <button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-wsc-protection" aria-pressed="false" disabled>
+                  <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
+                  <span data-role="wsc-toggle-label">Aç</span>
+                </button>
+              </div>
+            </article>
+            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-service" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+              <span class="module-icon"><svg aria-hidden="true"><use href="#icon-chip"></use></svg></span>
+              <p class="section-eyebrow">SİSTEM SERVİSİ MODU</p><h2 data-role="service-protection-state">Kapalı</h2><p data-role="service-protection-detail">Koruma motorunu LocalSystem yetkisiyle Windows servisi olarak çalıştırır: tekrar tekrar yönetici izni istemez, oturum açılmadan önce başlar, çökerse otomatik yeniden başlar. Etkinleştirmek tek seferlik yönetici izni gerektirir.</p>
+              <div class="module-control-row">
+                <span>Sistem servisi olarak çalıştır</span>
+                <button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-service-protection" aria-pressed="false" disabled>
+                  <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
+                  <span data-role="service-toggle-label">Aç</span>
+                </button>
+              </div>
+            </article>
             <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-engine" data-glass-radius="28" data-glass-depth="0.9" data-glass-refraction="1.02" data-glass-dispersion="0.46" data-glass-frost="0.08" data-glass-specular="1.04" data-glass-tint="rgba(133, 123, 255, 0.18)">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-chip"></use></svg></span>
               <p class="section-eyebrow">NEUTRON ENGINE</p><h2 data-role="engine-card-heading">Motor denetleniyor</h2><p data-role="engine-card-detail">Sürüm, YARA motoru ve koruma modülleri doğrulanıyor.</p>
+            </article>
+            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-update" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+              <span class="module-icon"><svg aria-hidden="true"><use href="#icon-arrow"></use></svg></span>
+              <p class="section-eyebrow">SÜRÜM VE GÜNCELLEMELER</p><h2 data-role="update-heading">Neutron</h2><p data-role="update-detail">Sürüm denetleniyor…</p>
+              <div class="module-control-row">
+                <button class="settings-action" type="button" data-action="check-for-update">Güncellemeleri denetle</button>
+              </div>
             </article>
           </div>
         </section>
@@ -686,7 +737,26 @@
                 <div class="settings-preference"><div><strong>Davranış izlemeyi aç</strong><p>Yeni süreçleri ve Windows otomatik başlangıç noktalarını dosya korumasından bağımsız izler.</p></div><button class="settings-switch" type="button" data-setting-toggle="behavior_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Web korumasını aç</strong><p>İndirilen dosyaları ve kaynak URL/domain itibarını yerel olarak denetler.</p></div><button class="settings-switch" type="button" data-setting-toggle="web_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Güvenlik bildirimleri</strong><p>Bir dosya işaretlendiğinde Windows bildirimi gösterir.</p></div><button class="settings-switch" type="button" data-setting-toggle="notifications_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Bulut itibar sorgusu</strong><p>Yerel imza eşleşmesi olmayan dosyalar için, yalnızca manuel taramalarda, SHA-256 hash'i aşağıdaki servislere sorulur. Dosya içeriği asla gönderilmez; gerçek zamanlı korumayı yavaşlatmaz. En az bir API anahtarı girilmeden hiçbir sorgu yapılmaz.</p></div><button class="settings-switch" type="button" data-setting-toggle="cloud_lookup_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Ağ bağlantısı izleme</strong><p>Bilinen kötü amaçlı IP adreslerine (C2/botnet) giden bağlantıları periyodik olarak denetler ve bildirir. Paket incelemesi veya engelleme yapmaz, yalnızca tespit eder.</p></div><button class="settings-switch" type="button" data-setting-toggle="network_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Bellek/process injection taraması</strong><p>Yeni başlayan süreçlerin belleğini YARA kurallarıyla ve şüpheli RWX bellek bölgesi sezgisiyle tarar. Tam görünürlük için Sistem Servisi Modu önerilir.</p></div><button class="settings-switch" type="button" data-setting-toggle="memory_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Çıkarılabilir medya (USB) koruması</strong><p>Takılan USB/SD kartları otomatik olarak autorun.inf ve kötü amaçlı dosyalar için tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="usb_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
               </div>
+            </article>
+            <article class="settings-card settings-card--wide">
+              <p class="section-eyebrow">BULUT İTİBAR SORGUSU</p>
+              <h2>API anahtarları (en az biri gerekli)</h2>
+              <p>Her iki servis de ücretsiz ama kendi API anahtarınızı gerektiriyor (paylaşılan/gömülü bir anahtar kullanılmaz). MalwareBazaar: auth.abuse.ch adresinden. VirusTotal: hesabınızın profil sayfasından ücretsiz alınır.</p>
+              <form class="exclusion-extension-form" data-role="mb-api-key-form">
+                <label for="mb-api-key">MalwareBazaar Auth-Key</label>
+                <div><input id="mb-api-key" data-role="mb-api-key-input" type="password" maxlength="128" spellcheck="false" autocomplete="off" placeholder="MalwareBazaar Auth-Key"><button class="settings-action" type="submit">Kaydet</button></div>
+              </form>
+              <p class="settings-save-state" data-role="mb-api-key-state">Anahtar bu bilgisayarda yerel olarak saklanır.</p>
+              <form class="exclusion-extension-form" data-role="vt-api-key-form">
+                <label for="vt-api-key">VirusTotal API anahtarı (isteğe bağlı, ikinci kaynak)</label>
+                <div><input id="vt-api-key" data-role="vt-api-key-input" type="password" maxlength="128" spellcheck="false" autocomplete="off" placeholder="VirusTotal API anahtarınız"><button class="settings-action" type="submit">Kaydet</button></div>
+              </form>
+              <p class="settings-save-state" data-role="vt-api-key-state">Anahtar bu bilgisayarda yerel olarak saklanır.</p>
             </article>
             <article class="settings-card settings-card--wide">
               <div class="settings-card-heading"><div><p class="section-eyebrow">İZLENEN KLASÖRLER</p><h2>Gerçek zamanlı kapsam</h2></div><button class="settings-action" type="button" data-action="add-watch-folder">Klasör ekle</button></div>

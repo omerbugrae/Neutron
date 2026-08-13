@@ -1,0 +1,41 @@
+diff --git a/node_modules/@electron/packager/dist/unzip.js b/node_modules/@electron/packager/dist/unzip.js
+index d37e170..bd4d66b 100644
+--- a/node_modules/@electron/packager/dist/unzip.js
++++ b/node_modules/@electron/packager/dist/unzip.js
+@@ -5,8 +5,35 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.extractElectronZip = void 0;
+ const extract_zip_1 = __importDefault(require("extract-zip"));
++const child_process_1 = require("child_process");
+ async function extractElectronZip(zipPath, targetDir) {
++    // extract-zip pipes each entry through Node's zlib.createInflateRaw(),
++    // whose native binding silently stalls mid-stream on real-world deflate
++    // data on this toolchain's Node build (reproduced independently of
++    // extract-zip/yauzl -- a bare fs -> zlib.createInflateRaw -> fs pipe
++    // hangs at the same byte offset). PowerShell's Expand-Archive uses
++    // .NET's System.IO.Compression instead of Node's zlib and is
++    // unaffected, so use it on Windows; keep extract-zip elsewhere.
++    if (process.platform === 'win32') {
++        await extractWithPowerShell(zipPath, targetDir);
++        return;
++    }
+     await (0, extract_zip_1.default)(zipPath, { dir: targetDir });
+ }
++function extractWithPowerShell(zipPath, targetDir) {
++    return new Promise((resolve, reject) => {
++        const escapedZip = zipPath.replace(/'/g, "''");
++        const escapedDir = targetDir.replace(/'/g, "''");
++        const command = `New-Item -ItemType Directory -Force -Path '${escapedDir}' | Out-Null; ` +
++            `Expand-Archive -Path '${escapedZip}' -DestinationPath '${escapedDir}' -Force`;
++        (0, child_process_1.execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: 1024 * 1024 * 16 }, (error, _stdout, stderr) => {
++            if (error) {
++                reject(new Error(`Expand-Archive failed: ${stderr || error.message}`));
++                return;
++            }
++            resolve();
++        });
++    });
++}
+ exports.extractElectronZip = extractElectronZip;
+ //# sourceMappingURL=unzip.js.map
+\ No newline at end of file

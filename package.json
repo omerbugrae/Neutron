@@ -6,11 +6,12 @@
   "description": "Neutron desktop security application",
   "main": "src/main.cjs",
   "scripts": {
+    "postinstall": "patch-package",
     "prestart": "npm run icon:build && npm run archive:check",
     "start": "electron .",
-    "prepackage": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify",
+    "prepackage": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
     "package": "electron-forge package",
-    "premake": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify",
+    "premake": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
     "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
@@ -22,6 +23,10 @@
     "engine:build": ".\\venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --distpath runtime\\engine\\x64 --workpath build\\pyinstaller tools\\engine\\neutron-engine.spec",
     "engine:verify": "node tools/engine/verify-engine.cjs x64",
     "engine:version": ".\\runtime\\engine\\x64\\neutron-engine\\neutron-engine.exe --engine-version --json-lines",
+    "amsi:build": "powershell -ExecutionPolicy Bypass -File tools\\amsi\\build.ps1 x64",
+    "amsi:verify": "node tools/amsi/verify-amsi.cjs x64",
+    "service:build": "powershell -ExecutionPolicy Bypass -File tools\\service\\build.ps1 x64",
+    "service:verify": "node tools/service/verify-service.cjs x64",
     "proton:keygen": "node tools/proton/keygen.cjs",
     "proton:pack": "node tools/proton/pack.cjs",
     "proton:verify": "node tools/proton/verify.cjs",
@@ -39,7 +44,9 @@
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
     "@electron-forge/maker-squirrel": "^7.11.2",
-    "electron": "^43.3.0"
+    "@electron-forge/publisher-github": "^7.11.2",
+    "electron": "^43.3.0",
+    "patch-package": "^8.0.1"
   },
   "repository": {
     "type": "git",
@@ -87,6 +94,18 @@
             "description": "Neutron desktop security application",
             "setupIcon": "assets/neutron.ico",
             "iconUrl": "https://raw.githubusercontent.com/omerbugrae/Neutron/main/assets/neutron.ico"
+          }
+        }
+      ],
+      "publishers": [
+        {
+          "name": "@electron-forge/publisher-github",
+          "config": {
+            "repository": {
+              "owner": "omerbugrae",
+              "name": "Neutron"
+            },
+            "prerelease": false
           }
         }
       ]
