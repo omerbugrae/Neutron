@@ -62,6 +62,14 @@ except ImportError:
 
 
 MAX_FILES = 1_500
+
+
+def resolved_max_files(setting_value: Any) -> int:
+    """scan_max_files stores 0 to mean "sınırsız" (unlimited) -- iter_files'
+    loop condition (`yielded < max_files`) needs an actual large int, not
+    0, or it would stop immediately."""
+    value = int(setting_value)
+    return sys.maxsize if value == 0 else value
 MAX_FULL_SCAN_FILES = 1_000_000
 MAX_DEPTH = 8
 MAX_HASH_BYTES = 25 * 1024 * 1024
@@ -542,6 +550,8 @@ def normalize_app_setting(key: str, value: Any) -> Any:
     if key == "scan_max_files":
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("Tarama sınırı sayı olmalı")
+        if value == 0:  # 0 == "sınırsız", see resolved_max_files()
+            return 0
         return max(250, min(value, 10_000))
     if key == "watch_paths":
         if not isinstance(value, list):
@@ -1284,14 +1294,12 @@ def emit(event_type: str, **payload: Any) -> None:
 
 def home_scan_targets() -> list[Path]:
     home = Path.home()
-    # Real-time protection must reliably cover the locations where users receive
-    # or stage files. Watching the entire profile with a bounded file count can
-    # skip Desktop/Downloads entirely on a busy machine.
-    candidates = [
-        home / "Desktop",
-        home / "Downloads",
-        home / "Documents",
-    ]
+    # Watches the whole user profile (C:\Users\<user>) rather than just
+    # Desktop/Downloads/Documents, per user request -- safe to do because
+    # SKIP_DIRECTORIES already excludes AppData/node_modules/venv/.git/etc,
+    # so the file-count bound isn't burned on noise before ever reaching
+    # the folders users actually receive/stage files in.
+    candidates = [home]
     candidates.extend(Path(value) for value in (os.environ.get("TEMP"), os.environ.get("TMP")) if value)
 
     targets: list[Path] = []
@@ -3657,7 +3665,7 @@ def watch_targets_polling_fallback() -> int:
     """Poll the user's common download locations without changing any files."""
     settings = read_app_settings()
     targets = configured_scan_targets(settings)
-    max_files = int(settings["scan_max_files"])
+    max_files = resolved_max_files(settings["scan_max_files"])
     if not targets:
         emit("watch-error", code="NO_TARGETS", message="İzlenecek klasör bulunamadı.")
         return 2
@@ -3726,10 +3734,33 @@ def watch_targets_polling_fallback() -> int:
         return 0
 
 
+def temp_directories() -> tuple[str, ...]:
+    """%TEMP%/%TMP% normally live under AppData -- which SKIP_DIRECTORIES
+    below would otherwise blanket-exclude -- but TEMP is an explicit,
+    deliberate watch target (home_scan_targets), so it needs a carve-out
+    rather than being silently dropped."""
+    values = []
+    for raw in (os.environ.get("TEMP"), os.environ.get("TMP")):
+        if not raw:
+            continue
+        try:
+            values.append(canonical_path(Path(raw)))
+        except (OSError, RuntimeError):
+            continue
+    return tuple(values)
+
+
 def should_ignore_watch_path(path: Path, exclusions: ExclusionSet | None = None) -> bool:
     if path.is_symlink() or is_engine_data_file(path):
         return True
-    if any(part.casefold() in SKIP_DIRECTORIES for part in path.parts):
+    try:
+        normalized = canonical_path(path)
+    except (OSError, RuntimeError):
+        normalized = None
+    in_temp = normalized is not None and any(
+        path_is_within(normalized, temp_dir) for temp_dir in temp_directories()
+    )
+    if not in_temp and any(part.casefold() in SKIP_DIRECTORIES for part in path.parts):
         return True
     if exclusions is not None and is_path_excluded(path, exclusions):
         return True
@@ -3773,7 +3804,7 @@ def watch_targets() -> int:
 
     settings = read_app_settings()
     targets = configured_scan_targets(settings)
-    max_files = int(settings["scan_max_files"])
+    max_files = resolved_max_files(settings["scan_max_files"])
     if not targets:
         emit("watch-error", code="NO_TARGETS", message="İzlenecek klasör bulunamadı.")
         return 2
@@ -4224,7 +4255,7 @@ def scan_targets(
         return 2
 
     settings = read_app_settings()
-    max_files = maximum_files or int(settings["scan_max_files"])
+    max_files = maximum_files or resolved_max_files(settings["scan_max_files"])
     # Cloud lookup only ever runs from explicit user-triggered scans, never
     # from --watch/--watch-web real-time protection -- see
     # cloud_reputation_lookup for why (avoids adding network latency to

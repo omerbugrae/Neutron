@@ -278,8 +278,16 @@
     }
   };
 
+  // 0 means "sınırsız" (unlimited) -- `|| 1500` would treat that falsy 0
+  // as "not set" and silently fall back to 1500, so it needs an explicit
+  // check rather than the usual default-via-|| shorthand.
+  const scanLimitText = (rawValue) => {
+    const value = Number(rawValue);
+    if (value === 0) return 'sınırsız sayıda';
+    return `en fazla ${(Number.isFinite(value) && value > 0 ? value : 1500).toLocaleString('tr-TR')}`;
+  };
+
   const setReadyState = () => {
-    const scanLimit = Number(currentSettings?.scan_max_files) || 1500;
     const protectionKnown = typeof protectionEnabled === 'boolean';
     setText('engine-state', !protectionKnown
       ? 'Koruma durumu denetleniyor'
@@ -297,7 +305,7 @@
       ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.'
       : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.');
     setText('scan-page-heading', 'Kritik alanlar');
-    setText('scan-page-summary', `En fazla ${scanLimit.toLocaleString('tr-TR')} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
+    setText('scan-page-summary', `${scanLimitText(currentSettings?.scan_max_files)} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
     setButtons('Hızlı tarama başlat', false);
     syncHeroPrimaryAction();
     if (activeThreatDetected) applyThreatAlertState();
@@ -840,7 +848,8 @@
       button.disabled = false;
     });
     if (scanLimitSelect) {
-      scanLimitSelect.value = String(settings.scan_max_files || 1500);
+      const limit = Number(settings.scan_max_files);
+      scanLimitSelect.value = String(Number.isFinite(limit) ? limit : 1500);
       scanLimitSelect.disabled = false;
     }
     renderWatchPaths(Array.isArray(settings.watch_paths) ? settings.watch_paths : []);
@@ -852,8 +861,7 @@
     }
     setText('settings-save-state', 'Tüm ayarlar bu bilgisayarda saklanıyor');
     if (!scanning) {
-      const limit = Number(settings.scan_max_files) || 1500;
-      setText('scan-page-summary', `En fazla ${limit.toLocaleString('tr-TR')} dosya incelenir. Dosyalara otomatik işlem uygulanmaz.`);
+      setText('scan-page-summary', `${scanLimitText(settings.scan_max_files)} dosya incelenir. Dosyalara otomatik işlem uygulanmaz.`);
     }
   };
 
