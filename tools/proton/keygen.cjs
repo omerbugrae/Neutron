@@ -4,7 +4,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { keyIdFromPublicKey } = require('./proton-format.cjs');
+const { keyIdFromPublicKey } = require('../../src/proton-format.cjs');
 
 function argument(name) {
   const index = process.argv.indexOf(name);

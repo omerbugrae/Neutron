@@ -8,7 +8,7 @@ const {
   decryptPackage,
   parsePackage,
   verifyPackageSignature,
-} = require('./proton-format.cjs');
+} = require('../../src/proton-format.cjs');
 
 const encryptionKey = crypto.randomBytes(32);
 const keys = crypto.generateKeyPairSync('ed25519');

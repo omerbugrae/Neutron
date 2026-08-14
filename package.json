@@ -11,13 +11,14 @@
     "start": "electron .",
     "prepackage": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
     "package": "electron-forge package",
-    "premake": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
+    "premake": "npm run icon:build && npm run installer-images:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
     "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
     "setup:test": "node tools/build-test-setup.cjs",
     "make:proton": "node tools/proton/make-with-runtime-key.cjs",
     "icon:build": "electron tools/build-windows-icon.cjs",
+    "installer-images:build": "electron tools/build-installer-images.cjs",
     "archive:check": "node --check src/neutron-archive.cjs",
     "archive:version": "node src/neutron-archive.cjs --version",
     "engine:build": ".\\venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --distpath runtime\\engine\\x64 --workpath build\\pyinstaller tools\\engine\\neutron-engine.spec",
@@ -43,7 +44,7 @@
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
-    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-wix": "^7.11.2",
     "@electron-forge/publisher-github": "^7.11.2",
     "electron": "^43.3.0",
     "patch-package": "^8.0.1"
@@ -87,13 +88,18 @@
       },
       "makers": [
         {
-          "name": "@electron-forge/maker-squirrel",
+          "name": "@electron-forge/maker-wix",
           "config": {
-            "name": "neutron",
-            "authors": "Neutron",
-            "description": "Neutron desktop security application",
-            "setupIcon": "assets/neutron.ico",
-            "iconUrl": "https://raw.githubusercontent.com/omerbugrae/Neutron/main/assets/neutron.ico"
+            "language": 1033,
+            "manufacturer": "Neutron",
+            "icon": "assets/neutron.ico",
+            "ui": {
+              "chooseDirectory": true,
+              "images": {
+                "background": "C:\\Users\\omerb\\Desktop\\Neutron\\assets\\installer-dialog.bmp",
+                "banner": "C:\\Users\\omerb\\Desktop\\Neutron\\assets\\installer-banner.bmp"
+              }
+            }
           }
         }
       ],
@@ -110,9 +116,6 @@
         }
       ]
     }
-  },
-  "dependencies": {
-    "electron-squirrel-startup": "^1.0.1"
   },
   "allowScripts": {
     "electron-winstaller@5.4.4": true

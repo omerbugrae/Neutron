@@ -8,7 +8,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { buildPackage, sha256 } = require('./proton-format.cjs');
+const { buildPackage, sha256 } = require('../../src/proton-format.cjs');
 const { ProtonUpdater } = require('../../src/proton-updater.cjs');
 
 async function main() {

@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   getServiceStatus: () => ipcRenderer.invoke('protection:service-status'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   checkForAppUpdate: () => ipcRenderer.invoke('app:check-for-update'),
+  prepareUninstall: () => ipcRenderer.invoke('app:prepare-uninstall'),
   checkUrlReputation: (url) => ipcRenderer.invoke('web:check-url', url),
   openSafeUrl: (url) => ipcRenderer.invoke('web:open-url', url),
   getProtectionHistory: () => ipcRenderer.invoke('protection:history'),
@@ -53,6 +54,16 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   addToQuarantine: (finding) => ipcRenderer.invoke('quarantine:add', finding),
   restoreFromQuarantine: (itemId) => ipcRenderer.invoke('quarantine:restore', itemId),
   deleteFromQuarantine: (itemId) => ipcRenderer.invoke('quarantine:delete', itemId),
+  getFirewallRules: () => ipcRenderer.invoke('firewall:list'),
+  getFirewallRecentApps: () => ipcRenderer.invoke('firewall:recent-apps'),
+  chooseFirewallApp: () => ipcRenderer.invoke('firewall:choose-app'),
+  addFirewallRule: (programPath, action, direction) => ipcRenderer.invoke('firewall:add-rule', programPath, action, direction),
+  removeFirewallRule: (ruleId, ruleName) => ipcRenderer.invoke('firewall:remove-rule', ruleId, ruleName),
+  toggleFirewallRule: (ruleId, ruleName, enabled) => ipcRenderer.invoke('firewall:toggle-rule', ruleId, ruleName, enabled),
+  getStartupItems: () => ipcRenderer.invoke('startup:list'),
+  disableStartupItem: (item) => ipcRenderer.invoke('startup:disable', item),
+  restoreStartupItem: (itemId) => ipcRenderer.invoke('startup:restore', itemId),
+  getVulnerableSoftware: () => ipcRenderer.invoke('vulnerability:scan'),
   onScanEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('scan:event', listener);

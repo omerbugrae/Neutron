@@ -7,7 +7,7 @@ const {
   decryptPackage,
   readEncryptionKey,
   verifyPackageSignature,
-} = require('../tools/proton/proton-format.cjs');
+} = require('./proton-format.cjs');
 
 const DEFAULT_RELEASES_URL = 'https://api.github.com/repos/omerbugrae/NeutronProton/releases?per_page=30';
 const RELEASE_TAG_PATTERN = /^proton-v(\d+\.\d{2}\.\d{3})$/;

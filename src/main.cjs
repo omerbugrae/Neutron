@@ -1,5 +1,6 @@
-const { app, autoUpdater, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron');
 const { spawn, spawnSync } = require('child_process');
+const https = require('https');
 const net = require('net');
 const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const path = require('path');
@@ -12,17 +13,6 @@ const NEUTRON_ICON_PATH = path.join(__dirname, '..', 'assets', 'neutron.ico');
 
 app.setName('Neutron');
 if (process.platform === 'win32') app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
-
-if (process.platform === 'win32' && process.argv.includes('--squirrel-uninstall')) {
-  // Best-effort; cleanupPrivilegedComponentsOnUninstall and the functions
-  // it calls are hoisted function declarations, safe to call here even
-  // though they're defined further down the file.
-  cleanupPrivilegedComponentsOnUninstall();
-}
-
-if (require('electron-squirrel-startup')) {
-  app.quit();
-}
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -401,6 +391,54 @@ function unregisterWatchdogTask() {
   return runElevatedPowerShell(`schtasks /delete /tn '${WATCHDOG_TASK_NAME}' /f`);
 }
 
+// Uygulama bazlı güvenlik duvarı: Neutron paket filtreleme yapmaz, Windows'un
+// kendi WFP tabanlı güvenlik duvarını (zaten uygulama bazlı kural desteği
+// var) PowerShell'in NetSecurity modülü üzerinden yönetir. engine.py sadece
+// bookkeeping tablosunu tutar (admin gerektirmez) -- gerçek kural
+// ekleme/kaldırma/aç-kapa burada, runElevatedPowerShell() ile (watchdog
+// task'la aynı UAC deseni) yapılır. Kural adı (ruleName) engine.py'nin
+// firewall_rule_name() ile ürettiği deterministik isimle birebir eşleşir.
+function psQuoteSingle(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+function firewallAddCommand(ruleName, programPath, action, direction) {
+  const psDirection = direction === 'in' ? 'Inbound' : 'Outbound';
+  const psAction = action === 'allow' ? 'Allow' : 'Block';
+  return (
+    `try { Get-NetFirewallRule -Name '${psQuoteSingle(ruleName)}' -ErrorAction Stop | Remove-NetFirewallRule } catch {}; ` +
+    `New-NetFirewallRule -Name '${psQuoteSingle(ruleName)}' -DisplayName '${psQuoteSingle(ruleName)}' ` +
+    `-Direction ${psDirection} -Action ${psAction} -Program '${psQuoteSingle(programPath)}' -Profile Any -Enabled True`
+  );
+}
+
+function firewallRemoveCommand(ruleName) {
+  return `Remove-NetFirewallRule -Name '${psQuoteSingle(ruleName)}'`;
+}
+
+function firewallSetEnabledCommand(ruleName, enabled) {
+  return `Set-NetFirewallRule -Name '${psQuoteSingle(ruleName)}' -Enabled ${enabled ? 'True' : 'False'}`;
+}
+
+// Startup manager: only HKLM registry values and the all-users Startup
+// folder reach these (HKCU + per-user Startup folder are handled directly,
+// non-elevated, inside engine.py's startup_disable_entry/startup_restore_entry).
+function startupRegistryPath(hive, keyPath) {
+  return `${hive === 'HKLM' ? 'HKLM' : 'HKCU'}:\\${keyPath}`;
+}
+
+function startupRegistryDeleteCommand(hive, keyPath, valueName) {
+  return `Remove-ItemProperty -Path '${psQuoteSingle(startupRegistryPath(hive, keyPath))}' -Name '${psQuoteSingle(valueName)}' -ErrorAction Stop`;
+}
+
+function startupRegistrySetCommand(hive, keyPath, valueName, value) {
+  return `Set-ItemProperty -Path '${psQuoteSingle(startupRegistryPath(hive, keyPath))}' -Name '${psQuoteSingle(valueName)}' -Value '${psQuoteSingle(value)}' -Type String -ErrorAction Stop`;
+}
+
+function startupMoveCommand(sourcePath, destinationPath) {
+  return `Move-Item -LiteralPath '${psQuoteSingle(sourcePath)}' -Destination '${psQuoteSingle(destinationPath)}' -Force -ErrorAction Stop`;
+}
+
 // Fixed GUID identifying Neutron's Windows Security Center product entry.
 const WSC_INSTANCE_GUID = 'ac0008b0-564a-44f8-8ec7-f2a2d82a8fe8';
 
@@ -582,66 +620,90 @@ function sendServiceCommand(command) {
   return { ok: true };
 }
 
-// --- App auto-update (GitHub Releases, no server) -------------------------
-// Squirrel.Windows (already the installer, see maker-squirrel above) drives
-// this through Electron's built-in autoUpdater; it only needs a feed URL
-// to poll. GitHub Releases serves static files at predictable URLs
-// (including a stable "latest" redirect), so that feed URL just points at
-// a GitHub Release -- no custom update server, matching every other
-// "someone else's server" decision made this session (cloud lookup,
-// network indicators). Only meaningful in a packaged, Squirrel-installed
-// build: autoUpdater errors out (or is simply unavailable) in dev.
-const UPDATE_FEED_URL = 'https://github.com/omerbugrae/Neutron/releases/latest/download';
+// --- App update check (GitHub Releases, no server) -------------------------
+// Squirrel used to drive silent, unattended self-update through Electron's
+// built-in autoUpdater; MSI installs don't speak that protocol, and there is
+// no verified WiX-native equivalent. This is the explicit tradeoff of
+// switching to a real setup wizard: update checks still poll GitHub
+// Releases (no custom server, same as every other "someone else's server"
+// decision made this session), but installing a new version is now a
+// manual step -- a notification links out to the release page, where the
+// user downloads and runs the new MSI themselves.
+const UPDATE_CHECK_API_URL = 'https://api.github.com/repos/omerbugrae/Neutron/releases/latest';
 const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 let updateCheckTimer = null;
-let updateReadyToInstall = false;
+let latestUpdateInfo = null; // { version, url } once a newer release is found
 
-function confirmInstallUpdate() {
-  const choice = dialog.showMessageBoxSync({
-    type: 'info',
-    buttons: ['Sonra', 'Şimdi yeniden başlat'],
-    defaultId: 1,
-    cancelId: 0,
-    title: 'Güncelleme hazır',
-    message: 'Yeni bir Neutron sürümü indirildi.',
-    detail: 'Kurulumu tamamlamak için uygulamanın yeniden başlatılması gerekiyor.',
-  });
-  return choice === 1;
+function compareVersions(a, b) {
+  const partsA = String(a).split('.').map(Number);
+  const partsB = String(b).split('.').map(Number);
+  for (let index = 0; index < Math.max(partsA.length, partsB.length); index += 1) {
+    const diff = (partsA[index] || 0) - (partsB[index] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 function checkForAppUpdate() {
   if (!app.isPackaged || process.platform !== 'win32') return;
-  try {
-    autoUpdater.setFeedURL({ url: UPDATE_FEED_URL });
-    autoUpdater.checkForUpdates();
-  } catch (error) {
+  const request = https.get(
+    UPDATE_CHECK_API_URL,
+    { headers: { 'User-Agent': 'Neutron-Update-Check' } },
+    (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body = `${body}${chunk}`.slice(0, 200_000); });
+      response.on('end', () => {
+        try {
+          const release = JSON.parse(body);
+          const remoteVersion = String(release.tag_name || '').replace(/^v/, '');
+          if (remoteVersion && compareVersions(remoteVersion, app.getVersion()) > 0) {
+            latestUpdateInfo = { version: remoteVersion, url: release.html_url };
+            sendProtectionEvent({ type: 'update-ready', version: remoteVersion });
+            if (appSettings.notifications_enabled && Notification.isSupported()) {
+              const notification = new Notification({
+                title: 'Yeni Neutron sürümü var',
+                body: `${remoteVersion} sürümü indirilebilir. İndirme sayfasını açmak için tıklayın.`,
+                icon: neutronImage(64),
+                silent: true,
+              });
+              notification.on('click', () => shell.openExternal(latestUpdateInfo.url));
+              notification.show();
+            }
+          }
+        } catch (error) {
+          console.error('Neutron güncelleme denetimi ayrıştırılamadı:', error.message);
+        }
+      });
+    },
+  );
+  request.on('error', (error) => {
     // Best-effort background feature: a network hiccup or missing release
     // must never interrupt the app, same "fail open" stance as AMSI/cloud
     // lookup elsewhere this session.
     console.error('Neutron güncelleme denetimi başarısız:', error.message);
-  }
+  });
+  request.setTimeout(10_000, () => request.destroy());
 }
 
 function startUpdateChecks() {
   if (!app.isPackaged || process.platform !== 'win32') return;
-  autoUpdater.on('update-downloaded', () => {
-    updateReadyToInstall = true;
-    sendProtectionEvent({ type: 'update-ready' });
-    if (confirmInstallUpdate()) autoUpdater.quitAndInstall();
-  });
-  autoUpdater.on('error', (error) => {
-    console.error('Neutron autoUpdater hatası:', error?.message || error);
-  });
   setTimeout(checkForAppUpdate, 30_000);
   updateCheckTimer = setInterval(checkForAppUpdate, UPDATE_CHECK_INTERVAL_MS);
 }
 
-// Runs at --squirrel-uninstall: removes the machine-wide bits that a plain
-// file delete wouldn't touch (the AMSI COM/HKLM registration, the
-// watchdog scheduled task, and the WSC WMI instance), in a single
-// elevation prompt rather than three. Best-effort: none of these may have
-// ever been registered if the user never opted into these settings, so
-// failures here are swallowed.
+// Removes the machine-wide bits that a plain file delete wouldn't touch (the
+// AMSI COM/HKLM registration, the watchdog scheduled task, the WSC WMI
+// instance, the service, firewall rules), in a single elevation prompt
+// rather than several. Best-effort: none of these may have ever been
+// registered if the user never opted into these settings, so failures here
+// are swallowed.
+//
+// Squirrel used to call this automatically via a --squirrel-uninstall argv
+// flag; WiX/MSI has no equivalent built-in hook we could verify without risk
+// of a malformed custom action breaking the whole installer build, so for
+// now this is wired to a manual "Kaldırmaya hazırla" button in Settings
+// (see ipcMain.handle('app:prepare-uninstall', ...)) that the user runs
+// before uninstalling, instead of firing automatically on uninstall.
 function cleanupPrivilegedComponentsOnUninstall() {
   const dllPath = amsiDllPath();
   const amsiUnregisterLine = existsSync(dllPath)
@@ -654,11 +716,14 @@ function cleanupPrivilegedComponentsOnUninstall() {
   const serviceUnregisterLine =
     `try { sc.exe stop '${SERVICE_NAME}' | Out-Null } catch {}; ` +
     `try { sc.exe delete '${SERVICE_NAME}' | Out-Null } catch {}`;
+  const firewallUnregisterLine =
+    `try { Get-NetFirewallRule -Name 'Neutron-FW-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue } catch {}`;
   const psCommand = [
     amsiUnregisterLine,
     `try { schtasks /delete /tn '${WATCHDOG_TASK_NAME}' /f } catch {}`,
     wscUnregisterLine,
     serviceUnregisterLine,
+    firewallUnregisterLine,
   ].filter(Boolean).join('; ');
   runElevatedPowerShell(psCommand);
 }
@@ -893,7 +958,7 @@ function startScan(webContents, options = {}) {
   const engine = resolveEngine(
     options.targetPath
       ? [options.fullScan ? '--full-scan' : '--scan-path', options.targetPath]
-      : ['--quick-scan']
+      : [options.scheduled ? '--scheduled-quick-scan' : '--quick-scan']
   );
   const child = spawn(
     engine.command,
@@ -924,6 +989,7 @@ function startScan(webContents, options = {}) {
         const event = JSON.parse(line);
         if (event.type === 'error') engineReportedError = true;
         sendScanEvent(webContents, event);
+        if (options.onEvent) options.onEvent(event);
       } catch {
         engineReportedError = true;
         sendScanEvent(webContents, {
@@ -969,6 +1035,56 @@ function startScan(webContents, options = {}) {
   });
 
   return { ok: true, scanId };
+}
+
+// Item 7 of plan.md, done as a scheduled *quick* scan rather than a full
+// disk scan: Neutron is already tray-resident whenever any protection
+// toggle is on (window 'close' hides instead of quitting -- see
+// createWindow()), so a plain in-process daily timer covers the common
+// case without needing a second elevated Windows Scheduled Task next to
+// the watchdog one. If the app genuinely isn't running at the 24h mark
+// (fully quit, or the PC was off), the check below simply catches up the
+// next time it starts -- there is no missed-run backlog to worry about.
+const SCHEDULED_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const SCHEDULED_SCAN_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+let scheduledScanTimer = null;
+
+function runScheduledScanIfDue() {
+  if (!appSettings.scheduled_scan_enabled) return;
+  if (!licenseStatus().active) return;
+  if (activeScan) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const lastRunAt = Number(appSettings.scheduled_scan_last_run_at) || 0;
+  if (Date.now() - lastRunAt < SCHEDULED_SCAN_INTERVAL_MS) return;
+
+  const result = startScan(mainWindow.webContents, {
+    scheduled: true,
+    onEvent: (event) => {
+      if (event.type !== 'complete') return;
+      writeAppSetting('scheduled_scan_last_run_at', Date.now());
+      if (!appSettings.notifications_enabled || !Notification.isSupported()) return;
+      const confirmedCount = Number(event.confirmed_count) || 0;
+      const reviewCount = Number(event.review_count) || 0;
+      const body = confirmedCount > 0
+        ? `${confirmedCount} kesin tehdit bulgusu var, incelemeniz gerekiyor.`
+        : reviewCount > 0
+          ? `${reviewCount} inceleme bulgusu var. Ayrıntılar için Neutron'u açın.`
+          : `${Number(event.scanned) || 0} dosya tarandı, tehdit bulunamadı.`;
+      new Notification({
+        title: 'Zamanlanmış hızlı tarama tamamlandı',
+        body,
+        icon: neutronImage(64),
+        silent: true,
+      }).show();
+    },
+  });
+  if (!result.ok) console.error('Zamanlanmış hızlı tarama başlatılamadı:', result.message);
+}
+
+function startScheduledScanTimer() {
+  if (scheduledScanTimer) return;
+  scheduledScanTimer = setInterval(runScheduledScanIfDue, SCHEDULED_SCAN_CHECK_INTERVAL_MS);
+  setTimeout(runScheduledScanIfDue, 2 * 60 * 1000);
 }
 
 function protectionStatus() {
@@ -1465,6 +1581,7 @@ async function updateApplicationSetting(key, value) {
     'notifications_enabled',
     'watch_paths',
     'scan_max_files',
+    'scheduled_scan_enabled',
   ]);
   if (!allowedKeys.has(key)) return { ok: false, message: 'Desteklenmeyen ayar.' };
 
@@ -1560,6 +1677,7 @@ async function createWindow() {
     }
   }
   startUpdateChecks();
+  startScheduledScanTimer();
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
@@ -1730,7 +1848,11 @@ ipcMain.handle('app:check-for-update', () => {
     return { ok: false, message: 'Güncelleme denetimi yalnızca kurulu (paketlenmiş) sürümde çalışır.' };
   }
   checkForAppUpdate();
-  return { ok: true, updateReadyToInstall };
+  return { ok: true, latestUpdateInfo };
+});
+ipcMain.handle('app:prepare-uninstall', () => {
+  cleanupPrivilegedComponentsOnUninstall();
+  return { ok: true };
 });
 ipcMain.handle('web:check-url', (_event, url) => requireLicense() || runEngineAction(['--check-url', String(url || '')], 'url-reputation'));
 ipcMain.handle('web:open-url', async (_event, url) => {
@@ -1843,6 +1965,101 @@ ipcMain.handle('quarantine:delete', (_event, itemId) => {
   if (!Number.isInteger(itemId) || itemId < 1) return { ok: false, message: 'Geçersiz karantina kaydı.' };
   return runEngineAction(['--delete-quarantine', String(itemId)], 'deleted');
 });
+
+ipcMain.handle('firewall:list', () => runEngineAction(['--firewall-list'], 'firewall-rules'));
+ipcMain.handle('firewall:recent-apps', () => runEngineAction(['--firewall-recent-apps'], 'firewall-recent-apps'));
+ipcMain.handle('firewall:choose-app', async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const selection = await dialog.showOpenDialog(window, {
+    title: 'Kural eklenecek uygulamayı seç',
+    buttonLabel: 'Uygulamayı ekle',
+    properties: ['openFile'],
+    filters: [{ name: 'Uygulamalar', extensions: ['exe'] }],
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { ok: false, cancelled: true };
+  return { ok: true, path: selection.filePaths[0] };
+});
+ipcMain.handle('firewall:add-rule', async (_event, programPath, action, direction) => {
+  if (typeof programPath !== 'string' || !programPath.trim()) {
+    return { ok: false, message: 'Geçersiz uygulama yolu.' };
+  }
+  const safeAction = action === 'allow' ? 'allow' : 'block';
+  const safeDirection = direction === 'in' ? 'in' : 'out';
+  const dbResult = await runEngineAction(
+    ['--firewall-add-rule', programPath, '--firewall-action', safeAction, '--firewall-direction', safeDirection],
+    'firewall-rule-added',
+  );
+  if (!dbResult.ok) return dbResult;
+  const elevated = runElevatedPowerShell(
+    firewallAddCommand(dbResult.rule_name, dbResult.program_path, safeAction, safeDirection),
+  );
+  if (!elevated.ok) {
+    // Windows Firewall'a hiç eklenemediyse Neutron'un kendi listesinde de
+    // görünmemeli -- gerçekte var olmayan bir kural gösterilmesin.
+    await runEngineAction(['--firewall-remove-rule', String(dbResult.id)], 'firewall-rule-removed');
+    return elevated;
+  }
+  return dbResult;
+});
+ipcMain.handle('firewall:remove-rule', async (_event, ruleId, ruleName) => {
+  if (!Number.isInteger(ruleId) || ruleId < 1 || typeof ruleName !== 'string' || !ruleName.trim()) {
+    return { ok: false, message: 'Geçersiz güvenlik duvarı kaydı.' };
+  }
+  const elevated = runElevatedPowerShell(firewallRemoveCommand(ruleName));
+  if (!elevated.ok) return elevated;
+  return runEngineAction(['--firewall-remove-rule', String(ruleId)], 'firewall-rule-removed');
+});
+ipcMain.handle('firewall:toggle-rule', async (_event, ruleId, ruleName, enabled) => {
+  if (!Number.isInteger(ruleId) || ruleId < 1 || typeof ruleName !== 'string' || !ruleName.trim()) {
+    return { ok: false, message: 'Geçersiz güvenlik duvarı kaydı.' };
+  }
+  const nextEnabled = Boolean(enabled);
+  const elevated = runElevatedPowerShell(firewallSetEnabledCommand(ruleName, nextEnabled));
+  if (!elevated.ok) return elevated;
+  return runEngineAction(
+    ['--firewall-toggle-rule', String(ruleId), '--value-json', JSON.stringify(nextEnabled)],
+    'firewall-rule-toggled',
+  );
+});
+
+ipcMain.handle('startup:list', () => runEngineAction(['--startup-list'], 'startup-items'));
+ipcMain.handle('startup:disable', async (_event, item) => {
+  if (
+    !item || typeof item.source !== 'string' || typeof item.key_path !== 'string' ||
+    typeof item.value_name !== 'string' || typeof item.command !== 'string'
+  ) {
+    return { ok: false, message: 'Geçersiz başlangıç öğesi.' };
+  }
+  const payload = {
+    source: item.source, hive: item.hive || null, key_path: item.key_path,
+    view: Number.isInteger(item.view) ? item.view : 0, value_name: item.value_name, command: item.command,
+  };
+  const dbResult = await runEngineAction(
+    ['--startup-disable', '--value-json', JSON.stringify(payload)], 'startup-item-disabled',
+  );
+  if (!dbResult.ok || !dbResult.needs_elevation) return dbResult;
+  const command = dbResult.source === 'registry'
+    ? startupRegistryDeleteCommand(dbResult.hive, dbResult.key_path, dbResult.value_name)
+    : startupMoveCommand(dbResult.original_path, dbResult.stored_path);
+  const elevated = runElevatedPowerShell(command);
+  if (!elevated.ok) {
+    await runEngineAction(['--startup-cancel-disable', String(dbResult.id)], 'startup-item-cancelled');
+    return elevated;
+  }
+  return runEngineAction(['--startup-finalize-disable', String(dbResult.id)], 'startup-item-finalized');
+});
+ipcMain.handle('startup:restore', async (_event, itemId) => {
+  if (!Number.isInteger(itemId) || itemId < 1) return { ok: false, message: 'Geçersiz başlangıç kaydı.' };
+  const result = await runEngineAction(['--startup-restore', String(itemId)], 'startup-item-restored');
+  if (!result.ok || !result.needs_elevation) return result;
+  const command = result.source === 'registry'
+    ? startupRegistrySetCommand(result.hive, result.key_path, result.value_name, result.original_path)
+    : startupMoveCommand(result.stored_path, result.original_path);
+  const elevated = runElevatedPowerShell(command);
+  if (!elevated.ok) return elevated;
+  return runEngineAction(['--startup-finalize-restore', String(itemId)], 'startup-item-finalized');
+});
+ipcMain.handle('vulnerability:scan', () => runEngineAction(['--check-vulnerable-software'], 'vulnerable-software'));
 
 app.whenReady().then(createWindow).catch((error) => {
   console.error('Neutron startup failed:', error);

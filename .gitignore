@@ -26,3 +26,5 @@ requirements.txt
 tests/
 requirements-build.txt
 plan.md
+docs/
+lisence.ps1

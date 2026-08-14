@@ -125,6 +125,8 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "notifications_enabled": True,
     "watch_paths": [],
     "scan_max_files": MAX_FILES,
+    "scheduled_scan_enabled": True,
+    "scheduled_scan_last_run_at": 0,
 }
 
 # EICAR, antivirüs ürünlerini güvenli şekilde denemek için kullanılan zararsız
@@ -405,6 +407,31 @@ def open_database() -> Iterator[sqlite3.Connection]:
           severity TEXT NOT NULL,
           installed_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS firewall_rules (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          program_path TEXT NOT NULL,
+          program_name TEXT NOT NULL,
+          action TEXT NOT NULL,
+          direction TEXT NOT NULL,
+          rule_name TEXT NOT NULL UNIQUE,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS startup_item_backups (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source TEXT NOT NULL,
+          hive TEXT,
+          key_path TEXT NOT NULL,
+          view INTEGER NOT NULL DEFAULT 0,
+          value_name TEXT NOT NULL,
+          original_path TEXT NOT NULL,
+          stored_path TEXT,
+          state TEXT NOT NULL DEFAULT 'disabled',
+          disabled_at TEXT NOT NULL,
+          restored_at TEXT
+        );
         """
     )
     protection_columns = {
@@ -535,11 +562,15 @@ def normalize_app_setting(key: str, value: Any) -> Any:
         "start_with_windows", "protection_enabled", "behavior_protection_enabled", "web_protection_enabled",
         "amsi_protection_enabled", "watchdog_protection_enabled", "wsc_registration_enabled",
         "network_protection_enabled", "service_mode_enabled", "memory_scan_enabled", "usb_protection_enabled",
-        "cloud_lookup_enabled", "notifications_enabled",
+        "cloud_lookup_enabled", "notifications_enabled", "scheduled_scan_enabled",
     }:
         if not isinstance(value, bool):
             raise ValueError("Ayar true veya false olmalı")
         return value
+    if key == "scheduled_scan_last_run_at":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Zaman damgası sayı olmalı")
+        return int(value)
     if key in {"malwarebazaar_api_key", "virustotal_api_key"}:
         if not isinstance(value, str):
             raise ValueError("API anahtarı metin olmalı")
@@ -623,6 +654,34 @@ def protected_exclusion_roots() -> tuple[str, ...]:
         if value not in roots:
             roots.append(value)
     return tuple(roots)
+
+
+def protected_system_quarantine_roots() -> tuple[str, ...]:
+    """Narrower than protected_exclusion_roots(): folders that must never be
+    touched by an *automatic* quarantine decision (no human in the loop),
+    because a wrong match here can break Windows itself. Manual,
+    user-confirmed quarantine from the UI is deliberately not gated by this
+    -- real malware does sometimes hide in these folders, and that action is
+    reversible and explicit."""
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    if not system_root:
+        return ()
+    roots: list[str] = []
+    base = Path(system_root)
+    for sub in ("System32", "SysWOW64", "WinSxS", "servicing", "assembly", "Boot"):
+        try:
+            roots.append(canonical_path(base / sub))
+        except (OSError, RuntimeError):
+            continue
+    return tuple(roots)
+
+
+def is_protected_system_path(path: Path) -> bool:
+    try:
+        normalized = canonical_path(path)
+    except (OSError, RuntimeError):
+        return False
+    return any(path_is_within(normalized, root) for root in protected_system_quarantine_roots())
 
 
 def normalize_exclusion(kind: str, raw_value: str) -> tuple[str, str]:
@@ -1276,6 +1335,303 @@ def update_quarantine_item(item_id: int, action: str) -> int:
         return 2
 
 
+# --- Firewall rule bookkeeping --------------------------------------------
+# Neutron never filters packets itself: it manages Windows' own built-in
+# firewall (WFP-backed, already supports per-application rules) via
+# PowerShell's NetSecurity cmdlets, run elevated from main.cjs
+# (runElevatedPowerShell/firewallAddCommand etc). engine.py itself never
+# needs admin -- it only keeps a local record of what Neutron created, the
+# same elevation split already used for the watchdog task (see plan.md).
+# The actual New-NetFirewallRule/Remove-NetFirewallRule/Set-NetFirewallRule
+# calls happen in main.cjs; this module only tracks state and hands back
+# the deterministic rule name main.cjs needs to target.
+
+
+def firewall_rule_name(program_path: str, direction: str) -> str:
+    """Deterministic per (program, direction) PowerShell -Name, so adding
+    the same app+direction again updates in place instead of duplicating,
+    and removal/toggle can target the exact rule without ambiguity."""
+    digest = hashlib.sha256(program_path.casefold().encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"Neutron-FW-{digest}-{direction}"
+
+
+def firewall_list_rules() -> int:
+    try:
+        with open_database() as connection:
+            rows = connection.execute(
+                """SELECT id, program_path, program_name, action, direction, rule_name, enabled, created_at
+                   FROM firewall_rules ORDER BY id DESC"""
+            ).fetchall()
+        emit("firewall-rules", items=[{
+            "id": row[0], "program_path": row[1], "program_name": row[2],
+            "action": row[3], "direction": row[4], "rule_name": row[5],
+            "enabled": bool(row[6]), "created_at": row[7],
+        } for row in rows])
+        return 0
+    except (OSError, sqlite3.Error):
+        emit("error", code="FIREWALL_LIST_UNAVAILABLE", message="Güvenlik duvarı kuralları okunamadı.")
+        return 2
+
+
+def firewall_add_rule(raw_path: str, action: str, direction: str) -> int:
+    try:
+        program = Path(raw_path).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        emit("error", code="FIREWALL_TARGET_MISSING", message="Seçilen uygulama bulunamadı.")
+        return 2
+    if not program.is_file() or program.suffix.casefold() != ".exe":
+        emit("error", code="FIREWALL_TARGET_INVALID", message="Yalnız .exe dosyaları için kural eklenebilir.")
+        return 2
+    if action not in {"block", "allow"} or direction not in {"out", "in"}:
+        emit("error", code="FIREWALL_RULE_INVALID", message="Geçersiz kural yönü veya eylemi.")
+        return 2
+
+    rule_name = firewall_rule_name(str(program), direction)
+    try:
+        with open_database() as connection:
+            connection.execute(
+                """
+                INSERT INTO firewall_rules (program_path, program_name, action, direction, rule_name, enabled, created_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(rule_name) DO UPDATE SET
+                  action = excluded.action, enabled = 1, created_at = excluded.created_at
+                """,
+                (str(program), program.name, action, direction, rule_name, datetime.now(timezone.utc).isoformat()),
+            )
+            row = connection.execute(
+                "SELECT id FROM firewall_rules WHERE rule_name = ?", (rule_name,)
+            ).fetchone()
+        emit(
+            "firewall-rule-added", id=int(row[0]), rule_name=rule_name,
+            program_path=str(program), program_name=program.name, action=action, direction=direction,
+        )
+        return 0
+    except (OSError, sqlite3.Error) as error:
+        emit("error", code="FIREWALL_ADD_FAILED", message=f"Kural kaydedilemedi: {error}")
+        return 2
+
+
+def firewall_remove_rule(rule_id: int) -> int:
+    try:
+        with open_database() as connection:
+            row = connection.execute(
+                "SELECT rule_name FROM firewall_rules WHERE id = ?", (rule_id,)
+            ).fetchone()
+            if not row:
+                emit("error", code="FIREWALL_RULE_MISSING", message="Güvenlik duvarı kuralı bulunamadı.")
+                return 2
+            rule_name = str(row[0])
+            connection.execute("DELETE FROM firewall_rules WHERE id = ?", (rule_id,))
+        emit("firewall-rule-removed", id=rule_id, rule_name=rule_name)
+        return 0
+    except (OSError, sqlite3.Error) as error:
+        emit("error", code="FIREWALL_REMOVE_FAILED", message=f"Kural silinemedi: {error}")
+        return 2
+
+
+def firewall_toggle_rule(rule_id: int, enabled: bool) -> int:
+    try:
+        with open_database() as connection:
+            row = connection.execute(
+                "SELECT rule_name FROM firewall_rules WHERE id = ?", (rule_id,)
+            ).fetchone()
+            if not row:
+                emit("error", code="FIREWALL_RULE_MISSING", message="Güvenlik duvarı kuralı bulunamadı.")
+                return 2
+            rule_name = str(row[0])
+            connection.execute("UPDATE firewall_rules SET enabled = ? WHERE id = ?", (1 if enabled else 0, rule_id))
+        emit("firewall-rule-toggled", id=rule_id, rule_name=rule_name, enabled=enabled)
+        return 0
+    except (OSError, sqlite3.Error) as error:
+        emit("error", code="FIREWALL_TOGGLE_FAILED", message=f"Kural güncellenemedi: {error}")
+        return 2
+
+
+def firewall_recent_apps() -> int:
+    """Apps currently holding a TCP connection, as a shortcut for 'which
+    program do I want to block' -- reuses the same driver-free connection
+    enumeration already built for watch_network()."""
+    processes = windows_process_snapshot()
+    counts: dict[str, int] = {}
+    for pid, _remote_ip, _remote_port in active_tcp_connections():
+        image_path = processes.get(pid, "")
+        if not image_path:
+            continue
+        counts[image_path] = counts.get(image_path, 0) + 1
+    items = [
+        {"path": path, "name": Path(path).name, "connection_count": count}
+        for path, count in sorted(counts.items(), key=lambda entry: entry[1], reverse=True)
+    ]
+    emit("firewall-recent-apps", items=items)
+    return 0
+
+
+# --- Startup manager --------------------------------------------------------
+# "Disable" never deletes outright: registry values and Startup-folder files
+# are backed up into startup_item_backups first (same reversible philosophy
+# as quarantine_items), so a mistaken disable is always restorable. HKCU
+# registry values and the per-user Startup folder don't need admin; HKLM
+# values and the all-users Startup folder do -- same elevation split as the
+# firewall feature (engine.py backs up/reads, main.cjs does the actual
+# elevated write via runElevatedPowerShell, then calls back to finalize).
+HIVE_BY_NAME = {"HKCU": winreg.HKEY_CURRENT_USER, "HKLM": winreg.HKEY_LOCAL_MACHINE} if winreg else {}
+
+
+def startup_disabled_directory() -> Path:
+    directory = data_directory() / "startup-disabled"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def startup_needs_elevation(source: str, hive: str | None, key_path: str) -> bool:
+    if source == "registry":
+        return hive == "HKLM"
+    program_data = os.environ.get("ProgramData")
+    return bool(program_data and key_path.casefold().startswith(program_data.casefold()))
+
+
+def startup_list_items() -> int:
+    items = [{
+        "id": None, "enabled": True, "source": entry["source"], "hive": entry["hive"],
+        "key_path": entry["key_path"], "view": entry["view"], "value_name": entry["value_name"],
+        "command": entry["command"],
+    } for entry in startup_entries()]
+    try:
+        with open_database() as connection:
+            rows = connection.execute(
+                """SELECT id, source, hive, key_path, view, value_name, original_path
+                   FROM startup_item_backups WHERE state IN ('disabled', 'pending') ORDER BY id DESC"""
+            ).fetchall()
+        items.extend({
+            "id": row[0], "enabled": False, "source": row[1], "hive": row[2],
+            "key_path": row[3], "view": row[4], "value_name": row[5], "command": row[6],
+        } for row in rows)
+    except sqlite3.Error:
+        pass
+    emit("startup-items", items=items)
+    return 0
+
+
+def startup_disable_entry(source: str, hive: str | None, key_path: str, view: int, value_name: str, command: str) -> int:
+    if source not in {"registry", "startup-folder"} or not key_path or not value_name or not command:
+        emit("error", code="STARTUP_INVALID", message="Geçersiz başlangıç öğesi verisi.")
+        return 2
+    needs_elevation = startup_needs_elevation(source, hive, key_path)
+    stored_path = (
+        str(startup_disabled_directory() / f"{int(time.time())}-{secrets.token_hex(6)}-{Path(command).name}")
+        if source == "startup-folder" else None
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with open_database() as connection:
+            cursor = connection.execute(
+                """INSERT INTO startup_item_backups
+                   (source, hive, key_path, view, value_name, original_path, stored_path, state, disabled_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (source, hive, key_path, view, value_name, command, stored_path,
+                 "pending" if needs_elevation else "disabled", now),
+            )
+            row_id = int(cursor.lastrowid)
+            if not needs_elevation:
+                try:
+                    if source == "registry":
+                        with winreg.OpenKey(HIVE_BY_NAME[hive], key_path, 0, winreg.KEY_SET_VALUE | view) as key:
+                            winreg.DeleteValue(key, value_name)
+                    else:
+                        shutil.move(command, stored_path)
+                except OSError as error:
+                    connection.execute("DELETE FROM startup_item_backups WHERE id = ?", (row_id,))
+                    emit("error", code="STARTUP_DISABLE_FAILED", message=f"Öğe devre dışı bırakılamadı: {error}")
+                    return 2
+    except sqlite3.Error as error:
+        emit("error", code="STARTUP_DISABLE_FAILED", message=f"İşlem tamamlanamadı: {error}")
+        return 2
+    emit(
+        "startup-item-disabled", id=row_id, needs_elevation=needs_elevation, source=source,
+        hive=hive, key_path=key_path, view=view, value_name=value_name,
+        original_path=command, stored_path=stored_path,
+    )
+    return 0
+
+
+def startup_finalize_disable(row_id: int) -> int:
+    try:
+        with open_database() as connection:
+            connection.execute("UPDATE startup_item_backups SET state = 'disabled' WHERE id = ? AND state = 'pending'", (row_id,))
+    except sqlite3.Error as error:
+        emit("error", code="STARTUP_FINALIZE_FAILED", message=str(error))
+        return 2
+    emit("startup-item-finalized", id=row_id)
+    return 0
+
+
+def startup_cancel_disable(row_id: int) -> int:
+    try:
+        with open_database() as connection:
+            connection.execute("DELETE FROM startup_item_backups WHERE id = ? AND state = 'pending'", (row_id,))
+    except sqlite3.Error as error:
+        emit("error", code="STARTUP_CANCEL_FAILED", message=str(error))
+        return 2
+    emit("startup-item-cancelled", id=row_id)
+    return 0
+
+
+def startup_restore_entry(row_id: int) -> int:
+    try:
+        with open_database() as connection:
+            row = connection.execute(
+                """SELECT source, hive, key_path, view, value_name, original_path, stored_path
+                   FROM startup_item_backups WHERE id = ? AND state = 'disabled'""",
+                (row_id,),
+            ).fetchone()
+            if not row:
+                emit("error", code="STARTUP_ITEM_MISSING", message="Başlangıç öğesi kaydı bulunamadı.")
+                return 2
+            source, hive, key_path, view, value_name, original_path, stored_path = row
+            needs_elevation = startup_needs_elevation(source, hive, key_path)
+            if not needs_elevation:
+                try:
+                    if source == "registry":
+                        with winreg.OpenKey(HIVE_BY_NAME[hive], key_path, 0, winreg.KEY_SET_VALUE | view) as key:
+                            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, original_path)
+                    else:
+                        if Path(original_path).exists():
+                            emit("error", code="STARTUP_RESTORE_CONFLICT", message="Aynı adda bir dosya zaten var; üzerine yazılmadı.")
+                            return 2
+                        shutil.move(stored_path, original_path)
+                except OSError as error:
+                    emit("error", code="STARTUP_RESTORE_FAILED", message=f"Geri yükleme tamamlanamadı: {error}")
+                    return 2
+                connection.execute(
+                    "UPDATE startup_item_backups SET state = 'restored', restored_at = ? WHERE id = ?",
+                    (datetime.now(timezone.utc).isoformat(), row_id),
+                )
+                emit("startup-item-restored", id=row_id, needs_elevation=False)
+                return 0
+    except sqlite3.Error as error:
+        emit("error", code="STARTUP_RESTORE_FAILED", message=f"İşlem tamamlanamadı: {error}")
+        return 2
+    emit(
+        "startup-item-restored", id=row_id, needs_elevation=True, source=source, hive=hive,
+        key_path=key_path, view=view, value_name=value_name, original_path=original_path, stored_path=stored_path,
+    )
+    return 0
+
+
+def startup_finalize_restore(row_id: int) -> int:
+    try:
+        with open_database() as connection:
+            connection.execute(
+                "UPDATE startup_item_backups SET state = 'restored', restored_at = ? WHERE id = ? AND state = 'disabled'",
+                (datetime.now(timezone.utc).isoformat(), row_id),
+            )
+    except sqlite3.Error as error:
+        emit("error", code="STARTUP_FINALIZE_FAILED", message=str(error))
+        return 2
+    emit("startup-item-finalized", id=row_id)
+    return 0
+
+
 _emit_sink: Any = None  # set by service_host() to route events over the
 # service pipe instead of stdout; every existing watch_*() function keeps
 # calling emit() completely unchanged, so no other code needed to know
@@ -1440,9 +1796,32 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
         return int(cursor.lastrowid)
 
 
+# Combined static risk score (see combine_static_risk) above which a
+# structural PE finding is treated with the same confidence as an exact
+# signature hit for real-time auto-quarantine purposes. This is what lets
+# Neutron act on malware it has never seen a signature for -- deliberately
+# conservative (multiple independent structural techniques, e.g. unsigned +
+# process-injection imports + a packed high-entropy executable section, must
+# already agree) so it stays rare enough not to become a false-positive risk.
+HEURISTIC_AUTO_QUARANTINE_RISK_SCORE = 90
+
+
 def auto_quarantine_confirmed_finding(event_id: int | None, finding: Finding) -> int | None:
-    """Quarantine only exact known-file signatures; heuristic findings remain user-reviewed."""
-    if event_id is None or finding.kind not in {"test-signature", "signature"}:
+    """Quarantine exact known-file signatures, plus very-high-confidence
+    unsigned heuristic PE findings (see HEURISTIC_AUTO_QUARANTINE_RISK_SCORE)
+    so previously-unseen malware with no signature can still be caught
+    automatically. Anything under a protected system folder, or below the
+    heuristic threshold, always stays pending for manual review instead."""
+    if event_id is None:
+        return None
+    is_confirmed_signature = finding.kind in {"test-signature", "signature"}
+    is_high_confidence_heuristic = (
+        finding.kind == "pe-analysis"
+        and (finding.risk_score or 0) >= HEURISTIC_AUTO_QUARANTINE_RISK_SCORE
+        and "imza geçerli" not in finding.reason
+        and not is_protected_system_path(Path(finding.path))
+    )
+    if not is_confirmed_signature and not is_high_confidence_heuristic:
         return None
     result = quarantine_file(finding.path, finding.reason)
     if result != 0:
@@ -1818,6 +2197,14 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
 def pe_finding(path: Path, size: int, digest: str | None, payload: bytes | None = None) -> Finding | None:
     analysis = analyze_pe(path, size, payload)
     if analysis is None or analysis.risk_score < 20 or not analysis.reasons:
+        return None
+    # A file whose Authenticode signature verifies against Windows' own trust
+    # store, sitting in a protected system folder, is as close to certainly-
+    # legitimate as static analysis can get -- surfacing a "review" flag here
+    # is pure noise (and the false-positive full-scan concern users worry
+    # about most). auto_quarantine_confirmed_finding() never acts on these
+    # anyway, but suppressing the finding entirely keeps scan results clean.
+    if analysis.signature_status == "trusted" and is_protected_system_path(path):
         return None
     severity = (
         "critical" if analysis.risk_score >= 85
@@ -2616,6 +3003,102 @@ def windows_process_snapshot() -> dict[int, str]:
     return result
 
 
+class _ProcessEntry32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32), ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", ctypes.c_uint32), ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32), ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32), ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def psapi_process_ids() -> set[int]:
+    """Raw PID set from EnumProcesses, with no OpenProcess-based name
+    resolution -- see detect_hidden_processes() for why the unfiltered set
+    matters (windows_process_snapshot() silently drops PIDs it can't name,
+    which would false-positive protected system processes as 'hidden')."""
+    if os.name != "nt":
+        return set()
+    from ctypes import wintypes
+    process_ids = (wintypes.DWORD * 8192)()
+    bytes_returned = wintypes.DWORD()
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    psapi.EnumProcesses.argtypes = [
+        ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)
+    ]
+    psapi.EnumProcesses.restype = wintypes.BOOL
+    if not psapi.EnumProcesses(process_ids, ctypes.sizeof(process_ids), ctypes.byref(bytes_returned)):
+        return set()
+    count = bytes_returned.value // ctypes.sizeof(wintypes.DWORD)
+    return {int(pid) for pid in process_ids[:count] if pid}
+
+
+def toolhelp_process_ids() -> set[int]:
+    """Second, independent process enumeration path (CreateToolhelp32Snapshot
+    instead of EnumProcesses). A PID visible to one API but not the other is
+    a classic sign of user-mode API hooking -- see detect_hidden_processes()."""
+    if os.name != "nt":
+        return set()
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if not snapshot or snapshot in (-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+        return set()
+    try:
+        entry = _ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return set()
+        pids = {int(entry.th32ProcessID)}
+        while kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+            pids.add(int(entry.th32ProcessID))
+        return pids
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def detect_hidden_processes() -> list["Finding"]:
+    """Cross-check two independent process-enumeration APIs; a PID the
+    snapshot-based Toolhelp32 sees but EnumProcesses doesn't (or vice versa)
+    is a classic driver-free rootkit-hiding indicator. Skips the comparison
+    entirely if either API call failed outright, to avoid false-flagging
+    everything on a transient enumeration error. The two calls aren't
+    atomic, so an ordinary process starting/exiting between them looks
+    identical to "hidden" for a single sample -- three samples are taken
+    and only PIDs hidden in all of them are reported, which a transient
+    start/exit race won't survive."""
+    samples: list[set[int]] = []
+    for attempt in range(3):
+        psapi_pids = psapi_process_ids()
+        toolhelp_pids = toolhelp_process_ids()
+        if not psapi_pids or not toolhelp_pids:
+            return []
+        samples.append(psapi_pids.symmetric_difference(toolhelp_pids))
+        if attempt < 2:
+            time.sleep(0.3)
+    # PID 0 ("System Idle Process") is a permanent, universal case: Toolhelp32
+    # always reports it, EnumProcesses never does -- not a hiding indicator.
+    hidden = set.intersection(*samples) - {0}
+    return [
+        Finding(
+            path=f"pid://{pid}", kind="hidden-process", severity="critical",
+            reason=f"PID {pid} yalnızca bir process listeleme API'sinde görünüyor (olası kullanıcı-modu gizleme)",
+            sha256=None, risk_score=90,
+        )
+        for pid in hidden
+    ]
+
+
 def active_tcp_connections() -> list[tuple[int, str, int]]:
     """Enumerate active IPv4 TCP connections as (pid, remote_ip, remote_port)
     via iphlpapi's GetExtendedTcpTable. No admin privileges required. This
@@ -2800,11 +3283,22 @@ def watch_memory() -> int:
     yara_rules, yara_status = load_yara_rules()
     exclusions = load_exclusion_set()
     processes = windows_process_snapshot()
+    alerted_hidden: set[int] = set()
     emit("memory-ready", backend="windows-native", process_count=len(processes), yara=yara_status)
 
     try:
         while True:
             time.sleep(BEHAVIOR_INTERVAL_SECONDS)
+            for finding in detect_hidden_processes():
+                pid = int(finding.path.removeprefix("pid://"))
+                if pid in alerted_hidden:
+                    continue
+                alerted_hidden.add(pid)
+                try:
+                    event_id = save_protection_event("memory-scan", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit("memory-finding", event_id=event_id, process_id=pid, file_name=f"PID {pid}", finding=asdict(finding))
             current_processes = windows_process_snapshot()
             for pid, raw_path in current_processes.items():
                 if pid in processes:
@@ -2848,24 +3342,44 @@ def watch_memory() -> int:
         return 0
 
 
+AUTORUN_REGISTRY_LOCATIONS = (
+    (winreg.HKEY_CURRENT_USER, "HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run") if winreg else None,
+    (winreg.HKEY_CURRENT_USER, "HKCU", r"Software\Microsoft\Windows\CurrentVersion\RunOnce") if winreg else None,
+    (winreg.HKEY_LOCAL_MACHINE, "HKLM", r"Software\Microsoft\Windows\CurrentVersion\Run") if winreg else None,
+    (winreg.HKEY_LOCAL_MACHINE, "HKLM", r"Software\Microsoft\Windows\CurrentVersion\RunOnce") if winreg else None,
+)
+
+
+def registry_wow64_views() -> list[int]:
+    views = [0]
+    if winreg is None:
+        return views
+    for view_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        view = getattr(winreg, view_name, 0)
+        if view and view not in views:
+            views.append(view)
+    return views
+
+
+def autorun_startup_directories() -> list[Path]:
+    directories = []
+    app_data = os.environ.get("APPDATA")
+    program_data = os.environ.get("ProgramData")
+    if app_data:
+        directories.append(Path(app_data) / "Microsoft/Windows/Start Menu/Programs/Startup")
+    if program_data:
+        directories.append(Path(program_data) / "Microsoft/Windows/Start Menu/Programs/StartUp")
+    return directories
+
+
 def persistence_snapshot() -> dict[str, str]:
     """Read common Windows Run keys and Startup folders without modifying them."""
     if os.name != "nt":
         return {}
     snapshot: dict[str, str] = {}
     if winreg is not None:
-        registry_locations = (
-            (winreg.HKEY_CURRENT_USER, "HKCU", r"Software\Microsoft\Windows\CurrentVersion\Run"),
-            (winreg.HKEY_CURRENT_USER, "HKCU", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
-            (winreg.HKEY_LOCAL_MACHINE, "HKLM", r"Software\Microsoft\Windows\CurrentVersion\Run"),
-            (winreg.HKEY_LOCAL_MACHINE, "HKLM", r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
-        )
-        views = [0]
-        for view_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
-            view = getattr(winreg, view_name, 0)
-            if view and view not in views:
-                views.append(view)
-        for hive, hive_name, key_path in registry_locations:
+        views = registry_wow64_views()
+        for hive, hive_name, key_path in AUTORUN_REGISTRY_LOCATIONS:
             for view in views:
                 try:
                     with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
@@ -2881,14 +3395,7 @@ def persistence_snapshot() -> dict[str, str]:
                 except (OSError, PermissionError):
                     continue
 
-    startup_directories = []
-    app_data = os.environ.get("APPDATA")
-    program_data = os.environ.get("ProgramData")
-    if app_data:
-        startup_directories.append(Path(app_data) / "Microsoft/Windows/Start Menu/Programs/Startup")
-    if program_data:
-        startup_directories.append(Path(program_data) / "Microsoft/Windows/Start Menu/Programs/StartUp")
-    for directory in startup_directories:
+    for directory in autorun_startup_directories():
         try:
             for entry in directory.iterdir():
                 if not entry.is_file() or entry.is_symlink():
@@ -2898,6 +3405,153 @@ def persistence_snapshot() -> dict[str, str]:
         except (OSError, PermissionError):
             continue
     return snapshot
+
+
+def startup_entries() -> list[dict[str, Any]]:
+    """Structured (name/command/location) version of persistence_snapshot(),
+    for a human-facing Startup Manager rather than watch_behavior()'s diff."""
+    if os.name != "nt":
+        return []
+    items: list[dict[str, Any]] = []
+    if winreg is not None:
+        views = registry_wow64_views()
+        for hive, hive_name, key_path in AUTORUN_REGISTRY_LOCATIONS:
+            for view in views:
+                try:
+                    with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
+                        index = 0
+                        while True:
+                            try:
+                                name, value, _value_type = winreg.EnumValue(key, index)
+                            except OSError:
+                                break
+                            items.append({
+                                "source": "registry", "hive": hive_name, "key_path": key_path,
+                                "view": view, "value_name": name, "command": str(value),
+                            })
+                            index += 1
+                except (OSError, PermissionError):
+                    continue
+
+    for directory in autorun_startup_directories():
+        try:
+            for entry in directory.iterdir():
+                if not entry.is_file() or entry.is_symlink():
+                    continue
+                items.append({
+                    "source": "startup-folder", "hive": None, "key_path": str(directory),
+                    "view": 0, "value_name": entry.name, "command": str(entry),
+                })
+        except (OSError, PermissionError):
+            continue
+    return items
+
+
+# --- Vulnerable/outdated software scanner -----------------------------------
+# Read-only: enumerates installed programs via the Uninstall registry keys
+# (same winreg/hive/WOW64-view idiom as AUTORUN_REGISTRY_LOCATIONS above) and
+# flags known-vulnerable version ranges. Honest scope note: VULNERABLE_
+# SOFTWARE_SEED is a small hand-curated starter list to prove the mechanism,
+# not a real CVE feed -- broad coverage would need a Proton-distributed
+# category (additive to the existing payload schema, see plan.md), which is
+# a separate, larger content-curation effort not done here.
+UNINSTALL_REGISTRY_LOCATIONS = (
+    (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall") if winreg else None,
+    (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") if winreg else None,
+    (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall") if winreg else None,
+)
+
+VULNERABLE_SOFTWARE_SEED: tuple[dict[str, str], ...] = (
+    {"name_pattern": "winrar", "max_safe_version": "6.22", "severity": "high",
+     "note": "WinRAR 6.23 öncesi sürümlerde uzaktan kod çalıştırmaya izin veren bilinen bir açık var (CVE-2023-40477)."},
+    {"name_pattern": "putty", "max_safe_version": "0.80", "severity": "high",
+     "note": "PuTTY 0.81 öncesi sürümlerde özel anahtarın kurtarılabildiği bilinen bir açık var (CVE-2024-31497)."},
+    {"name_pattern": "7-zip", "max_safe_version": "21.06", "severity": "medium",
+     "note": "7-Zip 21.07 öncesi sürümlerde bilinen güvenlik açıkları var, güncel sürüme geçilmesi önerilir."},
+)
+
+
+def parse_version_tuple(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for chunk in re.split(r"[.\-_]", str(value)):
+        match = re.match(r"\d+", chunk)
+        if not match:
+            break
+        parts.append(int(match.group()))
+    return tuple(parts) if parts else (0,)
+
+
+def version_at_most(version: str, max_safe_version: str) -> bool:
+    """True if `version` is at or below the last known-vulnerable version
+    (still needs updating)."""
+    return parse_version_tuple(version) <= parse_version_tuple(max_safe_version)
+
+
+def installed_software_snapshot() -> list[dict[str, str]]:
+    if os.name != "nt" or winreg is None:
+        return []
+    items: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for hive, key_path in UNINSTALL_REGISTRY_LOCATIONS:
+        for view in registry_wow64_views():
+            try:
+                with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as root:
+                    index = 0
+                    while True:
+                        try:
+                            subkey_name = winreg.EnumKey(root, index)
+                        except OSError:
+                            break
+                        index += 1
+                        try:
+                            with winreg.OpenKey(root, subkey_name, 0, winreg.KEY_READ) as subkey:
+                                try:
+                                    name = str(winreg.QueryValueEx(subkey, "DisplayName")[0])
+                                except OSError:
+                                    continue
+                                try:
+                                    version = str(winreg.QueryValueEx(subkey, "DisplayVersion")[0])
+                                except OSError:
+                                    version = ""
+                                try:
+                                    publisher = str(winreg.QueryValueEx(subkey, "Publisher")[0])
+                                except OSError:
+                                    publisher = ""
+                                try:
+                                    is_component = int(winreg.QueryValueEx(subkey, "SystemComponent")[0])
+                                except OSError:
+                                    is_component = 0
+                        except OSError:
+                            continue
+                        if not name or is_component:
+                            continue
+                        dedupe_key = (name.casefold(), version)
+                        if dedupe_key in seen:
+                            continue
+                        seen.add(dedupe_key)
+                        items.append({"name": name, "version": version, "publisher": publisher})
+            except (OSError, PermissionError):
+                continue
+    return items
+
+
+def check_vulnerable_software() -> int:
+    findings = []
+    for software in installed_software_snapshot():
+        if not software["version"]:
+            continue
+        name_cf = software["name"].casefold()
+        for seed in VULNERABLE_SOFTWARE_SEED:
+            if seed["name_pattern"] not in name_cf:
+                continue
+            if version_at_most(software["version"], seed["max_safe_version"]):
+                findings.append({
+                    "name": software["name"], "version": software["version"],
+                    "publisher": software["publisher"], "severity": seed["severity"], "note": seed["note"],
+                })
+            break
+    emit("vulnerable-software", items=findings)
+    return 0
 
 
 def suspicious_process_finding(path: Path) -> Finding | None:
@@ -3283,6 +3937,8 @@ def service_host() -> int:
                     return {"type": "scan-result", "code": full_scan(str(command["drive"]))}
                 if mode == "custom" and command.get("path"):
                     return {"type": "scan-result", "code": scan_targets([Path(str(command["path"]))], "custom")}
+                if mode == "scheduled":
+                    return {"type": "scan-result", "code": scheduled_quick_scan()}
                 return {"type": "scan-result", "code": quick_scan()}
             return {"type": "error", "code": "UNKNOWN_COMMAND", "message": f"Bilinmeyen komut: {action}"}
         except Exception as error:  # noqa: BLE001 -- a bad command must never take the service down
@@ -4335,6 +4991,15 @@ def quick_scan() -> int:
     return scan_targets(home_scan_targets(), "quick")
 
 
+def scheduled_quick_scan() -> int:
+    """Same as quick_scan(), tagged distinctly in scan history so the UI can
+    show it was triggered automatically rather than by the user clicking
+    Tara. Invoked by Electron's own daily timer (main.cjs), not by a Windows
+    Scheduled Task -- Neutron is already tray-resident whenever protection is
+    on, so no extra elevated task registration is needed for this."""
+    return scan_targets(home_scan_targets(), "scheduled")
+
+
 def custom_scan(raw_target: str) -> int:
     """Yalnızca Electron'un kullanıcıya seçtirdiği tek klasörü tarar."""
     try:
@@ -4374,6 +5039,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Neutron salt-okunur hızlı tarama motoru")
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--quick-scan", action="store_true", help="Aktif kullanıcı profili ve Temp klasörlerini tara")
+    action.add_argument("--scheduled-quick-scan", action="store_true", help="Zamanlanmış otomatik hızlı tarama (Electron zamanlayıcısı tarafından çağrılır)")
     action.add_argument("--engine-version", action="store_true", help="Neutron motor sürümünü göster")
     action.add_argument("--scan-path", metavar="HEDEF", help="Kullanıcının seçtiği tek dosya veya klasörü tara")
     action.add_argument("--full-scan", metavar="SURUCU", help="Seçilen sürücüyü tam tara")
@@ -4406,6 +5072,20 @@ def main() -> int:
     action.add_argument("--quarantine-list", action="store_true", help="Etkin karantina kayıtlarını oku")
     action.add_argument("--restore", metavar="ID", type=int, help="Karantinadaki dosyayı geri yükle")
     action.add_argument("--delete-quarantine", metavar="ID", type=int, help="Karantinadaki dosyayı kalıcı sil")
+    action.add_argument("--firewall-list", action="store_true", help="Neutron'un eklediği güvenlik duvarı kurallarını oku")
+    action.add_argument("--firewall-recent-apps", action="store_true", help="Şu an ağ bağlantısı olan uygulamaları listele")
+    action.add_argument("--firewall-add-rule", metavar="DOSYA", help="Uygulama için güvenlik duvarı kuralı kaydet")
+    action.add_argument("--firewall-remove-rule", metavar="ID", type=int, help="Güvenlik duvarı kuralını kaldır")
+    action.add_argument("--firewall-toggle-rule", metavar="ID", type=int, help="Güvenlik duvarı kuralını aç/kapat")
+    action.add_argument("--startup-list", action="store_true", help="Başlangıç/otomatik çalışma öğelerini listele")
+    action.add_argument("--startup-disable", action="store_true", help="Başlangıç öğesini devre dışı bırak (--value-json ile)")
+    action.add_argument("--startup-restore", metavar="ID", type=int, help="Devre dışı bırakılan başlangıç öğesini geri yükle")
+    action.add_argument("--startup-finalize-disable", metavar="ID", type=int, help="Elevated devre dışı bırakmayı onayla")
+    action.add_argument("--startup-cancel-disable", metavar="ID", type=int, help="Başarısız elevated devre dışı bırakmayı geri al")
+    action.add_argument("--startup-finalize-restore", metavar="ID", type=int, help="Elevated geri yüklemeyi onayla")
+    action.add_argument("--check-vulnerable-software", action="store_true", help="Yüklü yazılımı bilinen zafiyetli sürümlere göre tara")
+    parser.add_argument("--firewall-action", choices=("block", "allow"), default="block", help="Güvenlik duvarı kuralı eylemi")
+    parser.add_argument("--firewall-direction", choices=("out", "in"), default="out", help="Güvenlik duvarı kuralı yönü")
     parser.add_argument("--reason", default="Kullanıcı onaylı tarama bulgusu", help="Karantina nedeni")
     parser.add_argument("--disposition", choices=("quarantine", "trust", "ignore"), help="Koruma olayı işlemi")
     parser.add_argument("--label", default=None, help="İstisna açıklaması")
@@ -4478,6 +5158,8 @@ def main() -> int:
             return 2
     if args.scan_path:
         return custom_scan(args.scan_path)
+    if args.scheduled_quick_scan:
+        return scheduled_quick_scan()
     if args.quarantine:
         return quarantine_file(args.quarantine, args.reason)
     if args.quarantine_list:
@@ -4486,6 +5168,43 @@ def main() -> int:
         return update_quarantine_item(args.restore, "restore")
     if args.delete_quarantine is not None:
         return update_quarantine_item(args.delete_quarantine, "delete")
+    if args.firewall_list:
+        return firewall_list_rules()
+    if args.firewall_recent_apps:
+        return firewall_recent_apps()
+    if args.firewall_add_rule:
+        return firewall_add_rule(args.firewall_add_rule, args.firewall_action, args.firewall_direction)
+    if args.firewall_remove_rule is not None:
+        return firewall_remove_rule(args.firewall_remove_rule)
+    if args.firewall_toggle_rule is not None:
+        try:
+            enabled = bool(json.loads(args.value_json))
+        except json.JSONDecodeError:
+            emit("error", code="FIREWALL_TOGGLE_INVALID", message="Geçersiz açık/kapalı değeri.")
+            return 2
+        return firewall_toggle_rule(args.firewall_toggle_rule, enabled)
+    if args.startup_list:
+        return startup_list_items()
+    if args.startup_disable:
+        try:
+            payload = json.loads(args.value_json)
+        except json.JSONDecodeError:
+            emit("error", code="STARTUP_INVALID", message="Geçersiz başlangıç öğesi verisi.")
+            return 2
+        return startup_disable_entry(
+            str(payload.get("source", "")), payload.get("hive"), str(payload.get("key_path", "")),
+            int(payload.get("view", 0)), str(payload.get("value_name", "")), str(payload.get("command", "")),
+        )
+    if args.startup_restore is not None:
+        return startup_restore_entry(args.startup_restore)
+    if args.startup_finalize_disable is not None:
+        return startup_finalize_disable(args.startup_finalize_disable)
+    if args.startup_cancel_disable is not None:
+        return startup_cancel_disable(args.startup_cancel_disable)
+    if args.startup_finalize_restore is not None:
+        return startup_finalize_restore(args.startup_finalize_restore)
+    if args.check_vulnerable_software:
+        return check_vulnerable_software()
     return quick_scan()
 
 

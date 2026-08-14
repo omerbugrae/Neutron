@@ -1,0 +1,22 @@
+diff --git a/node_modules/electron-wix-msi/static/wix.xml b/node_modules/electron-wix-msi/static/wix.xml
+index 57f6dc1..bd82a8a 100644
+--- a/node_modules/electron-wix-msi/static/wix.xml
++++ b/node_modules/electron-wix-msi/static/wix.xml
+@@ -3,7 +3,7 @@
+   <!-- http://wixtoolset.org/documentation/manual/v3/xsd/wix/product.html -->
+   <Product Id="{{ProductCode}}" 
+            UpgradeCode="{{UpgradeCode}}"
+-           Name = "{{ApplicationName}} (Machine - MSI)"
++           Name = "{{ApplicationName}}"
+            Version="{{Version}}"
+            Manufacturer="{{Manufacturer}}"
+            Language="{{Language}}">
+@@ -74,7 +74,7 @@
+     </SetProperty>
+     <!-- Again we give thee MSI generaten entry a slightly different name to help 
+     differentiate between the public one and the invisible one. -->
+-    <SetProperty Action="SetProductName" Id="ProductName" Sequence="both" Before="AppSearch"  Value="{{ApplicationName}} (User - MSI)">
++    <SetProperty Action="SetProductName" Id="ProductName" Sequence="both" Before="AppSearch"  Value="{{ApplicationName}}">
+       <![CDATA[MSIINSTALLPERUSER = "1"]]>
+     </SetProperty>
+ 

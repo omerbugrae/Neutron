@@ -4,7 +4,7 @@
 // Collects metadata only. It never downloads or opens a malware sample.
 const fs = require('node:fs');
 const path = require('node:path');
-const { normalizeSource, readJsonFile, validateVersion } = require('./proton-format.cjs');
+const { normalizeSource, readJsonFile, validateVersion } = require('../../src/proton-format.cjs');
 
 const URLHAUS_URLS = 'https://urlhaus-api.abuse.ch/v1/urls/recent/';
 const URLHAUS_PAYLOADS = 'https://urlhaus-api.abuse.ch/v1/payloads/recent/';

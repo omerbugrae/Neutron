@@ -29,6 +29,8 @@
   const scanLimitSelect = document.querySelector('[data-setting-select="scan_max_files"]');
   const addWatchFolderButton = document.querySelector('[data-action="add-watch-folder"]');
   const addExclusionFolderButton = document.querySelector('[data-action="add-exclusion-folder"]');
+  const chooseFirewallAppButton = document.querySelector('[data-action="choose-firewall-app"]');
+  const scanVulnerableSoftwareButton = document.querySelector('[data-action="scan-vulnerable-software"]');
   const exclusionExtensionForm = document.querySelector('[data-role="exclusion-extension-form"]');
   const exclusionExtensionInput = document.querySelector('[data-role="exclusion-extension-input"]');
   const vtApiKeyForm = document.querySelector('[data-role="vt-api-key-form"]');
@@ -271,6 +273,14 @@
       applyProtectionHistory();
     }
     if (pageName === 'quarantine') applyQuarantine();
+    if (pageName === 'firewall') {
+      applyFirewall();
+      applyFirewallRecentApps();
+    }
+    if (pageName === 'system-audit') {
+      applyStartupItems();
+      applyVulnerableSoftware();
+    }
     if (pageName === 'settings') {
       applySettings();
       applyExclusions();
@@ -1145,6 +1155,168 @@
     });
   };
 
+  const applyFirewall = async () => {
+    const list = document.querySelector('[data-role="firewall-rule-list"]');
+    const empty = document.querySelector('[data-role="firewall-rule-empty"]');
+    if (!list || !empty || !engine?.getFirewallRules) return;
+    const result = await engine.getFirewallRules();
+    const items = Array.isArray(result?.items) ? result.items : [];
+    list.replaceChildren();
+    empty.hidden = items.length > 0;
+    items.forEach((item) => {
+      const row = document.createElement('article');
+      row.className = 'quarantine-row';
+      const content = document.createElement('div');
+      const title = document.createElement('h2');
+      title.textContent = item.program_name;
+      const detail = document.createElement('p');
+      const actionLabel = item.action === 'allow' ? 'İzin veriliyor' : 'Engelleniyor';
+      const directionLabel = item.direction === 'in' ? 'gelen' : 'giden';
+      detail.textContent = `${actionLabel} · ${directionLabel} bağlantı${item.enabled ? '' : ' · kural kapalı'}`;
+      const path = document.createElement('p');
+      path.className = 'quarantine-row__path';
+      path.textContent = item.program_path;
+      content.append(title, detail, path);
+      const actions = document.createElement('div');
+      actions.className = 'quarantine-row__actions';
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.textContent = item.enabled ? 'Kapat' : 'Aç';
+      toggle.addEventListener('click', async () => {
+        toggle.disabled = true;
+        const outcome = await engine.toggleFirewallRule(item.id, item.rule_name, !item.enabled);
+        if (!outcome?.ok) window.alert(outcome?.message || 'Kural güncellenemedi.');
+        applyFirewall();
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'quarantine-delete'; remove.textContent = 'Kaldır';
+      remove.addEventListener('click', async () => {
+        if (!window.confirm(`“${item.program_name}” için güvenlik duvarı kuralı kaldırılsın mı?`)) return;
+        remove.disabled = true;
+        const outcome = await engine.removeFirewallRule(item.id, item.rule_name);
+        if (!outcome?.ok) window.alert(outcome?.message || 'Kural kaldırılamadı.');
+        applyFirewall();
+      });
+      actions.append(toggle, remove);
+      row.append(content, actions);
+      list.append(row);
+    });
+  };
+
+  const addFirewallRuleWithFeedback = async (programPath, action) => {
+    const result = await engine?.addFirewallRule?.(programPath, action, 'out');
+    if (!result?.ok && !result?.cancelled) {
+      window.alert(result?.message || 'Kural eklenemedi. Yönetici izni gerekiyor olabilir.');
+    }
+    applyFirewall();
+    return result;
+  };
+
+  const applyFirewallRecentApps = async () => {
+    const list = document.querySelector('[data-role="firewall-recent-apps-list"]');
+    if (!list || !engine?.getFirewallRecentApps) return;
+    const result = await engine.getFirewallRecentApps();
+    const items = Array.isArray(result?.items) ? result.items : [];
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Ağa bağlı uygulama bulunamadı.';
+      list.append(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'settings-preference';
+      const info = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = item.name;
+      const path = document.createElement('p');
+      path.textContent = item.path;
+      info.append(name, path);
+      const actions = document.createElement('div');
+      actions.className = 'quarantine-row__actions';
+      const block = document.createElement('button');
+      block.type = 'button'; block.textContent = 'Engelle';
+      block.addEventListener('click', () => addFirewallRuleWithFeedback(item.path, 'block'));
+      const allow = document.createElement('button');
+      allow.type = 'button'; allow.textContent = 'İzin ver';
+      allow.addEventListener('click', () => addFirewallRuleWithFeedback(item.path, 'allow'));
+      actions.append(block, allow);
+      row.append(info, actions);
+      list.append(row);
+    });
+  };
+
+  const applyStartupItems = async () => {
+    const list = document.querySelector('[data-role="startup-item-list"]');
+    if (!list || !engine?.getStartupItems) return;
+    const result = await engine.getStartupItems();
+    const items = Array.isArray(result?.items) ? result.items : [];
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Başlangıç öğesi bulunamadı.';
+      list.append(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'settings-preference';
+      const info = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = item.value_name;
+      const detail = document.createElement('p');
+      const locationLabel = item.source === 'registry' ? item.hive : 'Başlangıç klasörü';
+      detail.textContent = `${locationLabel} · ${item.command}`;
+      info.append(name, detail);
+      const actions = document.createElement('div');
+      actions.className = 'quarantine-row__actions';
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.textContent = item.enabled ? 'Kapat' : 'Aç';
+      toggle.addEventListener('click', async () => {
+        toggle.disabled = true;
+        const outcome = item.enabled
+          ? await engine.disableStartupItem(item)
+          : await engine.restoreStartupItem(item.id);
+        if (!outcome?.ok) window.alert(outcome?.message || 'İşlem tamamlanamadı.');
+        applyStartupItems();
+      });
+      actions.append(toggle);
+      row.append(info, actions);
+      list.append(row);
+    });
+  };
+
+  const applyVulnerableSoftware = async () => {
+    const list = document.querySelector('[data-role="vulnerable-software-list"]');
+    if (!list || !engine?.getVulnerableSoftware) return;
+    const result = await engine.getVulnerableSoftware();
+    const items = Array.isArray(result?.items) ? result.items : [];
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Bilinen zafiyetli yazılım bulunamadı.';
+      list.append(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'settings-preference';
+      const info = document.createElement('div');
+      const name = document.createElement('strong');
+      name.textContent = `${item.name} ${item.version}`;
+      const detail = document.createElement('p');
+      detail.textContent = item.note;
+      info.append(name, detail);
+      row.append(info);
+      list.append(row);
+    });
+  };
+
   pageTargets.forEach((target) => target.addEventListener('click', () => {
     showPage(target.dataset.pageTarget);
   }));
@@ -1518,6 +1690,29 @@
     await saveSetting('scan_max_files', Number(scanLimitSelect.value));
   });
 
+  chooseFirewallAppButton?.addEventListener('click', async () => {
+    if (!engine?.chooseFirewallApp) return;
+    chooseFirewallAppButton.disabled = true;
+    try {
+      const selection = await engine.chooseFirewallApp();
+      if (!selection?.ok || !selection.path) return;
+      await addFirewallRuleWithFeedback(selection.path, 'block');
+    } finally {
+      chooseFirewallAppButton.disabled = false;
+    }
+  });
+
+  scanVulnerableSoftwareButton?.addEventListener('click', async () => {
+    scanVulnerableSoftwareButton.disabled = true;
+    scanVulnerableSoftwareButton.textContent = 'Taranıyor…';
+    try {
+      await applyVulnerableSoftware();
+    } finally {
+      scanVulnerableSoftwareButton.disabled = false;
+      scanVulnerableSoftwareButton.textContent = 'Yeniden tara';
+    }
+  });
+
   addWatchFolderButton?.addEventListener('click', async () => {
     if (!engine?.chooseWatchFolder || !currentSettings) return;
     addWatchFolderButton.disabled = true;
@@ -1734,6 +1929,23 @@
         : (result?.message || 'Güncelleme denetimi yalnızca kurulu sürümde çalışır.'));
     } finally {
       button.disabled = false;
+    }
+  });
+
+  document.querySelector('[data-action="prepare-uninstall"]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    if (!window.confirm('Watchdog, AMSI, WSC ve güvenlik duvarı kayıtları kaldırılsın mı? Yönetici izni istenecek.')) return;
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = 'Hazırlanıyor…';
+    try {
+      const result = await engine?.prepareUninstall?.();
+      button.textContent = result?.ok ? 'Kaldırmaya hazır' : (result?.message || 'İşlem tamamlanamadı');
+    } finally {
+      setTimeout(() => {
+        button.disabled = false;
+        button.textContent = originalText;
+      }, 3000);
     }
   });
 

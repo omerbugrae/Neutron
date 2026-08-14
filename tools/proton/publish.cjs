@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { readJsonFile, validateVersion } = require('./proton-format.cjs');
+const { readJsonFile, validateVersion } = require('../../src/proton-format.cjs');
 
 const DEFAULT_REPOSITORY = 'omerbugrae/NeutronProton';
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;

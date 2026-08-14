@@ -172,6 +172,14 @@
             <svg aria-hidden="true"><use href="#icon-box"></use></svg>
             <span>Karantina</span>
           </button>
+          <button class="navigation-item" type="button" data-page-target="firewall">
+            <svg aria-hidden="true"><use href="#icon-globe"></use></svg>
+            <span>Güvenlik Duvarı</span>
+          </button>
+          <button class="navigation-item" type="button" data-page-target="system-audit">
+            <svg aria-hidden="true"><use href="#icon-chip"></use></svg>
+            <span>Sistem Denetimi</span>
+          </button>
           <button class="navigation-item" type="button" data-page-target="activity">
             <svg aria-hidden="true"><use href="#icon-history"></use></svg>
             <span>Etkinlik</span>
@@ -680,6 +688,10 @@
               <div class="module-control-row">
                 <button class="settings-action" type="button" data-action="check-for-update">Güncellemeleri denetle</button>
               </div>
+              <p class="settings-empty">Neutron'u kaldırmadan önce: aşağıdaki butona basarsan watchdog, AMSI, WSC ve güvenlik duvarı kayıtları temizce kaldırılır (bir kere yönetici izni ister).</p>
+              <div class="module-control-row">
+                <button class="settings-action" type="button" data-action="prepare-uninstall">Kaldırmaya hazırla</button>
+              </div>
             </article>
           </div>
         </section>
@@ -693,6 +705,42 @@
             <h2>Karantina boş</h2>
             <p>Tarama sonucundaki bir bulguyu onayladığında dosya burada güvenli şekilde tutulur.</p>
             </div>
+          </article>
+        </section>
+
+        <section class="app-page" data-page="firewall" hidden>
+          <header class="page-header"><div><p class="section-eyebrow">GÜVENLİK DUVARI</p><h1>Uygulama izinleri</h1><p>Windows'un kendi güvenlik duvarını yönetir; her kural, seçtiğin uygulama için Windows Defender Güvenlik Duvarı'nda gerçekten oluşturulur.</p></div></header>
+          <article class="settings-card settings-card--wide">
+            <div class="settings-card-heading">
+              <div><h2>Ağa bağlı uygulamalar</h2><p>Şu anda ağ bağlantısı olan uygulamalar; hızlıca engelle veya izin ver.</p></div>
+              <button class="settings-action" type="button" data-action="choose-firewall-app">Uygulama Seç…</button>
+            </div>
+            <div class="firewall-recent-list" data-role="firewall-recent-apps-list"><p class="settings-empty">Ağa bağlı uygulama bulunamadı.</p></div>
+          </article>
+          <article class="quarantine-panel glass-dom-surface" data-liquidglass data-glass-id="firewall-rules" data-glass-radius="32" data-glass-depth="0.9" data-glass-refraction="1.02" data-glass-dispersion="0.44" data-glass-frost="0.09" data-glass-specular="1.04">
+            <div class="quarantine-list" data-role="firewall-rule-list"></div>
+            <div class="empty-page-panel" data-role="firewall-rule-empty">
+            <span class="empty-page-icon"><svg aria-hidden="true"><use href="#icon-globe"></use></svg></span>
+            <h2>Henüz kural yok</h2>
+            <p>Yukarıdan bir uygulama seçip engelle veya izin ver dediğinde kural burada listelenir.</p>
+            </div>
+          </article>
+        </section>
+
+        <section class="app-page" data-page="system-audit" hidden>
+          <header class="page-header"><div><p class="section-eyebrow">SİSTEM DENETİMİ</p><h1>Başlangıç ve zafiyetli yazılım</h1><p>Windows ile otomatik başlayan öğeleri yönet, kurulu yazılımı bilinen açıklara karşı denetle.</p></div></header>
+          <article class="settings-card settings-card--wide">
+            <div class="settings-card-heading">
+              <div><h2>Başlangıç öğeleri</h2><p>Windows ile otomatik çalışan programlar. Kapatmak dosyayı/kaydı silmez, geri alınabilir.</p></div>
+            </div>
+            <div class="firewall-recent-list" data-role="startup-item-list"><p class="settings-empty">Başlangıç öğesi bulunamadı.</p></div>
+          </article>
+          <article class="settings-card settings-card--wide">
+            <div class="settings-card-heading">
+              <div><h2>Zafiyetli yazılım</h2><p>Bilinen güvenlik açığı olan eski sürümler. Küçük bir başlangıç listesi — kapsamlı bir CVE veritabanı değildir.</p></div>
+              <button class="settings-action" type="button" data-action="scan-vulnerable-software">Yeniden tara</button>
+            </div>
+            <div class="firewall-recent-list" data-role="vulnerable-software-list"><p class="settings-empty">Tarama için "Yeniden tara"ya bas.</p></div>
           </article>
         </section>
 
@@ -741,6 +789,7 @@
                 <div class="settings-preference"><div><strong>Ağ bağlantısı izleme</strong><p>Bilinen kötü amaçlı IP adreslerine (C2/botnet) giden bağlantıları periyodik olarak denetler ve bildirir. Paket incelemesi veya engelleme yapmaz, yalnızca tespit eder.</p></div><button class="settings-switch" type="button" data-setting-toggle="network_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Bellek/process injection taraması</strong><p>Yeni başlayan süreçlerin belleğini YARA kurallarıyla ve şüpheli RWX bellek bölgesi sezgisiyle tarar. Tam görünürlük için Sistem Servisi Modu önerilir.</p></div><button class="settings-switch" type="button" data-setting-toggle="memory_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Çıkarılabilir medya (USB) koruması</strong><p>Takılan USB/SD kartları otomatik olarak autorun.inf ve kötü amaçlı dosyalar için tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="usb_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Zamanlanmış hızlı tarama</strong><p>Neutron arka planda açık kaldığı sürece, kullanıcı profilini ve Temp klasörlerini günde bir kez otomatik tarar. Bulgular yalnızca gösterilir; otomatik karantina uygulanmaz, karar sizde kalır.</p></div><button class="settings-switch" type="button" data-setting-toggle="scheduled_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
               </div>
             </article>
             <article class="settings-card settings-card--wide">

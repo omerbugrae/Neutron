@@ -11,7 +11,7 @@ const {
   readEncryptionKey,
   readJsonFile,
   verifyPackageSignature,
-} = require('./proton-format.cjs');
+} = require('../../src/proton-format.cjs');
 
 function argument(name) {
   const index = process.argv.indexOf(name);
