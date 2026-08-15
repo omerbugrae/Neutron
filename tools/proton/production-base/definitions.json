@@ -1,13 +1,13 @@
 {
   "database_name": "Proton",
-  "version": "1.00.000",
+  "version": "1.00.150",
   "minimum_engine_version": "0.1.0",
   "provenance": {
-    "source_name": "Neutron production feed base",
+    "source_name": "Neutron Proton davranissal tespit temeli",
     "source_url": "https://github.com/omerbugrae/Neutron",
-    "collected_at": "2026-08-12T00:00:00.000Z",
-    "license": "Metadata only",
-    "review_policy": "This base has no detection data. The collector replaces provenance and adds source-attributed indicators."
+    "collected_at": "2026-08-15T00:00:00.000Z",
+    "license": "Proje tarafindan yazilmis kurallar; dagitmadan once inceleyin",
+    "review_policy": "Kurallar acik teknik kaynaklardan yazildi, YARA ile derlendi, pozitif ve temiz dosya fixture'lariyla test edildi. Hash ve web gostergeleri toplayici tarafindan kaynak atifiyla eklenir."
   },
   "signatures": [],
   "web_indicators": [],
@@ -19,6 +19,82 @@
     {
       "name": "proton_ransomware_windows.yar",
       "path": "rules/proton_ransomware_windows.yar"
+    },
+    {
+      "name": "proton_loader_dropper.yar",
+      "path": "rules/proton_loader_dropper.yar"
+    },
+    {
+      "name": "proton_dotnet_loader.yar",
+      "path": "rules/proton_dotnet_loader.yar"
+    },
+    {
+      "name": "proton_packer_crypter.yar",
+      "path": "rules/proton_packer_crypter.yar"
+    },
+    {
+      "name": "proton_script_dropper.yar",
+      "path": "rules/proton_script_dropper.yar"
+    },
+    {
+      "name": "proton_office_maldoc.yar",
+      "path": "rules/proton_office_maldoc.yar"
+    },
+    {
+      "name": "proton_phishing_html.yar",
+      "path": "rules/proton_phishing_html.yar"
+    },
+    {
+      "name": "proton_lolbin_abuse.yar",
+      "path": "rules/proton_lolbin_abuse.yar"
+    },
+    {
+      "name": "proton_defense_evasion.yar",
+      "path": "rules/proton_defense_evasion.yar"
+    },
+    {
+      "name": "proton_persistence_windows.yar",
+      "path": "rules/proton_persistence_windows.yar"
+    },
+    {
+      "name": "proton_credential_access.yar",
+      "path": "rules/proton_credential_access.yar"
+    },
+    {
+      "name": "proton_c2_framework.yar",
+      "path": "rules/proton_c2_framework.yar"
+    },
+    {
+      "name": "proton_rat_backdoor.yar",
+      "path": "rules/proton_rat_backdoor.yar"
+    },
+    {
+      "name": "proton_infostealer.yar",
+      "path": "rules/proton_infostealer.yar"
+    },
+    {
+      "name": "proton_exfiltration_tunneling.yar",
+      "path": "rules/proton_exfiltration_tunneling.yar"
+    },
+    {
+      "name": "proton_worm_lateral_movement.yar",
+      "path": "rules/proton_worm_lateral_movement.yar"
+    },
+    {
+      "name": "proton_ransomware_behavior.yar",
+      "path": "rules/proton_ransomware_behavior.yar"
+    },
+    {
+      "name": "proton_wiper_destruction.yar",
+      "path": "rules/proton_wiper_destruction.yar"
+    },
+    {
+      "name": "proton_coinminer.yar",
+      "path": "rules/proton_coinminer.yar"
+    },
+    {
+      "name": "proton_webshell.yar",
+      "path": "rules/proton_webshell.yar"
     }
   ]
 }

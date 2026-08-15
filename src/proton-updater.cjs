@@ -203,8 +203,18 @@ function writeEncryptedArchive(updateDirectory, version, packageBytes, signature
   const signatureName = `${packageName}.sig`;
   const packagePath = path.join(updateDirectory, packageName);
   const signaturePath = path.join(updateDirectory, signatureName);
-  if (!fs.existsSync(packagePath)) fs.writeFileSync(packagePath, packageBytes, { flag: 'wx', mode: 0o600 });
-  if (!fs.existsSync(signaturePath)) fs.writeFileSync(signaturePath, signatureBytes, { flag: 'wx', mode: 0o600 });
+  const writeOnceAtomically = (target, bytes) => {
+    if (fs.existsSync(target)) return;
+    const temporary = path.join(updateDirectory, `.${path.basename(target)}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
+    try {
+      fs.writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o600 });
+      fs.renameSync(temporary, target);
+    } finally {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
+    }
+  };
+  writeOnceAtomically(packagePath, packageBytes);
+  writeOnceAtomically(signaturePath, signatureBytes);
   const current = {
     database_name: 'Proton',
     version,
@@ -213,10 +223,25 @@ function writeEncryptedArchive(updateDirectory, version, packageBytes, signature
     installed_at: new Date().toISOString(),
   };
   const currentPath = path.join(updateDirectory, 'current.json');
+  const previousPath = path.join(updateDirectory, 'previous.json');
   const temporaryPath = path.join(updateDirectory, `.current-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
   fs.writeFileSync(temporaryPath, `${JSON.stringify(current, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-  if (fs.existsSync(currentPath)) fs.rmSync(currentPath, { force: true });
-  fs.renameSync(temporaryPath, currentPath);
+  let movedCurrent = false;
+  try {
+    if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
+    if (fs.existsSync(currentPath)) {
+      fs.renameSync(currentPath, previousPath);
+      movedCurrent = true;
+    }
+    fs.renameSync(temporaryPath, currentPath);
+  } catch (error) {
+    if (movedCurrent && !fs.existsSync(currentPath) && fs.existsSync(previousPath)) {
+      fs.renameSync(previousPath, currentPath);
+    }
+    throw error;
+  } finally {
+    try { fs.rmSync(temporaryPath, { force: true }); } catch { /* best effort */ }
+  }
   return current;
 }
 
@@ -292,6 +317,31 @@ class ProtonUpdater {
         'ENGINE_TOO_OLD',
         `Proton ${payload.version}, Neutron ${payload.minimum_engine_version} veya daha yeni bir sürüm gerektiriyor.`,
       );
+    }
+    return { version: payload.version, payload, packageBytes, signatureBytes };
+  }
+
+  verifyLocalArchive(packagePath, signaturePath, expectedVersion) {
+    const packageStat = fs.statSync(packagePath);
+    const signatureStat = fs.statSync(signaturePath);
+    if (!packageStat.isFile() || packageStat.size <= 0 || packageStat.size > MAX_PACKAGE_BYTES) {
+      throw new ProtonUpdateError('DOWNLOAD_TOO_LARGE', 'Yerel Proton paketi geçersiz veya çok büyük.');
+    }
+    if (!signatureStat.isFile() || signatureStat.size <= 0 || signatureStat.size > MAX_SIGNATURE_BYTES) {
+      throw new ProtonUpdateError('INVALID_SIGNATURE_DOCUMENT', 'Yerel Proton imza belgesi geçersiz.');
+    }
+    const packageBytes = fs.readFileSync(packagePath);
+    const signatureBytes = fs.readFileSync(signaturePath);
+    const signatureDocument = parseSignatureDocument(signatureBytes);
+    const publicKey = fs.readFileSync(this.publicKeyPath);
+    verifyPackageSignature(packageBytes, signatureDocument, publicKey);
+    const encryptionKey = loadRuntimeEncryptionKey({ packagedKeyPath: this.packagedKeyPath });
+    const { header, payload } = decryptPackage(packageBytes, encryptionKey);
+    if (payload.version !== expectedVersion || header.database_version !== expectedVersion) {
+      throw new ProtonUpdateError('VERSION_MISMATCH', 'Yerel Proton paketi beklenen sürümle uyuşmuyor.');
+    }
+    if (compareVersions(this.appVersion, payload.minimum_engine_version || '0.0.0') < 0) {
+      throw new ProtonUpdateError('ENGINE_TOO_OLD', 'Yerel Proton paketi daha yeni bir Neutron sürümü gerektiriyor.');
     }
     return { version: payload.version, payload, packageBytes, signatureBytes };
   }

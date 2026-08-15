@@ -1,0 +1,61 @@
+{
+  "feature_schema": "ember-v3",
+  "ensemble_version": "ember2024-shadow-1",
+  "members": [
+    {
+      "id": "ember2024-pe",
+      "category": "static-pe",
+      "family": "ember2024",
+      "model_type": "lightgbm-ember-v3",
+      "file": "EMBER2024_PE.model",
+      "sha256": "4252027863492ac138785c8c18576f43dad77d00faddc14e8c0072e8db419f99",
+      "weight": 1.0,
+      "applies_to": ["pe"],
+      "enabled": true
+    },
+    {
+      "id": "ember2024-win32",
+      "category": "static-pe",
+      "family": "ember2024",
+      "model_type": "lightgbm-ember-v3",
+      "file": "EMBER2024_Win32.model",
+      "sha256": "b1e9fc174e4fcc6c0aba3ff29eb6d96ee9e240057f76940a8a1d6009ac0a4267",
+      "weight": 1.0,
+      "applies_to": ["win32"],
+      "enabled": true
+    },
+    {
+      "id": "ember2024-win64",
+      "category": "static-pe",
+      "family": "ember2024",
+      "model_type": "lightgbm-ember-v3",
+      "file": "EMBER2024_Win64.model",
+      "sha256": "8eddddc26eb346d74810a0dfcc672342eca5709ece4da259934d6d3c77ca971b",
+      "weight": 1.0,
+      "applies_to": ["win64"],
+      "enabled": true
+    },
+    {
+      "id": "ember2024-dotnet",
+      "category": "static-pe",
+      "family": "ember2024",
+      "model_type": "lightgbm-ember-v3",
+      "file": "EMBER2024_Dot_Net.model",
+      "sha256": "cbd91b4a823d5dac3f56f38640a5599836501ccbd4fcce273d28c9aed0afc24c",
+      "weight": 1.0,
+      "applies_to": ["dotnet"],
+      "enabled": true
+    },
+    {
+      "id": "ember2024-all",
+      "category": "static-pe",
+      "family": "ember2024",
+      "model_type": "lightgbm-ember-v3",
+      "file": "EMBER2024_all.model",
+      "sha256": "af4ec038685797c586142d177965fe451cac96f424f631aeb66f8d116c161d07",
+      "weight": 0.75,
+      "applies_to": ["pe"],
+      "enabled": true
+    }
+  ]
+}

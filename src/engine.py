@@ -14,6 +14,7 @@ import base64
 import ctypes
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -33,6 +34,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timedelta, timezone
+
+from ml_pe import (
+    FEATURE_SCHEMA_VERSION,
+    build_feature_vector,
+    merge_ensemble_predictions,
+    model_cache_token,
+    predict_ember2024,
+    predict_ensemble,
+)
 
 for _stream in (sys.stdout, sys.stderr):
     if _stream is not None and hasattr(_stream, "reconfigure"):
@@ -127,6 +137,11 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "scan_max_files": MAX_FILES,
     "scheduled_scan_enabled": True,
     "scheduled_scan_last_run_at": 0,
+    "signature_auto_update_enabled": True,
+    "signature_update_interval_hours": 6,
+    "signature_update_last_check_at": 0,
+    "signature_update_last_success_at": 0,
+    "signature_update_last_error": "",
 }
 
 # EICAR, antivirüs ürünlerini güvenli şekilde denemek için kullanılan zararsız
@@ -158,6 +173,11 @@ class Finding:
     sha256: str | None = None
     risk_score: int | None = None
     container_path: str | None = None
+    publisher_subject: str | None = None
+    publisher_thumbprint: str | None = None
+    ml_shadow_score: int | None = None
+    ml_model_version: str | None = None
+    ml_shadow_details: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -175,8 +195,14 @@ class PEAnalysis:
     section_count: int
     import_count: int
     signature_status: str
+    publisher_subject: str | None
+    publisher_thumbprint: str | None
     risk_score: int
     reasons: tuple[str, ...]
+    ml_shadow_score: int | None
+    ml_model_version: str | None
+    ml_features: dict[str, float] | None
+    ml_shadow_details: dict[str, Any] | None
 
 
 @dataclass
@@ -190,6 +216,7 @@ class AnalysisCacheEntry:
 
 @dataclass
 class AnalysisCacheSession:
+    engine_revision: str
     proton_version: str
     yara_fingerprint: str
     entries: dict[str, AnalysisCacheEntry] = field(default_factory=dict)
@@ -337,6 +364,26 @@ def open_database() -> Iterator[sqlite3.Connection]:
           PRIMARY KEY(indicator_type, value)
         );
 
+        CREATE TABLE IF NOT EXISTS proton_snapshots (
+          version TEXT PRIMARY KEY,
+          payload_json TEXT NOT NULL,
+          installed_at TEXT NOT NULL,
+          last_activated_at TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS proton_update_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          occurred_at TEXT NOT NULL,
+          action TEXT NOT NULL CHECK(action IN ('install', 'rollback')),
+          version TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('success', 'failed')),
+          detail TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS proton_update_history_time_idx
+          ON proton_update_history(occurred_at DESC);
+
         CREATE TABLE IF NOT EXISTS app_settings (
           key TEXT PRIMARY KEY,
           value_json TEXT NOT NULL,
@@ -368,6 +415,12 @@ def open_database() -> Iterator[sqlite3.Connection]:
         CREATE INDEX IF NOT EXISTS exclusion_events_occurred_idx
           ON exclusion_events(occurred_at DESC);
 
+        CREATE TABLE IF NOT EXISTS trusted_publishers (
+          thumbprint TEXT PRIMARY KEY,
+          subject TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS analysis_cache (
           path_key TEXT PRIMARY KEY,
           file_path TEXT NOT NULL,
@@ -392,6 +445,25 @@ def open_database() -> Iterator[sqlite3.Connection]:
           stores INTEGER NOT NULL DEFAULT 0,
           updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS ml_shadow_observations (
+          sha256 TEXT PRIMARY KEY,
+          model_version TEXT NOT NULL,
+          feature_schema_version INTEGER NOT NULL,
+          ml_score INTEGER NOT NULL,
+          heuristic_score INTEGER NOT NULL,
+          signature_status TEXT NOT NULL,
+          features_json TEXT NOT NULL,
+          model_scores_json TEXT,
+          disagreement INTEGER,
+          independent_families INTEGER,
+          independent_categories INTEGER,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS ml_shadow_observations_seen_idx
+          ON ml_shadow_observations(last_seen_at DESC);
 
         CREATE TABLE IF NOT EXISTS cloud_reputation_cache (
           sha256 TEXT PRIMARY KEY,
@@ -432,6 +504,30 @@ def open_database() -> Iterator[sqlite3.Connection]:
           disabled_at TEXT NOT NULL,
           restored_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS response_incidents (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          protection_event_id INTEGER,
+          created_at TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT 'active',
+          summary TEXT NOT NULL,
+          rolled_back_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS response_actions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          incident_id INTEGER NOT NULL REFERENCES response_incidents(id) ON DELETE CASCADE,
+          action_type TEXT NOT NULL,
+          target TEXT NOT NULL,
+          before_json TEXT,
+          after_json TEXT,
+          reversible INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL DEFAULT 'applied',
+          created_at TEXT NOT NULL,
+          reverted_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS response_actions_incident_idx ON response_actions(incident_id, id);
         """
     )
     protection_columns = {
@@ -451,6 +547,30 @@ def open_database() -> Iterator[sqlite3.Connection]:
         )
     if "quarantine_item_id" not in protection_columns:
         connection.execute("ALTER TABLE protection_events ADD COLUMN quarantine_item_id INTEGER")
+    if "risk_score" not in protection_columns:
+        connection.execute("ALTER TABLE protection_events ADD COLUMN risk_score INTEGER")
+    if "publisher_subject" not in protection_columns:
+        connection.execute("ALTER TABLE protection_events ADD COLUMN publisher_subject TEXT")
+    if "publisher_thumbprint" not in protection_columns:
+        connection.execute("ALTER TABLE protection_events ADD COLUMN publisher_thumbprint TEXT")
+    if "incident_id" not in protection_columns:
+        connection.execute("ALTER TABLE protection_events ADD COLUMN incident_id INTEGER")
+    quarantine_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(quarantine_items)").fetchall()
+    }
+    if "incident_id" not in quarantine_columns:
+        connection.execute("ALTER TABLE quarantine_items ADD COLUMN incident_id INTEGER")
+    ml_observation_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(ml_shadow_observations)").fetchall()
+    }
+    if "model_scores_json" not in ml_observation_columns:
+        connection.execute("ALTER TABLE ml_shadow_observations ADD COLUMN model_scores_json TEXT")
+    if "disagreement" not in ml_observation_columns:
+        connection.execute("ALTER TABLE ml_shadow_observations ADD COLUMN disagreement INTEGER")
+    if "independent_families" not in ml_observation_columns:
+        connection.execute("ALTER TABLE ml_shadow_observations ADD COLUMN independent_families INTEGER")
+    if "independent_categories" not in ml_observation_columns:
+        connection.execute("ALTER TABLE ml_shadow_observations ADD COLUMN independent_categories INTEGER")
     eicar_sha256 = hashlib.sha256(EICAR_MARKER).hexdigest()
     updated_at = datetime.now(timezone.utc).isoformat()
     connection.execute(
@@ -543,6 +663,12 @@ def signature_status_payload() -> dict[str, Any]:
         provenance = connection.execute(
             "SELECT source_name, source_url, collected_at, license, review_policy FROM proton_provenance WHERE id = 1"
         ).fetchone()
+        rollback_versions = [str(row[0]) for row in connection.execute(
+            "SELECT version FROM proton_snapshots WHERE active = 0 ORDER BY last_activated_at DESC LIMIT 4"
+        ).fetchall()]
+        update_history = [dict(row) for row in connection.execute(
+            "SELECT occurred_at, action, version, status, detail FROM proton_update_history ORDER BY id DESC LIMIT 10"
+        ).fetchall()]
     return {
         "database_name": metadata.get("database_name", SIGNATURE_DATABASE_NAME),
         "version": metadata.get("version", BUILTIN_SIGNATURE_VERSION),
@@ -552,6 +678,8 @@ def signature_status_payload() -> dict[str, Any]:
         "source": metadata.get("source", "builtin"),
         "network_used": metadata.get("source") == "github-release",
         "provenance": dict(provenance) if provenance else None,
+        "rollback_versions": rollback_versions,
+        "update_history": update_history,
     }
 
 
@@ -563,14 +691,23 @@ def normalize_app_setting(key: str, value: Any) -> Any:
         "amsi_protection_enabled", "watchdog_protection_enabled", "wsc_registration_enabled",
         "network_protection_enabled", "service_mode_enabled", "memory_scan_enabled", "usb_protection_enabled",
         "cloud_lookup_enabled", "notifications_enabled", "scheduled_scan_enabled",
+        "signature_auto_update_enabled",
     }:
         if not isinstance(value, bool):
             raise ValueError("Ayar true veya false olmalı")
         return value
-    if key == "scheduled_scan_last_run_at":
+    if key in {"scheduled_scan_last_run_at", "signature_update_last_check_at", "signature_update_last_success_at"}:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("Zaman damgası sayı olmalı")
         return int(value)
+    if key == "signature_update_interval_hours":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Güncelleme aralığı tam sayı olmalı")
+        return max(1, min(value, 24))
+    if key == "signature_update_last_error":
+        if not isinstance(value, str):
+            raise ValueError("Güncelleme hatası metin olmalı")
+        return value.strip()[:500]
     if key in {"malwarebazaar_api_key", "virustotal_api_key"}:
         if not isinstance(value, str):
             raise ValueError("API anahtarı metin olmalı")
@@ -773,6 +910,26 @@ def exclusions_payload() -> dict[str, Any]:
     return {"items": items, "history": history}
 
 
+def trusted_publisher_thumbprints() -> frozenset[str]:
+    with open_database() as connection:
+        rows = connection.execute("SELECT thumbprint FROM trusted_publishers").fetchall()
+    return frozenset(str(row[0]).upper() for row in rows)
+
+
+def trust_publisher(thumbprint: str, subject: str) -> None:
+    normalized = re.sub(r"[^A-Fa-f0-9]", "", str(thumbprint)).upper()
+    if len(normalized) not in {40, 64}:
+        raise ValueError("Yayıncı sertifika parmak izi geçersiz")
+    cleaned_subject = str(subject or "Bilinmeyen yayıncı").strip()[:500]
+    with open_database() as connection:
+        connection.execute(
+            "INSERT INTO trusted_publishers (thumbprint, subject, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(thumbprint) DO UPDATE SET subject=excluded.subject",
+            (normalized, cleaned_subject, datetime.now(timezone.utc).isoformat()),
+        )
+        connection.execute("DELETE FROM analysis_cache")
+
+
 def add_exclusion(kind: str, raw_value: str, label: str | None = None) -> dict[str, Any]:
     value, normalized = normalize_exclusion(kind, raw_value)
     safe_label = label.strip()[:160] if isinstance(label, str) and label.strip() else None
@@ -928,7 +1085,16 @@ def open_analysis_cache_session(yara_fingerprint: str) -> AnalysisCacheSession:
         proton_version = str(signature_status_payload().get("version") or BUILTIN_SIGNATURE_VERSION)
     except (OSError, sqlite3.Error):
         proton_version = BUILTIN_SIGNATURE_VERSION
-    session = AnalysisCacheSession(proton_version=proton_version, yara_fingerprint=yara_fingerprint)
+    engine_revision = (
+        f"{ANALYSIS_CACHE_REVISION}:"
+        f"ml-{model_cache_token(data_directory() / 'ml')}:"
+        f"ember-{model_cache_token(data_directory() / 'ml' / 'ember2024')}"
+    )
+    session = AnalysisCacheSession(
+        engine_revision=engine_revision,
+        proton_version=proton_version,
+        yara_fingerprint=yara_fingerprint,
+    )
     cutoff = (datetime.now(timezone.utc) - timedelta(days=ANALYSIS_CACHE_RETENTION_DAYS)).isoformat()
     try:
         with open_database() as connection:
@@ -938,7 +1104,7 @@ def open_analysis_cache_session(yara_fingerprint: str) -> AnalysisCacheSession:
                 WHERE engine_revision != ? OR proton_version != ? OR yara_fingerprint != ?
                    OR last_used_at < ?
                 """,
-                (ANALYSIS_CACHE_REVISION, proton_version, yara_fingerprint, cutoff),
+                (engine_revision, proton_version, yara_fingerprint, cutoff),
             )
             rows = connection.execute(
                 """
@@ -948,7 +1114,7 @@ def open_analysis_cache_session(yara_fingerprint: str) -> AnalysisCacheSession:
                 ORDER BY last_used_at DESC
                 LIMIT ?
                 """,
-                (ANALYSIS_CACHE_REVISION, proton_version, yara_fingerprint, MAX_ANALYSIS_CACHE_ENTRIES),
+                (engine_revision, proton_version, yara_fingerprint, MAX_ANALYSIS_CACHE_ENTRIES),
             ).fetchall()
         for row in rows:
             session.entries[str(row[0])] = AnalysisCacheEntry(
@@ -972,7 +1138,10 @@ def deserialize_cached_findings(raw: str) -> list[Finding] | None:
             findings.append(Finding(
                 path=str(item["path"]), kind=str(item["kind"]), severity=str(item["severity"]),
                 reason=str(item["reason"]), sha256=item.get("sha256"), risk_score=item.get("risk_score"),
-                container_path=item.get("container_path"),
+                container_path=item.get("container_path"), publisher_subject=item.get("publisher_subject"),
+                publisher_thumbprint=item.get("publisher_thumbprint"),
+                ml_shadow_score=item.get("ml_shadow_score"), ml_model_version=item.get("ml_model_version"),
+                ml_shadow_details=item.get("ml_shadow_details"),
             ))
         return findings
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -1059,7 +1228,7 @@ def flush_analysis_cache(session: AnalysisCacheSession) -> None:
                 """,
                 [
                     (key, key, entry.file_size, entry.modified_ns, entry.changed_ns,
-                     ANALYSIS_CACHE_REVISION, session.proton_version, session.yara_fingerprint,
+                     session.engine_revision, session.proton_version, session.yara_fingerprint,
                      entry.findings_json, entry.analyzed_at, now)
                     for key, entry in session.pending.items()
                 ],
@@ -1088,6 +1257,11 @@ def flush_analysis_cache(session: AnalysisCacheSession) -> None:
 
 def analysis_cache_status_payload() -> dict[str, Any]:
     proton_version = str(signature_status_payload().get("version") or BUILTIN_SIGNATURE_VERSION)
+    engine_revision = (
+        f"{ANALYSIS_CACHE_REVISION}:"
+        f"ml-{model_cache_token(data_directory() / 'ml')}:"
+        f"ember-{model_cache_token(data_directory() / 'ml' / 'ember2024')}"
+    )
     yara_fingerprint = yara_rule_fingerprint(yara_sources())
     if yara is None:
         yara_fingerprint = f"unavailable:{yara_fingerprint}"
@@ -1098,7 +1272,7 @@ def analysis_cache_status_payload() -> dict[str, Any]:
             FROM analysis_cache
             WHERE engine_revision = ? AND proton_version = ? AND yara_fingerprint = ?
             """,
-            (ANALYSIS_CACHE_REVISION, proton_version, yara_fingerprint),
+            (engine_revision, proton_version, yara_fingerprint),
         ).fetchone()
         hits, misses, stores, updated_at = connection.execute(
             "SELECT hits, misses, stores, updated_at FROM analysis_cache_metrics WHERE id = 1"
@@ -1108,7 +1282,7 @@ def analysis_cache_status_payload() -> dict[str, Any]:
         "entries": int(entries), "result_bytes": int(result_bytes), "hits": int(hits),
         "misses": int(misses), "stores": int(stores),
         "hit_rate": round((int(hits) / attempts) * 100, 1) if attempts else 0.0,
-        "engine_revision": ANALYSIS_CACHE_REVISION, "updated_at": updated_at,
+        "engine_revision": engine_revision, "updated_at": updated_at,
     }
 
 
@@ -1135,6 +1309,55 @@ def clear_analysis_cache() -> int:
     except (OSError, sqlite3.Error, TypeError):
         emit("error", code="CACHE_CLEAR_FAILED", message="Tarama önbelleği temizlenemedi.")
         return 2
+
+
+def record_ml_shadow_observation(sha256: str | None, analysis: PEAnalysis | None) -> None:
+    """Keep bounded, path-free local evidence for offline model evaluation."""
+    if (
+        not sha256 or analysis is None or analysis.ml_shadow_score is None
+        or not analysis.ml_model_version or analysis.ml_features is None
+    ):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with open_database() as connection:
+        connection.execute(
+            """
+            INSERT INTO ml_shadow_observations (
+              sha256, model_version, feature_schema_version, ml_score,
+              heuristic_score, signature_status, features_json, model_scores_json,
+              disagreement, independent_families, independent_categories,
+              first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sha256) DO UPDATE SET
+              model_version=excluded.model_version,
+              feature_schema_version=excluded.feature_schema_version,
+              ml_score=excluded.ml_score,
+              heuristic_score=excluded.heuristic_score,
+              signature_status=excluded.signature_status,
+              features_json=excluded.features_json,
+              model_scores_json=excluded.model_scores_json,
+              disagreement=excluded.disagreement,
+              independent_families=excluded.independent_families,
+              independent_categories=excluded.independent_categories,
+              last_seen_at=excluded.last_seen_at
+            """,
+            (
+                sha256, analysis.ml_model_version, FEATURE_SCHEMA_VERSION,
+                analysis.ml_shadow_score, analysis.risk_score, analysis.signature_status,
+                json.dumps(analysis.ml_features, ensure_ascii=True, separators=(",", ":")),
+                json.dumps(analysis.ml_shadow_details, ensure_ascii=True, separators=(",", ":")),
+                int((analysis.ml_shadow_details or {}).get("disagreement") or 0),
+                int((analysis.ml_shadow_details or {}).get("independent_families") or 0),
+                int((analysis.ml_shadow_details or {}).get("independent_categories") or 0),
+                now, now,
+            ),
+        )
+        connection.execute(
+            """DELETE FROM ml_shadow_observations WHERE sha256 IN (
+                 SELECT sha256 FROM ml_shadow_observations
+                 ORDER BY last_seen_at DESC LIMIT -1 OFFSET 10000
+               )"""
+        )
 
 
 def save_scan_history(
@@ -1632,6 +1855,280 @@ def startup_finalize_restore(row_id: int) -> int:
     return 0
 
 
+def terminate_process_tree_for_image(raw_path: str) -> list[dict[str, Any]]:
+    """Terminate only trees whose current root image still matches raw_path.
+
+    PID reuse, Neutron's own PID, protected Windows paths and critical low PIDs
+    are rejected. This is intentionally narrower than taskkill /T /F.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        expected = canonical_path(Path(raw_path))
+    except (OSError, RuntimeError):
+        return []
+    images = windows_process_snapshot()
+    parents = toolhelp_parent_processes()
+    roots = [pid for pid, image in images.items() if pid > 4 and pid != os.getpid() and canonical_path(Path(image)) == expected]
+    if not roots:
+        return []
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
+    ordered: list[int] = []
+    seen: set[int] = set()
+    def collect(pid: int) -> None:
+        if pid in seen:
+            return
+        seen.add(pid)
+        for child in children.get(pid, []):
+            collect(child)
+        ordered.append(pid)
+    for root in roots:
+        collect(root)
+
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    results: list[dict[str, Any]] = []
+    protected_roots = protected_system_quarantine_roots()
+    for pid in ordered:
+        image = images.get(pid, "")
+        if pid <= 4 or pid == os.getpid():
+            continue
+        if image:
+            try:
+                normalized = canonical_path(Path(image))
+                if any(path_is_within(normalized, root) for root in protected_roots):
+                    results.append({"pid": pid, "image": image, "terminated": False, "reason": "protected-system-path"})
+                    continue
+            except (OSError, RuntimeError):
+                pass
+        handle = kernel32.OpenProcess(0x0001 | 0x1000, False, pid)
+        if not handle:
+            results.append({"pid": pid, "image": image, "terminated": False, "reason": "open-failed"})
+            continue
+        try:
+            terminated = bool(kernel32.TerminateProcess(handle, 1))
+            results.append({"pid": pid, "image": image, "terminated": terminated})
+        finally:
+            kernel32.CloseHandle(handle)
+    return results
+
+
+def record_response_action(
+    incident_id: int, action_type: str, target: str, *, before: Any = None,
+    after: Any = None, reversible: bool = False, state: str = "applied",
+) -> int:
+    with open_database() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO response_actions (
+              incident_id, action_type, target, before_json, after_json,
+              reversible, state, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (incident_id, action_type, target,
+             json.dumps(before, ensure_ascii=False) if before is not None else None,
+             json.dumps(after, ensure_ascii=False) if after is not None else None,
+             1 if reversible else 0, state, datetime.now(timezone.utc).isoformat()),
+        )
+        return int(cursor.lastrowid)
+
+
+def remediate_protection_event(event_id: int) -> int:
+    """Apply a compensating, logged response to one pending file event."""
+    try:
+        with open_database() as connection:
+            connection.row_factory = sqlite3.Row
+            event = connection.execute(
+                "SELECT id, file_path, reason, disposition FROM protection_events WHERE id = ?", (event_id,)
+            ).fetchone()
+            if event is None or event["disposition"] != "pending":
+                raise ValueError("Müdahale bekleyen koruma olayı bulunamadı")
+            cursor = connection.execute(
+                "INSERT INTO response_incidents (protection_event_id, created_at, summary) VALUES (?, ?, ?)",
+                (event_id, datetime.now(timezone.utc).isoformat(), f"{event['file_path']} için olay müdahalesi"),
+            )
+            incident_id = int(cursor.lastrowid)
+
+        file_path = str(event["file_path"])
+        terminated = terminate_process_tree_for_image(file_path)
+        if terminated:
+            record_response_action(incident_id, "terminate-process-tree", file_path, after=terminated, reversible=False)
+
+        quarantine_result = quarantine_file(file_path, str(event["reason"] or "Olay müdahalesi"))
+        if quarantine_result != 0:
+            raise ValueError("Dosya karantinaya alınamadığı için müdahale durduruldu")
+        with open_database() as connection:
+            row = connection.execute(
+                "SELECT id, stored_path FROM quarantine_items WHERE original_path = ? AND state = 'active' ORDER BY id DESC LIMIT 1",
+                (file_path,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Karantina kaydı oluşturulamadı")
+            quarantine_id, stored_path = int(row[0]), str(row[1])
+            connection.execute("UPDATE quarantine_items SET incident_id = ? WHERE id = ?", (incident_id, quarantine_id))
+        record_response_action(
+            incident_id, "quarantine", file_path,
+            before={"path": file_path}, after={"item_id": quarantine_id, "stored_path": stored_path}, reversible=True,
+        )
+
+        path_key = file_path.casefold()
+        for item in startup_entries():
+            command = str(item.get("command") or "")
+            if path_key not in command.casefold():
+                continue
+            if startup_needs_elevation(str(item["source"]), item.get("hive"), str(item["key_path"])):
+                record_response_action(
+                    incident_id, "startup-disable", command, before=item,
+                    reversible=True, state="needs-elevation",
+                )
+                continue
+            result = startup_disable_entry(
+                str(item["source"]), item.get("hive"), str(item["key_path"]),
+                int(item.get("view") or 0), str(item["value_name"]), command,
+            )
+            if result == 0:
+                with open_database() as connection:
+                    backup = connection.execute(
+                        "SELECT id FROM startup_item_backups WHERE original_path = ? ORDER BY id DESC LIMIT 1", (command,)
+                    ).fetchone()
+                record_response_action(
+                    incident_id, "startup-disable", command, before=item,
+                    after={"backup_id": int(backup[0]) if backup else None}, reversible=True,
+                )
+
+        resolved_at = datetime.now(timezone.utc).isoformat()
+        with open_database() as connection:
+            connection.execute(
+                "UPDATE protection_events SET disposition='remediated', disposition_at=?, quarantine_item_id=?, incident_id=? WHERE id=?",
+                (resolved_at, quarantine_id, incident_id, event_id),
+            )
+        emit(
+            "incident-remediated", incident_id=incident_id, event_id=event_id,
+            quarantine_item_id=quarantine_id, target_path=file_path,
+        )
+        return 0
+    except (OSError, sqlite3.Error, ValueError) as error:
+        emit("error", code="INCIDENT_REMEDIATION_FAILED", message=f"Olay müdahalesi tamamlanamadı: {error}")
+        return 2
+
+
+def rollback_response_incident(incident_id: int) -> int:
+    try:
+        with open_database() as connection:
+            connection.row_factory = sqlite3.Row
+            incident = connection.execute(
+                "SELECT id, protection_event_id, state FROM response_incidents WHERE id = ?", (incident_id,)
+            ).fetchone()
+            if incident is None or incident["state"] != "active":
+                raise ValueError("Geri alınabilecek etkin müdahale bulunamadı")
+            actions = connection.execute(
+                "SELECT id, action_type, target, after_json, state FROM response_actions WHERE incident_id=? AND reversible=1 ORDER BY id DESC",
+                (incident_id,),
+            ).fetchall()
+        pending: list[dict[str, Any]] = []
+        for action in actions:
+            if action["state"] in {"reverted", "cancelled"}:
+                continue
+            if action["state"] == "needs-elevation":
+                with open_database() as connection:
+                    connection.execute("UPDATE response_actions SET state='cancelled' WHERE id=?", (int(action["id"]),))
+                continue
+            if action["action_type"] == "firewall-block":
+                pending.append({"action_id": int(action["id"]), "type": action["action_type"], "target": action["target"], "after": json.loads(action["after_json"] or "{}")})
+                continue
+            after = json.loads(action["after_json"] or "{}")
+            result = 0
+            if action["action_type"] == "quarantine" and after.get("item_id"):
+                result = update_quarantine_item(int(after["item_id"]), "restore")
+            elif action["action_type"] == "startup-disable" and after.get("backup_id"):
+                result = startup_restore_entry(int(after["backup_id"]))
+            if result == 0:
+                with open_database() as connection:
+                    connection.execute(
+                        "UPDATE response_actions SET state='reverted', reverted_at=? WHERE id=?",
+                        (datetime.now(timezone.utc).isoformat(), int(action["id"])),
+                    )
+        rolled_back_at = datetime.now(timezone.utc).isoformat()
+        with open_database() as connection:
+            connection.execute(
+                "UPDATE response_incidents SET state=?, rolled_back_at=? WHERE id=?",
+                ("partial" if pending else "rolled-back", rolled_back_at, incident_id),
+            )
+            connection.execute(
+                "UPDATE protection_events SET disposition=?, disposition_at=? WHERE incident_id=?",
+                ("rollback-partial" if pending else "restored", rolled_back_at, incident_id),
+            )
+        emit("incident-rolled-back", incident_id=incident_id, partial=bool(pending), pending_actions=pending)
+        return 0
+    except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError) as error:
+        emit("error", code="INCIDENT_ROLLBACK_FAILED", message=f"Müdahale geri alınamadı: {error}")
+        return 2
+
+
+def record_incident_firewall_action(incident_id: int, raw_detail: str) -> int:
+    try:
+        detail = json.loads(raw_detail)
+        rule_name = str(detail.get("rule_name") or "")
+        target_path = str(detail.get("target_path") or "")
+        if not rule_name.startswith("Neutron-Incident-") or not target_path:
+            raise ValueError("Geçersiz olay güvenlik duvarı kaydı")
+        with open_database() as connection:
+            incident = connection.execute(
+                "SELECT id FROM response_incidents WHERE id=? AND state='active'", (incident_id,)
+            ).fetchone()
+        if incident is None:
+            raise ValueError("Etkin müdahale bulunamadı")
+        action_id = record_response_action(
+            incident_id, "firewall-block", target_path,
+            after={"rule_name": rule_name}, reversible=True,
+        )
+        emit("incident-firewall-recorded", incident_id=incident_id, action_id=action_id, rule_name=rule_name)
+        return 0
+    except (json.JSONDecodeError, ValueError, sqlite3.Error) as error:
+        emit("error", code="INCIDENT_FIREWALL_RECORD_FAILED", message=str(error))
+        return 2
+
+
+def incident_status(incident_id: int) -> int:
+    try:
+        with open_database() as connection:
+            connection.row_factory = sqlite3.Row
+            incident = connection.execute("SELECT * FROM response_incidents WHERE id=?", (incident_id,)).fetchone()
+            if incident is None:
+                raise ValueError("Müdahale kaydı bulunamadı")
+            actions = [dict(row) for row in connection.execute(
+                "SELECT * FROM response_actions WHERE incident_id=? ORDER BY id", (incident_id,)
+            ).fetchall()]
+        emit("incident-status", incident=dict(incident), actions=actions)
+        return 0
+    except (ValueError, sqlite3.Error) as error:
+        emit("error", code="INCIDENT_STATUS_FAILED", message=str(error))
+        return 2
+
+
+def finalize_incident_external_rollback(action_id: int) -> int:
+    try:
+        with open_database() as connection:
+            cursor = connection.execute(
+                "UPDATE response_actions SET state='reverted', reverted_at=? WHERE id=? AND action_type='firewall-block' AND state='applied'",
+                (datetime.now(timezone.utc).isoformat(), action_id),
+            )
+        if cursor.rowcount != 1:
+            raise ValueError("Güvenlik duvarı müdahale kaydı bulunamadı")
+        emit("incident-external-rollback-finalized", action_id=action_id)
+        return 0
+    except (ValueError, sqlite3.Error) as error:
+        emit("error", code="INCIDENT_FINALIZE_FAILED", message=str(error))
+        return 2
+
+
 _emit_sink: Any = None  # set by service_host() to route events over the
 # service pipe instead of stdout; every existing watch_*() function keeps
 # calling emit() completely unchanged, so no other code needed to know
@@ -1780,8 +2277,8 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
             """
             INSERT INTO protection_events (
               occurred_at, event_kind, file_path, finding_kind, severity,
-              reason, sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+              reason, sha256, risk_score, publisher_subject, publisher_thumbprint
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(timezone.utc).isoformat(),
@@ -1791,6 +2288,9 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
                 finding.severity,
                 stored_reason,
                 finding.sha256,
+                finding.risk_score,
+                finding.publisher_subject,
+                finding.publisher_thumbprint,
             ),
         )
         return int(cursor.lastrowid)
@@ -1804,6 +2304,11 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
 # process-injection imports + a packed high-entropy executable section, must
 # already agree) so it stays rare enough not to become a false-positive risk.
 HEURISTIC_AUTO_QUARANTINE_RISK_SCORE = 90
+
+# Structural PE traits are useful supporting evidence, but common installers,
+# browsers and self-extracting archives legitimately share many of them.  A
+# weak, single heuristic must never be presented as a threat by itself.
+MINIMUM_PE_FINDING_RISK_SCORE = 40
 
 
 def auto_quarantine_confirmed_finding(event_id: int | None, finding: Finding) -> int | None:
@@ -1851,7 +2356,8 @@ def read_protection_history(limit: int) -> list[dict[str, Any]]:
             """
             SELECT id, occurred_at, event_kind, file_path, finding_kind,
                    severity, reason, sha256, disposition, disposition_at,
-                   quarantine_item_id
+                   quarantine_item_id, risk_score, publisher_subject, publisher_thumbprint,
+                   incident_id
             FROM protection_events
             ORDER BY CASE WHEN disposition = 'pending' THEN 0 ELSE 1 END,
                      occurred_at DESC, id DESC
@@ -1863,7 +2369,7 @@ def read_protection_history(limit: int) -> list[dict[str, Any]]:
 
 
 def protection_event_action(item_id: int, action: str) -> int:
-    if action not in {"quarantine", "trust", "ignore"}:
+    if action not in {"quarantine", "trust", "trust-publisher", "ignore"}:
         emit("error", code="PROTECTION_ACTION_INVALID", message="Desteklenmeyen tehdit işlemi.")
         return 2
     try:
@@ -1871,7 +2377,8 @@ def protection_event_action(item_id: int, action: str) -> int:
             connection.row_factory = sqlite3.Row
             event = connection.execute(
                 """
-                SELECT id, file_path, reason, sha256, disposition
+                SELECT id, file_path, reason, sha256, disposition,
+                       publisher_subject, publisher_thumbprint
                 FROM protection_events WHERE id = ?
                 """,
                 (item_id,),
@@ -1887,7 +2394,10 @@ def protection_event_action(item_id: int, action: str) -> int:
             )
             return 0
 
-        disposition = {"quarantine": "quarantined", "trust": "trusted", "ignore": "ignored"}[action]
+        disposition = {
+            "quarantine": "quarantined", "trust": "trusted",
+            "trust-publisher": "trusted-publisher", "ignore": "ignored",
+        }[action]
         quarantine_item_id: int | None = None
         if action == "trust":
             digest = str(event["sha256"] or "")
@@ -1896,6 +2406,12 @@ def protection_event_action(item_id: int, action: str) -> int:
             current = load_exclusion_set()
             if digest not in current.hashes:
                 add_exclusion("hash", digest, str(event["file_path"]))
+        elif action == "trust-publisher":
+            thumbprint = str(event["publisher_thumbprint"] or "")
+            subject = str(event["publisher_subject"] or "")
+            if not thumbprint:
+                raise ValueError("Bu bulgunun güvenilir olarak kaydedilebilecek yayıncı sertifikası yok")
+            trust_publisher(thumbprint, subject)
         elif action == "quarantine":
             result = quarantine_file(str(event["file_path"]), str(event["reason"] or "Gerçek zamanlı koruma bulgusu"))
             if result != 0:
@@ -2021,13 +2537,16 @@ def verify_authenticode(path: Path, has_embedded_signature: bool) -> str:
         return "present-unverified"
 
 
-def verify_windows_catalog_signature(path: Path) -> str:
-    """Ask Windows for embedded or catalog Authenticode status only on risky files."""
+def windows_signature_details(path: Path) -> tuple[str, str | None, str | None]:
+    """Return Windows trust status plus the exact signing certificate identity."""
     if os.name != "nt":
-        return "not-embedded"
+        return "not-embedded", None, None
     script = (
         "$signature = Get-AuthenticodeSignature -LiteralPath $args[0]; "
-        "[Console]::Out.Write($signature.Status.ToString())"
+        "$certificate = $signature.SignerCertificate; "
+        "[pscustomobject]@{ status=$signature.Status.ToString(); "
+        "thumbprint=if($certificate){$certificate.Thumbprint}else{''}; "
+        "subject=if($certificate){$certificate.Subject}else{''} } | ConvertTo-Json -Compress"
     )
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -2045,13 +2564,16 @@ def verify_windows_catalog_signature(path: Path) -> str:
             creationflags=creation_flags,
         )
     except (OSError, subprocess.SubprocessError):
-        return "present-unverified"
-    status = result.stdout.strip().casefold()
-    if result.returncode == 0 and status == "valid":
-        return "trusted"
-    if status == "notsigned":
-        return "unsigned"
-    return "invalid" if status else "present-unverified"
+        return "present-unverified", None, None
+    try:
+        detail = json.loads(result.stdout.strip().lstrip("\ufeff"))
+    except (json.JSONDecodeError, TypeError):
+        return "present-unverified", None, None
+    status = str(detail.get("status") or "").casefold()
+    mapped = "trusted" if result.returncode == 0 and status == "valid" else "unsigned" if status == "notsigned" else "invalid" if status else "present-unverified"
+    thumbprint = re.sub(r"[^A-Fa-f0-9]", "", str(detail.get("thumbprint") or "")).upper() or None
+    subject = str(detail.get("subject") or "").strip()[:500] or None
+    return mapped, thumbprint, subject
 
 
 def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysis | None:
@@ -2090,6 +2612,10 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
 
         executable_high_entropy = []
         writable_executable = []
+        suspicious_section_names = []
+        section_entropies: list[float] = []
+        executable_section_count = 0
+        packer_section_markers = ("upx", "aspack", "mpress", "themida", "vmp", "petite", "pec")
         for section in sections:
             flags = int(section.Characteristics)
             executable = bool(flags & 0x20000000)
@@ -2097,16 +2623,28 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
             raw_size = int(section.SizeOfRawData)
             name = section.Name.rstrip(b"\0").decode("ascii", errors="replace") or "isimsiz"
             entropy = float(section.get_entropy()) if raw_size else 0.0
+            section_entropies.append(entropy)
+            normalized_name = name.casefold().strip(". _")
+            if any(marker in normalized_name for marker in packer_section_markers):
+                suspicious_section_names.append(name)
             if executable and writable:
                 writable_executable.append(name)
+            if executable:
+                executable_section_count += 1
             if executable and raw_size >= 4096 and entropy >= 7.35:
                 executable_high_entropy.append(f"{name} ({entropy:.2f})")
         if writable_executable:
             reasons.append((32, f"yazılabilir ve çalıştırılabilir bölüm: {', '.join(writable_executable[:3])}"))
         if executable_high_entropy:
             reasons.append((22, f"yüksek entropili çalıştırılabilir bölüm: {', '.join(executable_high_entropy[:3])}"))
+        if suspicious_section_names:
+            reasons.append((24, f"bilinen packer/koruyucu bölüm adı: {', '.join(suspicious_section_names[:3])}"))
 
         entry_section = pe.get_section_by_rva(entry_point) if entry_point else None
+        entrypoint_outside_sections = bool(entry_point and entry_section is None)
+        entrypoint_non_executable = bool(
+            entry_section is not None and not int(entry_section.Characteristics) & 0x20000000
+        )
         if entry_point and entry_section is None:
             reasons.append((25, "giriş noktası hiçbir PE bölümünün içinde değil"))
         elif entry_section is not None and not int(entry_section.Characteristics) & 0x20000000:
@@ -2146,11 +2684,16 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
                 "httpsendrequestw", "winhttpreceiveresponse",
             }, 3),
         )
+        api_match_counts: dict[str, int] = {}
         for points, description, names, threshold in api_groups:
             matches = sorted(import_names.intersection(names))
+            api_match_counts[description] = len(matches)
             if len(matches) >= threshold:
                 reasons.append((points, f"{description}: {', '.join(matches[:4])}"))
+        if import_count == 0 and image_kind in {"EXE", "DLL"} and size >= 64 * 1024:
+            reasons.append((12, "çalıştırılabilir dosyada okunabilir import tablosu yok"))
 
+        overlay_ratio = 0.0
         overlay_offset = pe.get_overlay_data_start_offset()
         if overlay_offset is not None and size > 0:
             overlay_ratio = max(0, size - int(overlay_offset)) / size
@@ -2163,10 +2706,14 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
             security = pe.OPTIONAL_HEADER.DATA_DIRECTORY[security_index]
             has_signature = bool(int(security.VirtualAddress) and int(security.Size) >= 8)
         preliminary_score = min(100, sum(points for points, _reason in reasons))
+        publisher_thumbprint = None
+        publisher_subject = None
         if payload is None:
             signature_status = verify_authenticode(path, has_signature)
-            if not has_signature and preliminary_score >= 20:
-                signature_status = verify_windows_catalog_signature(path)
+            if has_signature or preliminary_score >= 20:
+                detailed_status, publisher_thumbprint, publisher_subject = windows_signature_details(path)
+                if detailed_status != "present-unverified":
+                    signature_status = detailed_status
         else:
             # Arşiv üyeleri diske çıkarılmaz; Windows güven zinciri yalnız dosya yolu
             # üzerinden doğrulanabildiğinden gömülü imzanın varlığı raporlanır.
@@ -2174,9 +2721,80 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
         if signature_status == "invalid":
             reasons.append((25, "gömülü dijital imza Windows doğrulamasından geçmedi"))
 
+        com_descriptor_index = pefile.DIRECTORY_ENTRY.get("IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR", 14)
+        is_dotnet = False
+        if len(pe.OPTIONAL_HEADER.DATA_DIRECTORY) > com_descriptor_index:
+            com_descriptor = pe.OPTIONAL_HEADER.DATA_DIRECTORY[com_descriptor_index]
+            is_dotnet = bool(int(com_descriptor.VirtualAddress) and int(com_descriptor.Size))
+        model_contexts = {"pe"}
+        if image_kind == "sürücü":
+            model_contexts.add("driver")
+        elif is_dotnet:
+            model_contexts.add("dotnet")
+        elif architecture in {"x64", "ARM64"}:
+            model_contexts.add("win64")
+        else:
+            model_contexts.add("win32")
+
+        ml_features = None
+        ml_shadow_score = None
+        ml_model_version = None
+        ml_shadow_details = None
+        try:
+            features = build_feature_vector(
+                file_size_log2=math.log2(max(1, size)),
+                section_count=len(sections),
+                import_count_log2=math.log2(1 + import_count),
+                executable_section_count=executable_section_count,
+                writable_executable_count=len(writable_executable),
+                high_entropy_executable_count=len(executable_high_entropy),
+                packer_marker_count=len(suspicious_section_names),
+                max_section_entropy_normalized=max(section_entropies, default=0.0) / 8.0,
+                overlay_ratio=overlay_ratio,
+                entrypoint_outside_sections=entrypoint_outside_sections,
+                entrypoint_non_executable=entrypoint_non_executable,
+                injection_api_match_count=api_match_counts.get("süreç enjeksiyonu API kümesi", 0),
+                credential_api_match_count=api_match_counts.get("kimlik bilgisi dökümü API kümesi", 0),
+                persistence_api_match_count=api_match_counts.get("kalıcılık değiştirme API kümesi", 0),
+                network_api_match_count=api_match_counts.get("ağdan içerik alma API kümesi", 0),
+                missing_import_table=import_count == 0 and image_kind in {"EXE", "DLL"} and size >= 64 * 1024,
+                has_embedded_signature=has_signature,
+                trusted_signature=signature_status == "trusted",
+                invalid_signature=signature_status == "invalid",
+                is_dll=image_kind == "DLL",
+                is_driver=image_kind == "sürücü",
+                is_64_bit=architecture in {"x64", "ARM64"},
+            )
+            legacy_prediction = predict_ensemble(
+                data_directory() / "ml", features, contexts=frozenset(model_contexts),
+            )
+            ember_prediction = predict_ember2024(
+                data_directory() / "ml" / "ember2024", path, payload,
+                contexts=frozenset(model_contexts),
+            )
+            prediction = merge_ensemble_predictions(
+                "neutron-shadow-ensemble-2", legacy_prediction, ember_prediction,
+            )
+            if prediction is not None:
+                ml_features = features
+                ml_shadow_score = prediction.score
+                ml_model_version = prediction.ensemble_version
+                ml_shadow_details = prediction.as_payload()
+        except (OSError, TypeError, ValueError):
+            # Shadow ML must always fail open and never alter the deterministic
+            # scanner's result while the model is being introduced.
+            pass
+
         risk_score = min(100, sum(points for points, _reason in reasons))
         if signature_status == "trusted" and risk_score:
             risk_score = max(0, risk_score - 18)
+        if signature_status == "trusted" and publisher_thumbprint:
+            try:
+                publisher_allowed = publisher_thumbprint in trusted_publisher_thumbprints()
+            except (OSError, sqlite3.Error):
+                publisher_allowed = False
+            if publisher_allowed:
+                risk_score = 0
         ordered_reasons = tuple(reason for _points, reason in sorted(reasons, reverse=True))
         return PEAnalysis(
             architecture=architecture,
@@ -2185,8 +2803,14 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
             section_count=len(sections),
             import_count=import_count,
             signature_status=signature_status,
+            publisher_subject=publisher_subject,
+            publisher_thumbprint=publisher_thumbprint,
             risk_score=risk_score,
             reasons=ordered_reasons,
+            ml_shadow_score=ml_shadow_score,
+            ml_model_version=ml_model_version,
+            ml_features=ml_features,
+            ml_shadow_details=ml_shadow_details,
         )
     except (AttributeError, IndexError, MemoryError, OSError, OverflowError, ValueError, pefile.PEFormatError):
         return None
@@ -2194,17 +2818,21 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
         pe.close()
 
 
-def pe_finding(path: Path, size: int, digest: str | None, payload: bytes | None = None) -> Finding | None:
-    analysis = analyze_pe(path, size, payload)
-    if analysis is None or analysis.risk_score < 20 or not analysis.reasons:
+def pe_finding(
+    path: Path, size: int, digest: str | None, payload: bytes | None = None,
+    analysis: PEAnalysis | None = None,
+) -> Finding | None:
+    analysis = analysis or analyze_pe(path, size, payload)
+    if analysis is None or not analysis.reasons:
         return None
-    # A file whose Authenticode signature verifies against Windows' own trust
-    # store, sitting in a protected system folder, is as close to certainly-
-    # legitimate as static analysis can get -- surfacing a "review" flag here
-    # is pure noise (and the false-positive full-scan concern users worry
-    # about most). auto_quarantine_confirmed_finding() never acts on these
-    # anyway, but suppressing the finding entirely keeps scan results clean.
-    if analysis.signature_status == "trusted" and is_protected_system_path(path):
+    # A valid Authenticode chain is strong benign evidence regardless of the
+    # download folder. Installers such as ChromeSetup are commonly packed and
+    # may import networking/process APIs, so structural traits alone must not
+    # turn a Windows-trusted binary into a threat. Exact hashes, YARA and cloud
+    # reputation are evaluated separately and can still flag the file.
+    if analysis.signature_status == "trusted":
+        return None
+    if analysis.risk_score < MINIMUM_PE_FINDING_RISK_SCORE:
         return None
     severity = (
         "critical" if analysis.risk_score >= 85
@@ -2231,6 +2859,11 @@ def pe_finding(path: Path, size: int, digest: str | None, payload: bytes | None 
         reason=reason,
         sha256=digest,
         risk_score=analysis.risk_score,
+        publisher_subject=analysis.publisher_subject,
+        publisher_thumbprint=analysis.publisher_thumbprint,
+        ml_shadow_score=analysis.ml_shadow_score,
+        ml_model_version=analysis.ml_model_version,
+        ml_shadow_details=analysis.ml_shadow_details,
     )
 
 
@@ -2748,7 +3381,11 @@ def query_virustotal(sha256: str, api_key: str) -> dict[str, Any] | None:
         return None
     stats = payload.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
     malicious = int(stats.get("malicious") or 0)
-    if malicious == 0:
+    suspicious = int(stats.get("suspicious") or 0)
+    # One noisy engine is a common false positive and is not sufficient for a
+    # high-confidence verdict. Require independent agreement before Neutron
+    # promotes a hash lookup to a threat finding.
+    if malicious < 3 and malicious + suspicious < 4:
         return {"verdict": "unknown", "source": "virustotal", "reason": None}
     return {
         "verdict": "malicious", "source": "virustotal",
@@ -2851,7 +3488,13 @@ def inspect_file(
         ))
 
     if suffix in {".exe", ".dll", ".scr"}:
-        structural_finding = pe_finding(path, size, None)
+        pe_analysis = analyze_pe(path, size)
+        structural_finding = pe_finding(path, size, None, analysis=pe_analysis)
+        if pe_analysis is not None and pe_analysis.ml_shadow_score is not None:
+            try:
+                record_ml_shadow_observation(file_digest(), pe_analysis)
+            except (OSError, sqlite3.Error, ValueError):
+                pass
         if structural_finding is not None:
             structural_finding.sha256 = file_digest()
             findings.append(structural_finding)
@@ -3067,6 +3710,57 @@ def toolhelp_process_ids() -> set[int]:
         kernel32.CloseHandle(snapshot)
 
 
+def toolhelp_parent_processes() -> dict[int, int]:
+    """Return PID -> parent PID using the same read-only Toolhelp snapshot."""
+    if os.name != "nt":
+        return {}
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if not snapshot or snapshot in (-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
+        return {}
+    result: dict[int, int] = {}
+    try:
+        entry = _ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+        if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+            return result
+        while True:
+            result[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+        return result
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+
+def windows_process_command_line(process_id: int) -> str:
+    """Fetch one new process command line on demand; never shells user data."""
+    if os.name != "nt" or process_id <= 0:
+        return ""
+    script = (
+        "$p = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + [int]$args[0]) -ErrorAction SilentlyContinue; "
+        "if($p){[Console]::Out.Write([string]$p.CommandLine)}"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, str(process_id)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3,
+            check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return result.stdout.strip()[:8192] if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def detect_hidden_processes() -> list["Finding"]:
     """Cross-check two independent process-enumeration APIs; a PID the
     snapshot-based Toolhelp32 sees but EnumProcesses doesn't (or vice versa)
@@ -3264,6 +3958,73 @@ def rwx_private_region_count(pid: int) -> int:
         kernel32.CloseHandle(handle)
 
 
+def neutron_owned_roots() -> tuple[Path, ...]:
+    """Return roots that are cryptographically scoped by this running build.
+
+    A packaged engine is below ``resources/runtime/engine/<arch>``. Walking
+    upward to the first directory containing the sibling Neutron.exe finds
+    the exact install root without trusting a process name. Development mode
+    is anchored by this source file plus the repository's package.json.
+    """
+    candidates: list[Path] = []
+    try:
+        executable = Path(sys.executable).resolve()
+        for parent in executable.parents:
+            if (parent / "Neutron.exe").is_file():
+                candidates.append(parent)
+                break
+    except (OSError, RuntimeError):
+        pass
+
+    try:
+        source_root = Path(__file__).resolve().parent.parent
+        if (source_root / "package.json").is_file() and (source_root / "src" / "main.cjs").is_file():
+            candidates.append(source_root)
+    except (OSError, RuntimeError):
+        pass
+
+    unique: dict[str, Path] = {}
+    for candidate in candidates:
+        unique[os.path.normcase(str(candidate))] = candidate
+    return tuple(unique.values())
+
+
+def is_neutron_owned_process_path(raw_path: str | Path, roots: tuple[Path, ...] | None = None) -> bool:
+    """True only for an executable inside this Neutron build's exact root."""
+    try:
+        candidate = Path(raw_path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    for root in roots if roots is not None else neutron_owned_roots():
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def is_neutron_process_or_descendant(
+    pid: int,
+    processes: dict[int, str],
+    parents: dict[int, int],
+    roots: tuple[Path, ...] | None = None,
+) -> bool:
+    """Recognize Neutron helpers by a bounded parent chain, not by filename."""
+    active_roots = roots if roots is not None else neutron_owned_roots()
+    current = int(pid)
+    visited: set[int] = set()
+    for _depth in range(16):
+        if current <= 0 or current in visited:
+            return False
+        visited.add(current)
+        raw_path = processes.get(current)
+        if raw_path and is_neutron_owned_process_path(raw_path, active_roots):
+            return True
+        current = int(parents.get(current, 0) or 0)
+    return False
+
+
 def watch_memory() -> int:
     """Runs as a service_host() thread: on each newly-started process
     (same new-process detection approach as watch_behavior(), kept as its
@@ -3282,7 +4043,9 @@ def watch_memory() -> int:
     enable_debug_privilege()
     yara_rules, yara_status = load_yara_rules()
     exclusions = load_exclusion_set()
+    own_roots = neutron_owned_roots()
     processes = windows_process_snapshot()
+    parents = toolhelp_parent_processes()
     alerted_hidden: set[int] = set()
     emit("memory-ready", backend="windows-native", process_count=len(processes), yara=yara_status)
 
@@ -3300,10 +4063,17 @@ def watch_memory() -> int:
                     event_id = None
                 emit("memory-finding", event_id=event_id, process_id=pid, file_name=f"PID {pid}", finding=asdict(finding))
             current_processes = windows_process_snapshot()
+            current_parents = toolhelp_parent_processes()
+            process_paths = {**processes, **current_processes}
+            parent_links = {**parents, **current_parents}
             for pid, raw_path in current_processes.items():
                 if pid in processes:
                     continue
                 image_path = Path(raw_path)
+                if pid == os.getpid() or is_neutron_process_or_descendant(
+                    pid, process_paths, parent_links, own_roots,
+                ):
+                    continue
                 if is_path_excluded(image_path, exclusions):
                     continue
 
@@ -3337,6 +4107,7 @@ def watch_memory() -> int:
                     event_id = None
                 emit("memory-finding", event_id=event_id, process_id=pid, file_name=image_path.name, finding=asdict(finding))
             processes = current_processes
+            parents = current_parents
     except KeyboardInterrupt:
         emit("memory-stopped")
         return 0
@@ -3554,7 +4325,9 @@ def check_vulnerable_software() -> int:
     return 0
 
 
-def suspicious_process_finding(path: Path) -> Finding | None:
+def suspicious_process_finding(
+    path: Path, *, command_line: str = "", parent_path: str = "",
+) -> Finding | None:
     try:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError):
@@ -3577,19 +4350,45 @@ def suspicious_process_finding(path: Path) -> Finding | None:
         (label for label, root in writable_roots if path_is_inside(resolved, root)),
         None,
     )
-    if location is None:
-        return None
     executable_suffixes = {".exe", ".com", ".scr", ".bat", ".cmd", ".ps1", ".vbs", ".js"}
     if resolved.suffix.casefold() not in executable_suffixes:
         return None
     parts = resolved.name.casefold().split(".")
     double_extension = len(parts) >= 3 and f".{parts[-2]}" in DOCUMENT_EXTENSIONS
-    severity = "high" if double_extension else "medium"
-    reason = (
-        "Belge uzantısını taklit eden yeni süreç çalıştırıldı"
-        if double_extension
-        else f"{location} içinden yeni bir çalıştırılabilir süreç başlatıldı"
-    )
+    executable_name = resolved.name.casefold()
+    command = command_line.casefold()
+    parent_name = Path(parent_path).name.casefold() if parent_path else ""
+    reasons: list[tuple[int, str]] = []
+    if double_extension:
+        reasons.append((45, "belge uzantısını taklit eden çalıştırılabilir dosya"))
+    elif location is not None:
+        reasons.append((22, f"{location} içinden çalıştırıldı"))
+
+    suspicious_arguments = {
+        "powershell.exe": (("-encodedcommand", "-enc ", "frombase64string", "downloadstring", "invoke-expression", "iex "), 38),
+        "pwsh.exe": (("-encodedcommand", "-enc ", "frombase64string", "downloadstring", "invoke-expression", "iex "), 38),
+        "mshta.exe": (("http://", "https://", "javascript:", "vbscript:"), 42),
+        "rundll32.exe": (("javascript:", "http://", "https://", "\\temp\\", "\\downloads\\"), 35),
+        "regsvr32.exe": (("/i:http", "/i:https", "scrobj.dll", "/n /u"), 42),
+        "certutil.exe": (("-urlcache", "-decode", "-decodehex"), 30),
+        "bitsadmin.exe": (("/transfer", "/addfile"), 32),
+        "wscript.exe": (("\\temp\\", "\\downloads\\", ".js", ".vbs"), 26),
+        "cscript.exe": (("\\temp\\", "\\downloads\\", ".js", ".vbs"), 26),
+    }
+    argument_rule = suspicious_arguments.get(executable_name)
+    if argument_rule:
+        matches = [marker for marker in argument_rule[0] if marker in command]
+        if matches:
+            reasons.append((argument_rule[1], f"şüpheli {executable_name} komut deseni: {', '.join(matches[:3])}"))
+    office_parents = {"winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "onenote.exe"}
+    script_children = set(suspicious_arguments) | {"cmd.exe", "wscript.exe", "cscript.exe"}
+    if parent_name in office_parents and executable_name in script_children:
+        reasons.append((38, f"Office süreci {parent_name}, {executable_name} başlattı"))
+    risk_score = min(100, sum(points for points, _reason in reasons))
+    if risk_score < 25:
+        return None
+    severity = severity_for_risk(risk_score)
+    reason = f"Davranış riski {risk_score}/100 · " + "; ".join(reason for _points, reason in sorted(reasons, reverse=True))
     size = resolved.stat().st_size
     return Finding(
         path=str(resolved),
@@ -3597,6 +4396,7 @@ def suspicious_process_finding(path: Path) -> Finding | None:
         severity=severity,
         reason=reason,
         sha256=sha256_for(resolved, size),
+        risk_score=risk_score,
     )
 
 
@@ -3606,8 +4406,10 @@ def watch_behavior() -> int:
         emit("behavior-error", code="UNSUPPORTED_PLATFORM", message="Davranış izleme yalnız Windows'ta kullanılabilir.")
         return 2
     processes = windows_process_snapshot()
+    parents = toolhelp_parent_processes()
     persistence = persistence_snapshot()
     exclusions = load_exclusion_set()
+    own_roots = neutron_owned_roots()
     emit(
         "behavior-ready",
         backend="windows-native",
@@ -3619,10 +4421,19 @@ def watch_behavior() -> int:
         while True:
             time.sleep(BEHAVIOR_INTERVAL_SECONDS)
             current_processes = windows_process_snapshot()
+            current_parents = toolhelp_parent_processes()
+            process_paths = {**processes, **current_processes}
+            parent_links = {**parents, **current_parents}
             for process_id, raw_path in current_processes.items():
                 if process_id in processes:
                     continue
-                finding = suspicious_process_finding(Path(raw_path))
+                if is_neutron_process_or_descendant(process_id, process_paths, parent_links, own_roots):
+                    continue
+                parent_id = current_parents.get(process_id, 0)
+                parent_path = current_processes.get(parent_id) or processes.get(parent_id, "")
+                finding = suspicious_process_finding(
+                    Path(raw_path), command_line=windows_process_command_line(process_id), parent_path=parent_path,
+                )
                 if finding is None:
                     continue
                 if is_path_excluded(Path(finding.path), exclusions):
@@ -3641,6 +4452,7 @@ def watch_behavior() -> int:
                     finding=asdict(finding),
                 )
             processes = current_processes
+            parents = current_parents
 
             current_persistence = persistence_snapshot()
             for identity, value in current_persistence.items():
@@ -3844,6 +4656,41 @@ def watch_usb() -> int:
         return 0
 
 
+class _SECURITY_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("nLength", ctypes.c_ulong),
+        ("lpSecurityDescriptor", ctypes.c_void_p),
+        ("bInheritHandle", ctypes.c_int),
+    ]
+
+
+def authenticated_user_pipe_security() -> tuple[_SECURITY_ATTRIBUTES | None, ctypes.c_void_p | None]:
+    """Allow SYSTEM/admin full access and signed-in users pipe read/write.
+
+    A service running as LocalSystem otherwise inherits a restrictive default
+    DACL. That prevented the normal desktop UI and user processes hosting the
+    AMSI provider from connecting to the service-created named pipes.
+    """
+    if os.name != "nt":
+        return None, None
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.restype = wintypes.BOOL
+    convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+    descriptor = ctypes.c_void_p()
+    descriptor_size = wintypes.DWORD(0)
+    # Protected DACL: SYSTEM/admins full access, authenticated users read/write.
+    sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+    if not convert(sddl, 1, ctypes.byref(descriptor), ctypes.byref(descriptor_size)):
+        return None, None
+    attributes = _SECURITY_ATTRIBUTES(
+        ctypes.sizeof(_SECURITY_ATTRIBUTES), descriptor.value, False,
+    )
+    return attributes, descriptor
+
+
 SERVICE_PIPE_NAME = r"\\.\pipe\neutron-service"
 
 
@@ -3919,6 +4766,8 @@ def service_host() -> int:
     kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    pipe_security, _pipe_security_descriptor = authenticated_user_pipe_security()
+    pipe_security_pointer = ctypes.byref(pipe_security) if pipe_security is not None else None
 
     global _emit_sink
     _emit_sink = broadcast
@@ -3931,6 +4780,24 @@ def service_host() -> int:
             if action == "update_setting":
                 settings = write_app_setting(str(command.get("key")), command.get("value"))
                 return {"type": "settings-updated", "settings": settings, "changed_key": command.get("key")}
+            if action == "install_proton_archive":
+                package_path = Path(str(command.get("package_path") or "")).resolve(strict=True)
+                signature_path = Path(str(command.get("signature_path") or "")).resolve(strict=True)
+                version = str(command.get("version") or "")
+                proton_version_tuple(version)
+                if package_path.suffix.casefold() != ".pdbx" or signature_path.name != f"{package_path.name}.sig":
+                    raise ValueError("Proton arşiv yolları geçersiz")
+                app_executable = Path(sys.executable).resolve().parents[5] / "Neutron.exe"
+                if not app_executable.is_file():
+                    raise ValueError("Neutron bakım yürütülebiliri bulunamadı")
+                completed = subprocess.run(
+                    [str(app_executable), "--install-proton-archive", str(package_path), str(signature_path), version],
+                    timeout=180, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if completed.returncode != 0:
+                    raise ValueError(f"Proton servis veritabanına kurulamadı (kod {completed.returncode})")
+                threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0)), daemon=True).start()
+                return {"type": "service-signature-updated", "version": version}
             if action == "run_scan":
                 mode = str(command.get("mode") or "quick")
                 if mode == "full" and command.get("drive"):
@@ -3952,7 +4819,7 @@ def service_host() -> int:
             pipe = kernel32.CreateNamedPipeW(
                 SERVICE_PIPE_NAME, open_mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_UNLIMITED_INSTANCES, 1 << 16, 1 << 16, 0, None,
+                PIPE_UNLIMITED_INSTANCES, 1 << 16, 1 << 16, 0, pipe_security_pointer,
             )
             first_instance = False
             if pipe == INVALID_HANDLE_VALUE:
@@ -3973,6 +4840,8 @@ def service_host() -> int:
                     if not ok or read.value == 0:
                         break
                     pending += buffer.raw[: read.value]
+                    if len(pending) > MAX_PROTON_PAYLOAD_BYTES + (2 * 1024 * 1024):
+                        break
                     while b"\n" in pending:
                         line, pending = pending.split(b"\n", 1)
                         if not line.strip():
@@ -4182,12 +5051,9 @@ def amsi_service() -> int:
     disk. See tools/amsi/PipeClient.cpp for the client side of this
     protocol and its fail-open timeout behaviour.
 
-    Known hardening gaps (acceptable for a first pass, not for the long
-    term): the pipe uses the default DACL (same-user + admins only, so
-    SYSTEM-context hosts cannot reach it yet) and nothing stops another
-    local process from squatting on the pipe name before this service
-    starts. Both should be addressed with an explicit security descriptor
-    and a startup ordering/health-check story before this is relied on.
+    The pipe uses an explicit DACL so LocalSystem can host it while signed-in
+    user processes can submit scans. FILE_FLAG_FIRST_PIPE_INSTANCE prevents
+    another local process from squatting on the name before Neutron starts.
     """
     if os.name != "nt":
         emit("amsi-error", code="UNSUPPORTED_PLATFORM", message="AMSI koruması yalnızca Windows üzerinde çalışır.")
@@ -4236,6 +5102,8 @@ def amsi_service() -> int:
     kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    pipe_security, _pipe_security_descriptor = authenticated_user_pipe_security()
+    pipe_security_pointer = ctypes.byref(pipe_security) if pipe_security is not None else None
 
     signatures = load_signatures()
     yara_rules, yara_status = load_yara_rules()
@@ -4258,7 +5126,7 @@ def amsi_service() -> int:
                 1 << 16,
                 1 << 16,
                 0,
-                None,
+                pipe_security_pointer,
             )
             first_instance = False
             if pipe == INVALID_HANDLE_VALUE:
@@ -4764,100 +5632,138 @@ def validate_proton_payload(payload: Any) -> dict[str, Any]:
     }
 
 
+def activate_proton_payload(payload: dict[str, Any], *, allow_downgrade: bool, action: str) -> None:
+    """Validate and activate one definition set in a single SQLite transaction.
+
+    Every successfully activated payload is retained as a bounded last-known-good
+    snapshot. A rollback therefore restores the exact validated payload, not a
+    partly copied collection of definition tables.
+    """
+    compiled, yara_result = load_yara_rules(payload["rules"])
+    if yara is None or compiled is None:
+        raise ValueError(yara_result.get("message", "YARA kuralları doğrulanamadı"))
+
+    activated_at = datetime.now(timezone.utc).isoformat()
+    payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    with open_database() as connection:
+        metadata = dict(connection.execute("SELECT key, value FROM signature_metadata").fetchall())
+        current_version = metadata.get("version", BUILTIN_SIGNATURE_VERSION)
+        if not allow_downgrade and proton_version_tuple(payload["version"]) < proton_version_tuple(current_version):
+            raise ValueError("Eski Proton sürümüne dönüş yalnızca doğrulanmış geri alma akışıyla yapılabilir")
+
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM signatures WHERE source = 'proton'")
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO signatures (
+              sha256, file_size, name, severity, source, enabled, added_at
+            ) VALUES (?, ?, ?, ?, 'proton', 1, ?)
+            """,
+            [(item["sha256"], item["file_size"], item["name"], item["severity"], payload["created_at"])
+             for item in payload["signatures"]],
+        )
+        connection.execute("DELETE FROM proton_yara_rules")
+        connection.executemany(
+            "INSERT INTO proton_yara_rules (name, sha256, source_text, installed_at) VALUES (?, ?, ?, ?)",
+            [(rule["name"], rule["sha256"], rule["content"], payload["created_at"])
+             for rule in payload["rules"]],
+        )
+        connection.execute(
+            """
+            INSERT INTO proton_provenance (
+              id, source_name, source_url, collected_at, license, review_policy, installed_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              source_name=excluded.source_name, source_url=excluded.source_url,
+              collected_at=excluded.collected_at, license=excluded.license,
+              review_policy=excluded.review_policy, installed_at=excluded.installed_at
+            """,
+            (payload["provenance"]["source_name"], payload["provenance"]["source_url"],
+             payload["provenance"]["collected_at"], payload["provenance"]["license"],
+             payload["provenance"]["review_policy"], activated_at),
+        )
+        connection.execute("DELETE FROM proton_web_indicators")
+        connection.executemany(
+            "INSERT INTO proton_web_indicators (indicator_type, value, name, severity, installed_at) VALUES (?, ?, ?, ?, ?)",
+            [(item["type"], item["value"], item["name"], item["severity"], payload["created_at"])
+             for item in payload["web_indicators"]],
+        )
+        for key, value in {
+            "version": payload["version"], "database_name": SIGNATURE_DATABASE_NAME,
+            "updated_at": activated_at, "source": "github-release",
+        }.items():
+            connection.execute(
+                "INSERT INTO signature_metadata (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+        connection.execute("UPDATE proton_snapshots SET active = 0")
+        connection.execute(
+            """
+            INSERT INTO proton_snapshots (version, payload_json, installed_at, last_activated_at, active)
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(version) DO UPDATE SET payload_json=excluded.payload_json,
+              last_activated_at=excluded.last_activated_at, active=1
+            """,
+            (payload["version"], payload_json, activated_at, activated_at),
+        )
+        connection.execute(
+            "INSERT INTO proton_update_history (occurred_at, action, version, status, detail) VALUES (?, ?, ?, 'success', ?)",
+            (activated_at, action, payload["version"], f"{len(payload['signatures'])} imza, {len(payload['rules'])} YARA"),
+        )
+        connection.execute(
+            "DELETE FROM proton_snapshots WHERE version IN (SELECT version FROM proton_snapshots WHERE active = 0 ORDER BY last_activated_at DESC LIMIT -1 OFFSET 4)"
+        )
+
+
+def validate_proton_snapshot(snapshot: Any) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        raise ValueError("Proton geri dönüş anlık görüntüsü geçersiz")
+    return validate_proton_payload({
+        "schema": "neutron.proton.payload/v1",
+        "database_name": SIGNATURE_DATABASE_NAME,
+        "version": snapshot.get("version"),
+        "created_at": snapshot.get("created_at"),
+        "provenance": snapshot.get("provenance"),
+        "web_indicators": snapshot.get("web_indicators", []),
+        "signatures": snapshot.get("signatures", []),
+        "yara_rules": snapshot.get("rules", []),
+    })
+
+
 def install_proton_from_stdin() -> int:
     try:
         raw_payload = sys.stdin.buffer.read(MAX_PROTON_PAYLOAD_BYTES + 1)
         if len(raw_payload) > MAX_PROTON_PAYLOAD_BYTES:
             raise ValueError("Proton yükü izin verilen boyutu aşıyor")
         payload = validate_proton_payload(json.loads(raw_payload.decode("utf-8")))
-
-        compiled, yara_result = load_yara_rules(payload["rules"])
-        if yara is None or compiled is None:
-            raise ValueError(yara_result.get("message", "YARA kuralları doğrulanamadı"))
-
-        with open_database() as connection:
-            metadata = dict(connection.execute(
-                "SELECT key, value FROM signature_metadata"
-            ).fetchall())
-            current_version = metadata.get("version", BUILTIN_SIGNATURE_VERSION)
-            if proton_version_tuple(payload["version"]) < proton_version_tuple(current_version):
-                raise ValueError("Eski Proton sürümüne dönüş reddedildi")
-
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM signatures WHERE source = 'proton'")
-            connection.executemany(
-                """
-                INSERT OR IGNORE INTO signatures (
-                  sha256, file_size, name, severity, source, enabled, added_at
-                ) VALUES (?, ?, ?, ?, 'proton', 1, ?)
-                """,
-                [
-                    (
-                        signature["sha256"],
-                        signature["file_size"],
-                        signature["name"],
-                        signature["severity"],
-                        payload["created_at"],
-                    )
-                    for signature in payload["signatures"]
-                ],
-            )
-            connection.execute("DELETE FROM proton_yara_rules")
-            connection.executemany(
-                """
-                INSERT INTO proton_yara_rules (name, sha256, source_text, installed_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                [
-                    (rule["name"], rule["sha256"], rule["content"], payload["created_at"])
-                    for rule in payload["rules"]
-                ],
-            )
-            connection.execute(
-                """
-                INSERT INTO proton_provenance (
-                  id, source_name, source_url, collected_at, license, review_policy, installed_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                  source_name=excluded.source_name, source_url=excluded.source_url,
-                  collected_at=excluded.collected_at, license=excluded.license,
-                  review_policy=excluded.review_policy, installed_at=excluded.installed_at
-                """,
-                (
-                    payload["provenance"]["source_name"], payload["provenance"]["source_url"],
-                    payload["provenance"]["collected_at"], payload["provenance"]["license"],
-                    payload["provenance"]["review_policy"], datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            connection.execute("DELETE FROM proton_web_indicators")
-            connection.executemany(
-                "INSERT INTO proton_web_indicators (indicator_type, value, name, severity, installed_at) VALUES (?, ?, ?, ?, ?)",
-                [(item["type"], item["value"], item["name"], item["severity"], payload["created_at"])
-                 for item in payload["web_indicators"]],
-            )
-            for key, value in {
-                "version": payload["version"],
-                "database_name": SIGNATURE_DATABASE_NAME,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "source": "github-release",
-            }.items():
-                connection.execute(
-                    """
-                    INSERT INTO signature_metadata (key, value) VALUES (?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
-                    (key, value),
-                )
-
-        emit(
-            "signature-updated",
-            **signature_status_payload(),
-            installed=True,
-            yara_rule_files=len(payload["rules"]),
-        )
+        activate_proton_payload(payload, allow_downgrade=False, action="install")
+        emit("signature-updated", **signature_status_payload(), installed=True, yara_rule_files=len(payload["rules"]))
         return 0
     except (UnicodeError, json.JSONDecodeError, ValueError, OSError, sqlite3.Error) as error:
         emit("error", code="PROTON_INSTALL_FAILED", message=f"Proton kurulamadı: {error}")
+        return 2
+
+
+def rollback_proton(version: str | None = None) -> int:
+    try:
+        with open_database() as connection:
+            if version:
+                row = connection.execute(
+                    "SELECT version, payload_json FROM proton_snapshots WHERE version = ? AND active = 0", (version,)
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT version, payload_json FROM proton_snapshots WHERE active = 0 ORDER BY last_activated_at DESC LIMIT 1"
+                ).fetchone()
+        if row is None:
+            raise ValueError("Geri dönülebilecek doğrulanmış Proton sürümü yok")
+        payload = validate_proton_snapshot(json.loads(str(row[1])))
+        activate_proton_payload(payload, allow_downgrade=True, action="rollback")
+        emit("signature-rolled-back", **signature_status_payload(), rolled_back=True)
+        return 0
+    except (json.JSONDecodeError, ValueError, OSError, sqlite3.Error) as error:
+        emit("error", code="PROTON_ROLLBACK_FAILED", message=f"Proton geri alınamadı: {error}")
         return 2
 
 
@@ -5055,9 +5961,15 @@ def main() -> int:
     action.add_argument("--check-url", metavar="URL", help="URL veya domain itibarını yerel Proton verisinde denetle")
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
     action.add_argument("--protection-action", metavar="ID", type=int, help="Gerçek zamanlı koruma olayına işlem uygula")
+    action.add_argument("--incident-remediate", metavar="ID", type=int, help="Koruma olayına günlüklenmiş ve geri alınabilir müdahale uygula")
+    action.add_argument("--incident-rollback", metavar="ID", type=int, help="Olay müdahalesini geri al")
+    action.add_argument("--incident-status", metavar="ID", type=int, help="Olay müdahalesi ve eylemlerini oku")
+    action.add_argument("--incident-record-firewall", metavar="ID", type=int, help="Uygulanan olay güvenlik duvarı kuralını günlüğe yaz")
+    action.add_argument("--incident-finalize-external-rollback", metavar="ID", type=int, help="Harici güvenlik duvarı geri almasını tamamla")
     action.add_argument("--signature-status", action="store_true", help="Yerel imza veritabanı durumunu oku")
     action.add_argument("--signature-update", action="store_true", help="Paketle gelen yerel imzaları yükle")
     action.add_argument("--install-proton-stdin", action="store_true", help="Doğrulanmış Proton yükünü standart girdiden kur")
+    action.add_argument("--rollback-proton", nargs="?", const="", metavar="SURUM", help="Son doğrulanmış Proton sürümüne veya belirtilen arşiv sürümüne dön")
     action.add_argument("--yara-status", action="store_true", help="YARA motorunu ve kurallarını doğrula")
     action.add_argument("--cache-status", action="store_true", help="Yerel analiz önbelleği durumunu oku")
     action.add_argument("--cache-clear", action="store_true", help="Yerel analiz önbelleğini temizle")
@@ -5107,12 +6019,24 @@ def main() -> int:
         if not args.disposition:
             parser.error("--protection-action ile --disposition gereklidir")
         return protection_event_action(args.protection_action, args.disposition)
+    if args.incident_remediate is not None:
+        return remediate_protection_event(args.incident_remediate)
+    if args.incident_rollback is not None:
+        return rollback_response_incident(args.incident_rollback)
+    if args.incident_status is not None:
+        return incident_status(args.incident_status)
+    if args.incident_record_firewall is not None:
+        return record_incident_firewall_action(args.incident_record_firewall, args.value_json)
+    if args.incident_finalize_external_rollback is not None:
+        return finalize_incident_external_rollback(args.incident_finalize_external_rollback)
     if args.signature_status:
         return signature_status()
     if args.signature_update:
         return signature_update()
     if args.install_proton_stdin:
         return install_proton_from_stdin()
+    if args.rollback_proton is not None:
+        return rollback_proton(args.rollback_proton or None)
     if args.yara_status:
         return yara_status()
     if args.cache_status:

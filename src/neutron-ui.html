@@ -658,12 +658,12 @@
             </article>
             <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-wsc" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-bell"></use></svg></span>
-              <p class="section-eyebrow">WINDOWS GÜVENLİK MERKEZİ (DENEYSEL)</p><h2 data-role="wsc-protection-state">Kapalı</h2><p data-role="wsc-protection-detail">Neutron'u Windows'a kayıtlı antivirüs olarak bildirir. Windows Defender'ın pasif moda geçmesi garanti değildir. Etkinleştirmek yönetici izni gerektirir.</p>
+              <p class="section-eyebrow">WINDOWS GÜVENLİK MERKEZİ</p><h2 data-role="wsc-protection-state">Windows tarafından yönetiliyor</h2><p data-role="wsc-protection-detail">Windows Güvenlik Merkezi ve Microsoft Defender normal durumda bırakılır. Neutron'un eski test kaydı kurulum sırasında temizlenir.</p>
               <div class="module-control-row">
                 <span>Güvenlik Merkezi kaydı</span>
                 <button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-wsc-protection" aria-pressed="false" disabled>
                   <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
-                  <span data-role="wsc-toggle-label">Aç</span>
+                  <span data-role="wsc-toggle-label">Windows yönetiyor</span>
                 </button>
               </div>
             </article>
@@ -790,6 +790,7 @@
                 <div class="settings-preference"><div><strong>Bellek/process injection taraması</strong><p>Yeni başlayan süreçlerin belleğini YARA kurallarıyla ve şüpheli RWX bellek bölgesi sezgisiyle tarar. Tam görünürlük için Sistem Servisi Modu önerilir.</p></div><button class="settings-switch" type="button" data-setting-toggle="memory_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Çıkarılabilir medya (USB) koruması</strong><p>Takılan USB/SD kartları otomatik olarak autorun.inf ve kötü amaçlı dosyalar için tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="usb_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Zamanlanmış hızlı tarama</strong><p>Neutron arka planda açık kaldığı sürece, kullanıcı profilini ve Temp klasörlerini günde bir kez otomatik tarar. Bulgular yalnızca gösterilir; otomatik karantina uygulanmaz, karar sizde kalır.</p></div><button class="settings-switch" type="button" data-setting-toggle="scheduled_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Proton imzalarını otomatik güncelle</strong><p>İmzalı Proton/YARA paketlerini belirli aralıklarla denetler; doğrulanmayan veya bozuk paketleri etkinleştirmez.</p></div><button class="settings-switch" type="button" data-setting-toggle="signature_auto_update_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
               </div>
             </article>
             <article class="settings-card settings-card--wide">
@@ -845,8 +846,17 @@
               <h2 data-role="signature-version">Proton hazırlanıyor</h2>
               <p data-role="signature-detail">Paketle gelen Proton imzaları denetleniyor.</p>
               <div class="settings-engine-status"><span>YARA motoru</span><strong data-role="yara-status">Denetleniyor</strong></div>
+              <div class="settings-engine-status"><span>Otomatik denetim</span><strong data-role="signature-auto-status">Hazırlanıyor</strong></div>
               <button class="settings-action" type="button" data-action="update-signatures">Proton'u denetle</button>
+              <button class="settings-action" type="button" data-action="rollback-signatures" hidden>Önceki doğrulanmış sürüme dön</button>
               <p class="settings-note">Proton güncellemeleri denetlenir ve uygun olduğunda kullanıma hazırlanır.</p>
+            </article>
+            <article class="settings-card feature-update-card">
+              <p class="section-eyebrow">FEATURE UPDATE</p>
+              <h2 data-role="feature-update-version">Machine Learning Models</h2>
+              <p data-role="feature-update-detail">Checking installed feature components…</p>
+              <button class="settings-action" type="button" data-action="update-features">Check for Feature Update</button>
+              <p class="settings-note">Downloads the signed and encrypted model package from Neutron's GitHub Releases page.</p>
             </article>
             <article class="settings-card cache-settings-card">
               <p class="section-eyebrow">TARAMA ÖNBELLEĞİ</p>

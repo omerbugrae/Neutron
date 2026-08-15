@@ -64,11 +64,8 @@ function pasteImage(canvas, canvasWidth, canvasHeight, image, imageWidth, imageH
   }
 }
 
-// WiX/MSI UI bitmaps need to be plain 24bpp BMP files -- neither WixUI nor
-// msiexec's dialog renderer accepts PNG. Written by hand (bottom-up rows,
-// 4-byte row padding) since there's no image library dependency in this
-// project; same "no new deps, just Electron's own nativeImage + a small
-// hand-rolled binary writer" approach as tools/build-windows-icon.cjs.
+// MUI2 bitmaps are plain 24bpp BMP files. Written by hand (bottom-up rows,
+// 4-byte row padding) so the installer image build needs no extra dependency.
 function bufferToBmp(buffer, width, height) {
   const rowSize = Math.floor((24 * width + 31) / 32) * 4;
   const pixelArraySize = rowSize * height;
@@ -116,10 +113,9 @@ function buildBitmap(outputPath, width, height, logoSize) {
 
 app.whenReady().then(() => {
   try {
-    // Standard WixUI bitmap sizes: banner runs across the top of every
-    // wizard page, dialog is the full-page background on Welcome/Exit.
-    buildBitmap(bannerPath, 493, 58, 44);
-    buildBitmap(dialogPath, 493, 312, 200);
+    // Standard MUI2 sizes: 150x57 header and 164x314 Welcome/Finish artwork.
+    buildBitmap(bannerPath, 150, 57, 42);
+    buildBitmap(dialogPath, 164, 314, 142);
     console.log(`Kurulum banner görseli oluşturuldu: ${bannerPath}`);
     console.log(`Kurulum arka plan görseli oluşturuldu: ${dialogPath}`);
     app.exit(0);

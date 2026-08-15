@@ -1,20 +1,39 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const https = require('https');
 const net = require('net');
 const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const path = require('path');
 const { ProtonUpdater } = require('./proton-updater.cjs');
+const { FeatureUpdater } = require('./feature-updater.cjs');
 const { deviceHash, parseLicense } = require('./license.cjs');
+const {
+  amsiRegistrationCommand,
+  legacyDriverCleanupCommand,
+  psQuoteSingle,
+  runPowerShell,
+  serviceInstallCommand,
+  serviceUninstallCommand,
+  watchdogCreateCommand,
+  watchdogDeleteCommand,
+  windowsSecurityCenterRestoreCommand,
+} = require('./windows-security.cjs');
 
 const WINDOWS_APP_USER_MODEL_ID = 'com.neutron.security.Neutron';
 const NEUTRON_LOGO_PATH = path.join(__dirname, '..', 'assets', 'neutron-logo.png');
 const NEUTRON_ICON_PATH = path.join(__dirname, '..', 'assets', 'neutron.ico');
+const isPrepareUninstallMode = process.argv.includes('--prepare-uninstall');
+const isProvisionSecurityMode = process.argv.includes('--provision-security');
+const isInstallProtonArchiveMode = process.argv.includes('--install-proton-archive');
+const isActivateLicenseFileMode = process.argv.includes('--activate-license-file');
+const isMaintenanceMode = isPrepareUninstallMode || isProvisionSecurityMode || isInstallProtonArchiveMode || isActivateLicenseFileMode;
 
 app.setName('Neutron');
 if (process.platform === 'win32') app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+// The NSIS uninstaller launches a short-lived cleanup instance while the normal
+// app may still own the single-instance lock. Cleanup never creates a window.
+const hasSingleInstanceLock = isMaintenanceMode || app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -34,6 +53,7 @@ let tray = null;
 let isQuitting = false;
 let hasShownTrayHint = false;
 let protonUpdatePromise = null;
+let featureUpdatePromise = null;
 let activeLicense = null;
 let appSettings = {
   start_with_windows: false,
@@ -53,6 +73,13 @@ let appSettings = {
   notifications_enabled: true,
   watch_paths: [],
   scan_max_files: 1500,
+  scheduled_scan_enabled: true,
+  scheduled_scan_last_run_at: 0,
+  signature_auto_update_enabled: true,
+  signature_update_interval_hours: 6,
+  signature_update_last_check_at: 0,
+  signature_update_last_success_at: 0,
+  signature_update_last_error: '',
 };
 
 function neutronImage(size) {
@@ -90,6 +117,12 @@ function sendProtonUpdateEvent(payload) {
   }
 }
 
+function sendFeatureUpdateEvent(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('feature:update-event', payload);
+  }
+}
+
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -97,19 +130,45 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
-function licensePath() {
+function userLicensePath() {
   return path.join(app.getPath('userData'), 'license', 'activation.key');
 }
 
+function machineLicensePath() {
+  return path.join(process.env.ProgramData || 'C:\\ProgramData', 'Neutron', 'license', 'activation.key');
+}
+
+function readableLicensePaths() {
+  const userPath = userLicensePath();
+  const machinePath = machineLicensePath();
+  return app.isPackaged && machinePath !== userPath
+    ? [machinePath, userPath]
+    : [userPath];
+}
+
+let activeLicensePath = null;
+
 function licenseStatus() {
-  try {
-    const stored = readFileSync(licensePath(), 'utf8').trim();
-    activeLicense = parseLicense(stored);
-    return { ok: true, active: true, license: activeLicense };
-  } catch (error) {
-    activeLicense = null;
-    return { ok: true, active: false, deviceHash: deviceHash(), message: error.message };
+  const errors = [];
+  for (const candidate of readableLicensePaths()) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const stored = readFileSync(candidate, 'utf8').trim();
+      activeLicense = parseLicense(stored);
+      activeLicensePath = candidate;
+      return { ok: true, active: true, license: activeLicense };
+    } catch (error) {
+      errors.push(error.message);
+    }
   }
+  activeLicense = null;
+  activeLicensePath = null;
+  return {
+    ok: true,
+    active: false,
+    deviceHash: deviceHash(),
+    message: errors[0] || 'Kurulum sırasında geçerli bir lisans girilmesi gerekiyor.',
+  };
 }
 
 function requireLicense() {
@@ -117,13 +176,14 @@ function requireLicense() {
   return status.active ? null : { ok: false, code: 'LICENSE_REQUIRED', message: 'Neutron etkinleştirilmedi.' };
 }
 
-function saveLicense(key) {
+function saveLicense(key, options = {}) {
   try {
     const license = parseLicense(String(key || ''));
-    const target = licensePath();
+    const target = options.machineWide ? machineLicensePath() : userLicensePath();
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     writeFileSync(target, `${String(key).trim()}\n`, { encoding: 'utf8', mode: 0o600 });
     activeLicense = license;
+    activeLicensePath = target;
     return { ok: true, active: true, license };
   } catch (error) {
     return { ok: false, active: false, deviceHash: deviceHash(), message: error.message };
@@ -132,9 +192,11 @@ function saveLicense(key) {
 
 function removeStoredLicense() {
   try {
-    const target = licensePath();
-    if (existsSync(target)) require('fs').rmSync(target, { force: true });
+    for (const target of readableLicensePaths()) {
+      if (existsSync(target)) require('fs').rmSync(target, { force: true });
+    }
     activeLicense = null;
+    activeLicensePath = null;
     return { ok: true, active: false, deviceHash: deviceHash() };
   } catch (error) {
     return { ok: false, message: error.message };
@@ -144,7 +206,7 @@ function removeStoredLicense() {
 function revealStoredLicense() {
   const status = licenseStatus();
   if (!status.active) return { ok: false, message: 'Gösterilecek etkin lisans yok.' };
-  return { ok: true, key: readFileSync(licensePath(), 'utf8').trim() };
+  return { ok: true, key: readFileSync(activeLicensePath, 'utf8').trim() };
 }
 
 function openProtectionEvent(eventId) {
@@ -178,6 +240,13 @@ function showFindingNotification(event, title) {
   });
   notification.on('click', () => openProtectionEvent(event.event_id));
   notification.show();
+}
+
+function shouldNotifyWatchFinding(event) {
+  const finding = event?.finding || {};
+  if (event?.action === 'quarantined') return true;
+  if (['test-signature', 'signature', 'cloud-reputation'].includes(finding.kind)) return true;
+  return Number(finding.risk_score) >= 60;
 }
 
 function updateTrayMenu() {
@@ -305,41 +374,18 @@ function amsiDllPath() {
   return path.join(runtimeRoot, architecture, 'NeutronAmsiProvider.dll');
 }
 
-// AMSI provider registration writes machine-wide HKEY_LOCAL_MACHINE keys
-// (see tools/amsi/Dll.cpp DllRegisterServer), which requires admin rights
-// that a per-user Squirrel install does not have. We ask for elevation
-// per-action via a UAC consent prompt rather than bundling an elevated
-// installer step, so registration only happens when the user explicitly
-// opts in to script protection.
-function runElevatedRegsvr32(dllPath, unregister) {
+// AMSI registration must keep the Program Files DLL path as one argument.
+// The old Start-Process ArgumentList construction split paths containing
+// spaces and regsvr32 returned code 3. The shared command builder quotes the
+// path and the asynchronous runner keeps Electron's main thread responsive.
+function runElevatedRegsvr32(dllPath, unregister, options = {}) {
   if (!existsSync(dllPath)) {
-    return {
+    return Promise.resolve({
       ok: false,
       message: 'AMSI sağlayıcı DLL bulunamadı. Önce "npm run amsi:build" ile derlenmeli.',
-    };
+    });
   }
-  const regsvr32Args = unregister ? ['/s', '/u', dllPath] : ['/s', dllPath];
-  const quotedArgs = regsvr32Args
-    .map((value) => `'${String(value).replace(/'/g, "''")}'`)
-    .join(',');
-  const psCommand =
-    `try { ` +
-    `$p = Start-Process -FilePath 'regsvr32.exe' -ArgumentList ${quotedArgs} -Verb RunAs -Wait -PassThru -WindowStyle Hidden; ` +
-    `exit $p.ExitCode ` +
-    `} catch { exit 1223 }`;
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', psCommand],
-    { windowsHide: true },
-  );
-  if (result.error) return { ok: false, message: result.error.message };
-  if (result.status === 1223) {
-    return { ok: false, code: 'ELEVATION_CANCELLED', message: 'Yönetici izni verilmedi.' };
-  }
-  if (result.status !== 0) {
-    return { ok: false, message: `Kayıt işlemi başarısız oldu (kod ${result.status}).` };
-  }
-  return { ok: true };
+  return runPowerShell(amsiRegistrationCommand(dllPath, unregister), options);
 }
 
 const WATCHDOG_TASK_NAME = 'NeutronWatchdog';
@@ -356,39 +402,17 @@ function watchdogExecPath() {
   return { exe: process.execPath, args: app.isPackaged ? ['--hidden'] : [app.getAppPath(), '--hidden'] };
 }
 
-function runElevatedPowerShell(psCommand) {
-  const encoded = Buffer.from(psCommand, 'utf16le').toString('base64');
-  const outerCommand =
-    `try { ` +
-    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','${encoded}') -Verb RunAs -Wait -PassThru -WindowStyle Hidden; ` +
-    `exit $p.ExitCode ` +
-    `} catch { exit 1223 }`;
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-Command', outerCommand],
-    { windowsHide: true },
-  );
-  if (result.error) return { ok: false, message: result.error.message };
-  if (result.status === 1223) {
-    return { ok: false, code: 'ELEVATION_CANCELLED', message: 'Yönetici izni verilmedi.' };
-  }
-  if (result.status !== 0) {
-    return { ok: false, message: `İşlem başarısız oldu (kod ${result.status}).` };
-  }
-  return { ok: true };
+function runElevatedPowerShell(psCommand, options = {}) {
+  return runPowerShell(psCommand, options);
 }
 
-function registerWatchdogTask() {
+function registerWatchdogTask(options = {}) {
   const { exe, args } = watchdogExecPath();
-  const quotedTarget = [exe, ...args].map((value) => `"${String(value).replace(/"/g, '\\"')}"`).join(' ');
-  const psCommand =
-    `schtasks /create /tn '${WATCHDOG_TASK_NAME}' /tr '${quotedTarget.replace(/'/g, "''")}' ` +
-    `/sc minute /mo 2 /rl highest /f`;
-  return runElevatedPowerShell(psCommand);
+  return runElevatedPowerShell(watchdogCreateCommand(WATCHDOG_TASK_NAME, exe, args), options);
 }
 
-function unregisterWatchdogTask() {
-  return runElevatedPowerShell(`schtasks /delete /tn '${WATCHDOG_TASK_NAME}' /f`);
+function unregisterWatchdogTask(options = {}) {
+  return runElevatedPowerShell(watchdogDeleteCommand(WATCHDOG_TASK_NAME), options);
 }
 
 // Uygulama bazlı güvenlik duvarı: Neutron paket filtreleme yapmaz, Windows'un
@@ -398,10 +422,6 @@ function unregisterWatchdogTask() {
 // ekleme/kaldırma/aç-kapa burada, runElevatedPowerShell() ile (watchdog
 // task'la aynı UAC deseni) yapılır. Kural adı (ruleName) engine.py'nin
 // firewall_rule_name() ile ürettiği deterministik isimle birebir eşleşir.
-function psQuoteSingle(value) {
-  return String(value).replace(/'/g, "''");
-}
-
 function firewallAddCommand(ruleName, programPath, action, direction) {
   const psDirection = direction === 'in' ? 'Inbound' : 'Outbound';
   const psAction = action === 'allow' ? 'Allow' : 'Block';
@@ -460,24 +480,15 @@ function wscQuote(value) {
 }
 
 function registerWscProvider() {
-  const exePath = process.execPath;
-  const psCommand =
-    `$existing = Get-CimInstance -Namespace root\\SecurityCenter2 -ClassName AntiVirusProduct ` +
-    `-Filter "instanceGuid='${wscQuote(WSC_INSTANCE_GUID)}'" -ErrorAction SilentlyContinue; ` +
-    `if ($existing) { $existing | Remove-CimInstance -ErrorAction SilentlyContinue }; ` +
-    `New-CimInstance -Namespace root\\SecurityCenter2 -ClassName AntiVirusProduct -Property @{ ` +
-    `displayName='Neutron Security'; instanceGuid='${wscQuote(WSC_INSTANCE_GUID)}'; ` +
-    `pathToSignedProductExe='${wscQuote(exePath)}'; pathToSignedReportingExe='${wscQuote(exePath)}'; ` +
-    `productState=397568 } | Out-Null`;
-  return runElevatedPowerShell(psCommand);
+  return Promise.resolve({
+    ok: false,
+    code: 'WSC_REGISTRATION_UNSUPPORTED',
+    message: 'Windows Güvenlik Merkezi, imzasız ve Microsoft MVI kaydı olmayan bir antivirüsün destekli biçimde kaydedilmesine izin vermiyor. Diğer korumalar bundan etkilenmez.',
+  });
 }
 
-function unregisterWscProvider() {
-  const psCommand =
-    `$existing = Get-CimInstance -Namespace root\\SecurityCenter2 -ClassName AntiVirusProduct ` +
-    `-Filter "instanceGuid='${wscQuote(WSC_INSTANCE_GUID)}'" -ErrorAction SilentlyContinue; ` +
-    `if ($existing) { $existing | Remove-CimInstance -ErrorAction SilentlyContinue }`;
-  return runElevatedPowerShell(psCommand);
+function unregisterWscProvider(options = {}) {
+  return runElevatedPowerShell(windowsSecurityCenterRestoreCommand(WSC_INSTANCE_GUID), options);
 }
 
 // --- Windows Service architecture (opt-in, additive) ---------------------
@@ -500,48 +511,20 @@ function serviceHostPath() {
   return path.join(runtimeRoot, architecture, 'NeutronServiceHost.exe');
 }
 
-// One elevation prompt that installs the Windows Service AND folds in the
-// AMSI + WSC registrations that otherwise each need their own UAC prompt
-// (registerWscProvider/runElevatedRegsvr32 above still exist standalone
-// for users who enable those features without service mode).
-function installProtectionService() {
+function installProtectionService(options = {}) {
   const hostPath = serviceHostPath();
   if (!existsSync(hostPath)) {
-    return { ok: false, message: 'Servis çalıştırıcı bulunamadı. Önce "npm run service:build" ile derlenmeli.' };
+    return Promise.resolve({ ok: false, message: 'Servis çalıştırıcı bulunamadı. Önce "npm run service:build" ile derlenmeli.' });
   }
-  const dllPath = amsiDllPath();
-  const oldDataDir = path.join(app.getPath('userData'), 'data').replace(/'/g, "''");
-  const amsiLine = existsSync(dllPath)
-    ? `try { regsvr32 /s '${dllPath.replace(/'/g, "''")}' } catch {}`
-    : '';
-  const wscLine =
-    `try { $e = Get-CimInstance -Namespace root\\SecurityCenter2 -ClassName AntiVirusProduct ` +
-    `-Filter "instanceGuid='${wscQuote(WSC_INSTANCE_GUID)}'" -ErrorAction SilentlyContinue; ` +
-    `if ($e) { $e | Remove-CimInstance -ErrorAction SilentlyContinue }; ` +
-    `New-CimInstance -Namespace root\\SecurityCenter2 -ClassName AntiVirusProduct -Property @{ ` +
-    `displayName='Neutron Security'; instanceGuid='${wscQuote(WSC_INSTANCE_GUID)}'; ` +
-    `pathToSignedProductExe='${wscQuote(process.execPath)}'; pathToSignedReportingExe='${wscQuote(process.execPath)}'; ` +
-    `productState=397568 } | Out-Null } catch {}`;
-  const psCommand = [
-    `$dataDir = Join-Path $env:ProgramData 'Neutron\\data'`,
-    `if ((Test-Path '${oldDataDir}') -and -not (Test-Path $dataDir)) { ` +
-      `New-Item -ItemType Directory -Force -Path (Split-Path $dataDir) | Out-Null; ` +
-      `Copy-Item -Path '${oldDataDir}' -Destination $dataDir -Recurse -Force }`,
-    `if (Get-Service -Name '${SERVICE_NAME}' -ErrorAction SilentlyContinue) { sc.exe delete '${SERVICE_NAME}' | Out-Null }`,
-    `sc.exe create '${SERVICE_NAME}' binPath= '"${hostPath}"' start= auto | Out-Null`,
-    `sc.exe failure '${SERVICE_NAME}' reset= 86400 actions= restart/5000/restart/5000/restart/15000 | Out-Null`,
-    `sc.exe start '${SERVICE_NAME}' | Out-Null`,
-    amsiLine,
-    wscLine,
-  ].filter(Boolean).join('; ');
-  return runElevatedPowerShell(psCommand);
+  const oldDataDir = path.join(app.getPath('userData'), 'data');
+  return runElevatedPowerShell(
+    `${legacyDriverCleanupCommand()}; ${serviceInstallCommand(SERVICE_NAME, hostPath, oldDataDir)}`,
+    options,
+  );
 }
 
-function uninstallProtectionService() {
-  return runElevatedPowerShell(
-    `try { sc.exe stop '${SERVICE_NAME}' | Out-Null } catch {}; ` +
-    `try { sc.exe delete '${SERVICE_NAME}' | Out-Null } catch {}`,
-  );
+function uninstallProtectionService(options = {}) {
+  return runElevatedPowerShell(serviceUninstallCommand(SERVICE_NAME), options);
 }
 
 let serviceSocket = null;
@@ -552,7 +535,10 @@ function handleServiceEvent(event) {
   if (!event || typeof event.type !== 'string') return;
   sendProtectionEvent(event);
   if (event.settings) appSettings = { ...appSettings, ...event.settings };
-  if (['watch-finding', 'behavior-finding', 'network-finding', 'amsi-finding'].includes(event.type)) {
+  if (
+    ['behavior-finding', 'network-finding', 'amsi-finding'].includes(event.type)
+    || (event.type === 'watch-finding' && shouldNotifyWatchFinding(event))
+  ) {
     showFindingNotification(event);
   }
 }
@@ -698,34 +684,122 @@ function startUpdateChecks() {
 // registered if the user never opted into these settings, so failures here
 // are swallowed.
 //
-// Squirrel used to call this automatically via a --squirrel-uninstall argv
-// flag; WiX/MSI has no equivalent built-in hook we could verify without risk
-// of a malformed custom action breaking the whole installer build, so for
-// now this is wired to a manual "Kaldırmaya hazırla" button in Settings
-// (see ipcMain.handle('app:prepare-uninstall', ...)) that the user runs
-// before uninstalling, instead of firing automatically on uninstall.
-function cleanupPrivilegedComponentsOnUninstall() {
+// NSIS calls this automatically through Neutron.exe --prepare-uninstall
+// before deleting the application files. The Settings action remains as a
+// manual recovery path if an installation is removed in a nonstandard way.
+function cleanupPrivilegedComponentsOnUninstall(options = {}) {
   const dllPath = amsiDllPath();
   const amsiUnregisterLine = existsSync(dllPath)
-    ? `try { regsvr32 /s /u '${dllPath.replace(/'/g, "''")}' } catch {}`
-    : '';
+    ? amsiRegistrationCommand(dllPath, true)
+    : `Remove-Item -LiteralPath 'HKLM:\\SOFTWARE\\Microsoft\\AMSI\\Providers\\{ADACFA90-B877-414D-A818-2EA5291E290E}' -Recurse -Force -ErrorAction SilentlyContinue; ` +
+      `Remove-Item -LiteralPath 'HKLM:\\SOFTWARE\\Classes\\CLSID\\{ADACFA90-B877-414D-A818-2EA5291E290E}' -Recurse -Force -ErrorAction SilentlyContinue`;
   const wscUnregisterLine =
     `try { Get-CimInstance -Namespace root\\SecurityCenter2 -ClassName AntiVirusProduct ` +
     `-Filter "instanceGuid='${wscQuote(WSC_INSTANCE_GUID)}'" -ErrorAction SilentlyContinue | ` +
     `Remove-CimInstance -ErrorAction SilentlyContinue } catch {}`;
-  const serviceUnregisterLine =
-    `try { sc.exe stop '${SERVICE_NAME}' | Out-Null } catch {}; ` +
-    `try { sc.exe delete '${SERVICE_NAME}' | Out-Null } catch {}`;
+  const serviceUnregisterLine = serviceUninstallCommand(SERVICE_NAME);
   const firewallUnregisterLine =
     `try { Get-NetFirewallRule -Name 'Neutron-FW-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue } catch {}`;
   const psCommand = [
+    legacyDriverCleanupCommand(),
     amsiUnregisterLine,
-    `try { schtasks /delete /tn '${WATCHDOG_TASK_NAME}' /f } catch {}`,
+    watchdogDeleteCommand(WATCHDOG_TASK_NAME),
     wscUnregisterLine,
     serviceUnregisterLine,
     firewallUnregisterLine,
   ].filter(Boolean).join('; ');
-  runElevatedPowerShell(psCommand);
+  return runElevatedPowerShell(psCommand, options);
+}
+
+function machineDataDirectory() {
+  return path.join(process.env.ProgramData || 'C:\\ProgramData', 'Neutron', 'data');
+}
+
+async function writeSettingsToDataDirectory(settings, dataDirectory) {
+  for (const [key, value] of Object.entries(settings)) {
+    const result = await runEngineAction(
+      ['--setting-set', key, '--value-json', JSON.stringify(value)],
+      'settings-updated',
+      { env: { NEUTRON_DATA_DIR: dataDirectory } },
+    );
+    if (!result.ok) return { ...result, setting: key };
+  }
+  return { ok: true };
+}
+
+async function writeProvisionSettings(settings) {
+  for (const [key, value] of Object.entries(settings)) {
+    const result = await writeAppSetting(key, value);
+    if (!result.ok) return { ...result, setting: key };
+  }
+  return writeSettingsToDataDirectory(settings, machineDataDirectory());
+}
+
+// Called only by the elevated NSIS installer. It deliberately avoids a
+// second UAC prompt (elevated:false), persists the same settings for both
+// the desktop app and LocalSystem service, and reports every component.
+async function provisionDefaultSecurityComponents() {
+  const disabledSettings = {
+    amsi_protection_enabled: false,
+    watchdog_protection_enabled: false,
+    service_mode_enabled: false,
+    wsc_registration_enabled: false,
+  };
+  const settingsResult = await writeProvisionSettings(disabledSettings);
+  if (!settingsResult.ok) {
+    return { ok: false, stage: 'settings', message: settingsResult.message || 'Koruma ayarları kaydedilemedi.' };
+  }
+
+  const legacy = await runElevatedPowerShell(legacyDriverCleanupCommand(), { elevated: false });
+  if (!legacy.ok) return { ok: false, stage: 'legacy-driver-cleanup', results: { legacy }, message: legacy.message };
+
+  const results = {
+    amsi: await runElevatedRegsvr32(amsiDllPath(), false, { elevated: false }),
+    watchdog: {
+      ok: true,
+      skipped: true,
+      message: 'Windows servisi aktifken çakışan ikinci bir otomatik başlangıç oluşturulmaması için varsayılan kapalı.',
+    },
+    service: null,
+    // Remove only Neutron's obsolete experimental WMI entry, then leave
+    // Windows Security/Defender as the authoritative registered provider.
+    wsc: await unregisterWscProvider({ elevated: false }),
+    legacy,
+  };
+
+  if (results.amsi.ok) {
+    results.service = await installProtectionService({ elevated: false });
+  } else {
+    results.service = { ok: false, skipped: true, message: 'AMSI kurulamadığı için servis kurulumu başlatılmadı.' };
+  }
+
+  const failedCore = Object.entries(results).filter(([, result]) => !result.ok);
+  if (failedCore.length) {
+    if (results.service?.ok) await uninstallProtectionService({ elevated: false });
+    if (results.amsi?.ok) await runElevatedRegsvr32(amsiDllPath(), true, { elevated: false });
+    await writeProvisionSettings(disabledSettings);
+  } else {
+    const activationSettings = await writeProvisionSettings({
+      amsi_protection_enabled: true,
+      watchdog_protection_enabled: false,
+      service_mode_enabled: true,
+      wsc_registration_enabled: false,
+    });
+    results.settings = activationSettings;
+    if (!activationSettings.ok) {
+      failedCore.push(['settings', activationSettings]);
+      await uninstallProtectionService({ elevated: false });
+      await runElevatedRegsvr32(amsiDllPath(), true, { elevated: false });
+      await writeProvisionSettings(disabledSettings);
+    }
+  }
+  return {
+    ok: failedCore.length === 0,
+    results,
+    message: failedCore.length
+      ? failedCore.map(([name, result]) => `${name}: ${result.message}`).join(' | ')
+      : 'AMSI ve gecikmeli Windows servisi etkinleştirildi; Windows Güvenlik Merkezi Neutron eski kaydından arındırıldı.',
+  };
 }
 
 function resolveEngine(argumentsList = []) {
@@ -750,19 +824,19 @@ function resolveEngine(argumentsList = []) {
 }
 
 function engineEnvironment() {
-  const developmentInternalPaths = app.isPackaged
-    ? ''
+  const internalPaths = app.isPackaged
+    ? path.dirname(process.execPath)
     : ['src', 'tools', 'tests', 'runtime', 'build', 'venv', 'node_modules', 'data']
       .map((entry) => path.join(__dirname, '..', entry))
       .join(path.delimiter);
   return {
     ...process.env,
     // Geliştirmede proje verisi görünür kalır; kurulumda kullanıcıya ait yazılabilir alan kullanılır.
-    NEUTRON_DATA_DIR: app.isPackaged
+    NEUTRON_DATA_DIR: process.env.NEUTRON_DATA_DIR || (app.isPackaged
       ? path.join(app.getPath('userData'), 'data')
-      : path.join(__dirname, '..', 'data'),
+      : path.join(__dirname, '..', 'data')),
     NEUTRON_BUNDLED_DATA_DIR: path.join(__dirname, '..', 'data'),
-    NEUTRON_INTERNAL_PATHS: developmentInternalPaths,
+    NEUTRON_INTERNAL_PATHS: internalPaths,
     NEUTRON_ARCHIVE_HOST: process.execPath,
     NEUTRON_ARCHIVE_SCRIPT: path.join(__dirname, 'neutron-archive.cjs'),
     NEUTRON_ARCHIVE_RUN_AS_NODE: '1',
@@ -810,7 +884,8 @@ function runEngineAction(argumentsList, expectedType, options = {}) {
     const hasInput = typeof options.stdin === 'string' || Buffer.isBuffer(options.stdin);
     const child = spawn(engine.command, engine.arguments, {
       cwd: engine.cwd, windowsHide: true, shell: false,
-      env: engineEnvironment(), stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      env: { ...engineEnvironment(), ...(options.env || {}) },
+      stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     let output = '';
     child.stdout.setEncoding('utf8');
@@ -854,6 +929,62 @@ function createProtonUpdater() {
   });
 }
 
+function createFeatureUpdater() {
+  return new FeatureUpdater({
+    releasesUrl: process.env.NEUTRON_FEATURE_RELEASES_URL || process.env.NEUTRON_PROTON_RELEASES_URL || undefined,
+    publicKeyPath: path.join(__dirname, 'security', 'proton-signing-public.pem'),
+    packagedKeyPath: path.join(process.resourcesPath, 'runtime', 'proton', 'proton-runtime.key'),
+    featureDirectory: path.join(app.getPath('userData'), 'data', 'ml', 'ember2024'),
+    userAgent: `Neutron/${app.getVersion()}`,
+    appVersion: app.getVersion(),
+    allowLoopback: process.env.NEUTRON_FEATURE_ALLOW_LOOPBACK === '1',
+    onEvent: sendFeatureUpdateEvent,
+  });
+}
+
+function featureUpdateMessage(error) {
+  if (['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'HTTP_ERROR', 'TOO_MANY_REDIRECTS', 'RATE_LIMITED'].includes(error?.code)) {
+    return 'Feature Update service is temporarily unavailable.';
+  }
+  if (error?.code === 'APP_TOO_OLD') return 'This Feature Update requires a newer Neutron version.';
+  if (['INVALID_SIGNATURE_DOCUMENT', 'INVALID_MANIFEST', 'VERSION_MISMATCH', 'INVALID_DECRYPTION_KEY', 'MISSING_DECRYPTION_KEY'].includes(error?.code)) {
+    return 'Feature Update could not be verified.';
+  }
+  return 'Feature Update could not be installed. Please try again later.';
+}
+
+async function performFeatureUpdate() {
+  if (featureUpdatePromise) return featureUpdatePromise;
+  featureUpdatePromise = (async () => {
+    try {
+      const updater = createFeatureUpdater();
+      const check = await updater.check();
+      if (!check.available) {
+        const status = updater.status();
+        sendFeatureUpdateEvent({ stage: 'current', version: check.latestVersion || status.version });
+        return {
+          ...status,
+          updated: false,
+          message: check.reason === 'no-release'
+            ? 'No Machine Learning Feature Update has been published yet.'
+            : 'Machine Learning Feature Update is current.',
+        };
+      }
+      return await updater.downloadAndInstall(check);
+    } catch (error) {
+      console.error('Feature Update failed:', error);
+      const message = featureUpdateMessage(error);
+      sendFeatureUpdateEvent({ stage: 'error', message });
+      return { ok: false, code: error?.code || 'FEATURE_UPDATE_FAILED', message };
+    }
+  })();
+  try {
+    return await featureUpdatePromise;
+  } finally {
+    featureUpdatePromise = null;
+  }
+}
+
 function protonUpdateMessage(error) {
   const connectionErrors = new Set([
     'NETWORK_ERROR',
@@ -874,17 +1005,20 @@ function protonUpdateMessage(error) {
   return 'Proton güncellenemedi. Lütfen daha sonra yeniden deneyin.';
 }
 
-async function performProtonUpdate() {
+async function performProtonUpdate(options = {}) {
   if (protonUpdatePromise) return protonUpdatePromise;
   protonUpdatePromise = (async () => {
     let restartProtection = false;
     try {
+      await writeAppSetting('signature_update_last_check_at', Date.now());
       const status = await runEngineAction(['--signature-status'], 'signature-status');
       if (!status.ok) throw new Error(status.message || 'Proton sürümü okunamadı.');
       const updater = createProtonUpdater();
       const check = await updater.check(status.version || '1.00.001');
       if (!check.available) {
         sendProtonUpdateEvent({ stage: 'current', version: check.latestVersion || status.version });
+        await writeAppSetting('signature_update_last_success_at', Date.now());
+        await writeAppSetting('signature_update_last_error', '');
         return {
           ok: true,
           updated: false,
@@ -906,16 +1040,29 @@ async function performProtonUpdate() {
       );
       if (!installed.ok) throw new Error(installed.message || 'Proton motor tarafından kabul edilmedi.');
       let archiveWarning = null;
+      let archived = null;
       try {
-        updater.archiveVerifiedUpdate(downloaded);
+        archived = updater.archiveVerifiedUpdate(downloaded);
       } catch {
         archiveWarning = 'Güncelleme tamamlandı ancak yerel yedek oluşturulamadı.';
       }
+      if (archived && appSettings.service_mode_enabled && serviceConnected) {
+        const serviceUpdate = sendServiceCommand({
+          cmd: 'install_proton_archive',
+          package_path: path.join(updater.updateDirectory, archived.package_file),
+          signature_path: path.join(updater.updateDirectory, archived.signature_file),
+          version: downloaded.version,
+        });
+        if (!serviceUpdate.ok) archiveWarning = 'Güncelleme masaüstü motoruna kuruldu; sistem servisine aktarılamadı.';
+      }
       sendProtonUpdateEvent({ stage: 'complete', version: downloaded.version });
+      await writeAppSetting('signature_update_last_success_at', Date.now());
+      await writeAppSetting('signature_update_last_error', '');
       return { ...installed, updated: true, version: downloaded.version, archive_warning: archiveWarning };
     } catch (error) {
       console.error('Proton update failed:', error);
       const message = protonUpdateMessage(error);
+      await writeAppSetting('signature_update_last_error', message);
       sendProtonUpdateEvent({ stage: 'error', message });
       return { ok: false, code: error?.code || 'PROTON_UPDATE_FAILED', message };
     } finally {
@@ -926,6 +1073,24 @@ async function performProtonUpdate() {
     return await protonUpdatePromise;
   } finally {
     protonUpdatePromise = null;
+  }
+}
+
+async function rollbackProtonUpdate(version = '') {
+  const restartProtection = Boolean(protectionWatcher);
+  try {
+    if (restartProtection) stopProtectionWatcher({ silent: true });
+    const args = ['--rollback-proton'];
+    if (version) args.push(String(version));
+    const result = await runEngineAction(args, 'signature-rolled-back');
+    if (result.ok) {
+      sendProtonUpdateEvent({ stage: 'rolled-back', version: result.version });
+      await writeAppSetting('signature_update_last_success_at', Date.now());
+      await writeAppSetting('signature_update_last_error', '');
+    }
+    return result;
+  } finally {
+    if (restartProtection && !protectionWatcher) startProtectionWatcher();
   }
 }
 
@@ -1087,6 +1252,25 @@ function startScheduledScanTimer() {
   setTimeout(runScheduledScanIfDue, 2 * 60 * 1000);
 }
 
+const SIGNATURE_UPDATE_TIMER_INTERVAL_MS = 60 * 60 * 1000;
+let signatureUpdateTimer = null;
+
+function runAutomaticSignatureUpdateIfDue() {
+  if (!appSettings.signature_auto_update_enabled || protonUpdatePromise) return;
+  const intervalHours = Math.max(1, Math.min(Number(appSettings.signature_update_interval_hours) || 6, 24));
+  const lastCheckAt = Number(appSettings.signature_update_last_check_at) || 0;
+  if (Date.now() - lastCheckAt < intervalHours * 60 * 60 * 1000) return;
+  performProtonUpdate({ automatic: true }).catch((error) => {
+    console.error('Automatic Proton update failed:', error);
+  });
+}
+
+function startAutomaticSignatureUpdateTimer() {
+  if (signatureUpdateTimer) return;
+  signatureUpdateTimer = setInterval(runAutomaticSignatureUpdateIfDue, SIGNATURE_UPDATE_TIMER_INTERVAL_MS);
+  setTimeout(runAutomaticSignatureUpdateIfDue, 90 * 1000);
+}
+
 function protectionStatus() {
   return {
     ok: true,
@@ -1103,6 +1287,8 @@ function protectionStatus() {
     amsiConfigured: Boolean(appSettings.amsi_protection_enabled),
     watchdogConfigured: Boolean(appSettings.watchdog_protection_enabled),
     wscConfigured: Boolean(appSettings.wsc_registration_enabled),
+    wscAvailable: false,
+    wscMessage: 'Windows Güvenlik Merkezi ve Microsoft Defender normal durumda bırakılır; eski Neutron test kaydı kurulumda temizlenir.',
     networkEnabled: Boolean(networkWatcher),
     networkReady: Boolean(networkWatcher?.ready),
     networkConfigured: Boolean(appSettings.network_protection_enabled),
@@ -1519,7 +1705,9 @@ function startProtectionWatcher() {
           updateTrayMenu();
         }
         sendProtectionEvent(event);
-        if (event.type === 'watch-finding') showFindingNotification(event);
+        if (event.type === 'watch-finding' && shouldNotifyWatchFinding(event)) {
+          showFindingNotification(event);
+        }
       } catch {
         sendProtectionEvent({ type: 'watch-error', message: 'Koruma motorundan geçersiz yanıt alındı.' });
       }
@@ -1582,6 +1770,8 @@ async function updateApplicationSetting(key, value) {
     'watch_paths',
     'scan_max_files',
     'scheduled_scan_enabled',
+    'signature_auto_update_enabled',
+    'signature_update_interval_hours',
   ]);
   if (!allowedKeys.has(key)) return { ok: false, message: 'Desteklenmeyen ayar.' };
 
@@ -1678,6 +1868,7 @@ async function createWindow() {
   }
   startUpdateChecks();
   startScheduledScanTimer();
+  startAutomaticSignatureUpdateTimer();
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
@@ -1793,40 +1984,40 @@ ipcMain.handle('protection:status', () => requireLicense() || protectionStatus()
 ipcMain.handle('protection:amsi-register', async () => {
   const licenseError = requireLicense();
   if (licenseError) return licenseError;
-  const result = runElevatedRegsvr32(amsiDllPath(), false);
+  const result = await runElevatedRegsvr32(amsiDllPath(), false);
   if (!result.ok) return result;
   return updateApplicationSetting('amsi_protection_enabled', true);
 });
 ipcMain.handle('protection:amsi-unregister', async () => {
   await updateApplicationSetting('amsi_protection_enabled', false);
-  return runElevatedRegsvr32(amsiDllPath(), true);
+  return await runElevatedRegsvr32(amsiDllPath(), true);
 });
 ipcMain.handle('protection:watchdog-register', async () => {
   const licenseError = requireLicense();
   if (licenseError) return licenseError;
-  const result = registerWatchdogTask();
+  const result = await registerWatchdogTask();
   if (!result.ok) return result;
   return updateApplicationSetting('watchdog_protection_enabled', true);
 });
 ipcMain.handle('protection:watchdog-unregister', async () => {
   await updateApplicationSetting('watchdog_protection_enabled', false);
-  return unregisterWatchdogTask();
+  return await unregisterWatchdogTask();
 });
 ipcMain.handle('protection:wsc-register', async () => {
   const licenseError = requireLicense();
   if (licenseError) return licenseError;
-  const result = registerWscProvider();
+  const result = await registerWscProvider();
   if (!result.ok) return result;
   return updateApplicationSetting('wsc_registration_enabled', true);
 });
 ipcMain.handle('protection:wsc-unregister', async () => {
   await updateApplicationSetting('wsc_registration_enabled', false);
-  return unregisterWscProvider();
+  return await unregisterWscProvider();
 });
 ipcMain.handle('protection:service-install', async () => {
   const licenseError = requireLicense();
   if (licenseError) return licenseError;
-  const result = installProtectionService();
+  const result = await installProtectionService();
   if (!result.ok) return result;
   const settingResult = await updateApplicationSetting('service_mode_enabled', true);
   if (settingResult.ok) connectServicePipe();
@@ -1835,7 +2026,7 @@ ipcMain.handle('protection:service-install', async () => {
 ipcMain.handle('protection:service-uninstall', async () => {
   await updateApplicationSetting('service_mode_enabled', false);
   disconnectServicePipe();
-  return uninstallProtectionService();
+  return await uninstallProtectionService();
 });
 ipcMain.handle('protection:service-status', () => ({
   ok: true,
@@ -1850,9 +2041,8 @@ ipcMain.handle('app:check-for-update', () => {
   checkForAppUpdate();
   return { ok: true, latestUpdateInfo };
 });
-ipcMain.handle('app:prepare-uninstall', () => {
-  cleanupPrivilegedComponentsOnUninstall();
-  return { ok: true };
+ipcMain.handle('app:prepare-uninstall', async () => {
+  return await cleanupPrivilegedComponentsOnUninstall();
 });
 ipcMain.handle('web:check-url', (_event, url) => requireLicense() || runEngineAction(['--check-url', String(url || '')], 'url-reputation'));
 ipcMain.handle('web:open-url', async (_event, url) => {
@@ -1863,10 +2053,36 @@ ipcMain.handle('web:open-url', async (_event, url) => {
 });
 ipcMain.handle('protection:history', () => runEngineAction(['--protection-history', '--limit', '20'], 'protection-history'));
 ipcMain.handle('protection:action', async (_event, itemId, action) => {
-  if (!Number.isInteger(itemId) || itemId < 1 || !['quarantine', 'trust', 'ignore'].includes(action)) {
+  if (!Number.isInteger(itemId) || itemId < 1 || !['remediate', 'quarantine', 'trust', 'trust-publisher', 'ignore'].includes(action)) {
     return { ok: false, message: 'Geçersiz tehdit işlemi.' };
   }
-  const restartProtection = action === 'trust' && Boolean(protectionWatcher);
+  if (action === 'remediate') {
+    const restartProtection = Boolean(protectionWatcher);
+    if (restartProtection) stopProtectionWatcher({ silent: true });
+    try {
+      const result = await runEngineAction(['--incident-remediate', String(itemId)], 'incident-remediated');
+      if (!result.ok) return result;
+      const ruleName = `Neutron-Incident-${result.incident_id}-Outbound`;
+      const firewall = await runElevatedPowerShell(
+        firewallAddCommand(ruleName, result.target_path, 'block', 'out'),
+      );
+      if (!firewall.ok) {
+        return {
+          ...result,
+          partial: true,
+          message: `Dosya ve süreç müdahalesi tamamlandı; ağ engelleme uygulanamadı: ${firewall.message}`,
+        };
+      }
+      const recorded = await runEngineAction(
+        ['--incident-record-firewall', String(result.incident_id), '--value-json', JSON.stringify({ rule_name: ruleName, target_path: result.target_path })],
+        'incident-firewall-recorded',
+      );
+      return { ...result, firewall: recorded.ok, rule_name: ruleName };
+    } finally {
+      if (restartProtection && !protectionWatcher) startProtectionWatcher();
+    }
+  }
+  const restartProtection = ['trust', 'trust-publisher'].includes(action) && Boolean(protectionWatcher);
   if (restartProtection) stopProtectionWatcher({ silent: true });
   try {
     return await runEngineAction(
@@ -1876,6 +2092,29 @@ ipcMain.handle('protection:action', async (_event, itemId, action) => {
   } finally {
     if (restartProtection && !protectionWatcher) startProtectionWatcher();
   }
+});
+ipcMain.handle('incident:rollback', async (_event, incidentId) => {
+  if (!Number.isInteger(incidentId) || incidentId < 1) return { ok: false, message: 'Geçersiz müdahale kaydı.' };
+  const status = await runEngineAction(['--incident-status', String(incidentId)], 'incident-status');
+  if (!status.ok) return status;
+  const firewallActions = (Array.isArray(status.actions) ? status.actions : []).filter(
+    (entry) => entry.action_type === 'firewall-block' && entry.state === 'applied',
+  );
+  for (const action of firewallActions) {
+    let detail = {};
+    try { detail = JSON.parse(action.after_json || '{}'); } catch { detail = {}; }
+    if (!detail.rule_name) continue;
+    const removed = await runElevatedPowerShell(
+      `try { Remove-NetFirewallRule -Name '${psQuoteSingle(detail.rule_name)}' -ErrorAction Stop } catch {}`,
+    );
+    if (!removed.ok) return removed;
+    const finalized = await runEngineAction(
+      ['--incident-finalize-external-rollback', String(action.id)],
+      'incident-external-rollback-finalized',
+    );
+    if (!finalized.ok) return finalized;
+  }
+  return runEngineAction(['--incident-rollback', String(incidentId)], 'incident-rolled-back');
 });
 ipcMain.handle('signature:status', () => runEngineAction(['--signature-status'], 'signature-status'));
 ipcMain.handle('engine:status', async () => {
@@ -1908,6 +2147,9 @@ ipcMain.handle('cache:clear', async () => {
   }
 });
 ipcMain.handle('signature:update', () => performProtonUpdate());
+ipcMain.handle('signature:rollback', (_event, version) => rollbackProtonUpdate(version));
+ipcMain.handle('feature:status', () => createFeatureUpdater().status());
+ipcMain.handle('feature:update', () => performFeatureUpdate());
 ipcMain.handle('settings:get', () => readAppSettings());
 ipcMain.handle('settings:update', (_event, key, value) => updateApplicationSetting(key, value));
 ipcMain.handle('settings:choose-watch-folder', async (event) => {
@@ -1990,7 +2232,7 @@ ipcMain.handle('firewall:add-rule', async (_event, programPath, action, directio
     'firewall-rule-added',
   );
   if (!dbResult.ok) return dbResult;
-  const elevated = runElevatedPowerShell(
+  const elevated = await runElevatedPowerShell(
     firewallAddCommand(dbResult.rule_name, dbResult.program_path, safeAction, safeDirection),
   );
   if (!elevated.ok) {
@@ -2005,7 +2247,7 @@ ipcMain.handle('firewall:remove-rule', async (_event, ruleId, ruleName) => {
   if (!Number.isInteger(ruleId) || ruleId < 1 || typeof ruleName !== 'string' || !ruleName.trim()) {
     return { ok: false, message: 'Geçersiz güvenlik duvarı kaydı.' };
   }
-  const elevated = runElevatedPowerShell(firewallRemoveCommand(ruleName));
+  const elevated = await runElevatedPowerShell(firewallRemoveCommand(ruleName));
   if (!elevated.ok) return elevated;
   return runEngineAction(['--firewall-remove-rule', String(ruleId)], 'firewall-rule-removed');
 });
@@ -2014,7 +2256,7 @@ ipcMain.handle('firewall:toggle-rule', async (_event, ruleId, ruleName, enabled)
     return { ok: false, message: 'Geçersiz güvenlik duvarı kaydı.' };
   }
   const nextEnabled = Boolean(enabled);
-  const elevated = runElevatedPowerShell(firewallSetEnabledCommand(ruleName, nextEnabled));
+  const elevated = await runElevatedPowerShell(firewallSetEnabledCommand(ruleName, nextEnabled));
   if (!elevated.ok) return elevated;
   return runEngineAction(
     ['--firewall-toggle-rule', String(ruleId), '--value-json', JSON.stringify(nextEnabled)],
@@ -2041,7 +2283,7 @@ ipcMain.handle('startup:disable', async (_event, item) => {
   const command = dbResult.source === 'registry'
     ? startupRegistryDeleteCommand(dbResult.hive, dbResult.key_path, dbResult.value_name)
     : startupMoveCommand(dbResult.original_path, dbResult.stored_path);
-  const elevated = runElevatedPowerShell(command);
+  const elevated = await runElevatedPowerShell(command);
   if (!elevated.ok) {
     await runEngineAction(['--startup-cancel-disable', String(dbResult.id)], 'startup-item-cancelled');
     return elevated;
@@ -2055,15 +2297,81 @@ ipcMain.handle('startup:restore', async (_event, itemId) => {
   const command = result.source === 'registry'
     ? startupRegistrySetCommand(result.hive, result.key_path, result.value_name, result.original_path)
     : startupMoveCommand(result.stored_path, result.original_path);
-  const elevated = runElevatedPowerShell(command);
+  const elevated = await runElevatedPowerShell(command);
   if (!elevated.ok) return elevated;
   return runEngineAction(['--startup-finalize-restore', String(itemId)], 'startup-item-finalized');
 });
 ipcMain.handle('vulnerability:scan', () => runEngineAction(['--check-vulnerable-software'], 'vulnerable-software'));
 
-app.whenReady().then(createWindow).catch((error) => {
-  console.error('Neutron startup failed:', error);
-});
+async function installLocalProtonArchiveForService() {
+  const flagIndex = process.argv.indexOf('--install-proton-archive');
+  const packagePath = process.argv[flagIndex + 1];
+  const signaturePath = process.argv[flagIndex + 2];
+  const expectedVersion = process.argv[flagIndex + 3];
+  if (!packagePath || !signaturePath || !expectedVersion) {
+    return { ok: false, message: 'Proton bakım argümanları eksik.' };
+  }
+  const updater = createProtonUpdater();
+  const verified = updater.verifyLocalArchive(packagePath, signaturePath, expectedVersion);
+  return runEngineAction(
+    ['--install-proton-stdin'], 'signature-updated', { stdin: JSON.stringify(verified.payload) },
+  );
+}
+
+function activateSetupLicenseFile() {
+  const flagIndex = process.argv.indexOf('--activate-license-file');
+  const sourcePath = process.argv[flagIndex + 1];
+  if (!sourcePath || !existsSync(sourcePath)) {
+    return { ok: false, message: 'Kurulum lisans dosyası bulunamadı.' };
+  }
+  try {
+    const key = readFileSync(sourcePath, 'utf8').trim();
+    return saveLicense(key, { machineWide: true });
+  } catch (error) {
+    return { ok: false, message: error.message };
+  }
+}
+
+if (isInstallProtonArchiveMode) {
+  app.whenReady().then(async () => {
+    const result = await installLocalProtonArchiveForService();
+    process.stdout.write(`${JSON.stringify({ type: 'service-proton-maintenance', ...result })}\n`);
+    app.exit(result.ok ? 0 : 1);
+  }).catch((error) => {
+    console.error('Neutron Proton service maintenance failed:', error);
+    app.exit(1);
+  });
+} else if (isActivateLicenseFileMode) {
+  app.whenReady().then(() => {
+    const result = activateSetupLicenseFile();
+    process.stdout.write(`${JSON.stringify({ type: 'setup-license-activated', ...result })}\n`);
+    app.exit(result.ok ? 0 : 1);
+  }).catch((error) => {
+    console.error('Neutron setup license activation failed:', error);
+    app.exit(1);
+  });
+} else if (isProvisionSecurityMode) {
+  app.whenReady().then(async () => {
+    const result = await provisionDefaultSecurityComponents();
+    process.stdout.write(`${JSON.stringify({ type: 'security-provisioned', ...result })}\n`);
+    app.exit(result.ok ? 0 : 1);
+  }).catch((error) => {
+    console.error('Neutron security provisioning failed:', error);
+    app.exit(1);
+  });
+} else if (isPrepareUninstallMode) {
+  app.whenReady().then(async () => {
+    const result = await cleanupPrivilegedComponentsOnUninstall({ elevated: false });
+    app.exit(result.ok ? 0 : 1);
+  }).catch((error) => {
+    console.error('Neutron uninstall cleanup failed:', error);
+    app.exit(1);
+  });
+} else {
+  app.whenReady().then(createWindow).catch((error) => {
+    console.error('Neutron startup failed:', error);
+  });
+}
 
 app.on('window-all-closed', () => {
   // The tray owns the background lifecycle; explicit Exit is required.

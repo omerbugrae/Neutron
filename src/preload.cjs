@@ -36,12 +36,16 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   openSafeUrl: (url) => ipcRenderer.invoke('web:open-url', url),
   getProtectionHistory: () => ipcRenderer.invoke('protection:history'),
   applyProtectionAction: (itemId, action) => ipcRenderer.invoke('protection:action', itemId, action),
+  rollbackIncident: (incidentId) => ipcRenderer.invoke('incident:rollback', incidentId),
   getEngineStatus: () => ipcRenderer.invoke('engine:status'),
   getSignatureStatus: () => ipcRenderer.invoke('signature:status'),
   getYaraStatus: () => ipcRenderer.invoke('yara:status'),
   getAnalysisCacheStatus: () => ipcRenderer.invoke('cache:status'),
   clearAnalysisCache: () => ipcRenderer.invoke('cache:clear'),
   updateSignatures: () => ipcRenderer.invoke('signature:update'),
+  rollbackSignatures: (version) => ipcRenderer.invoke('signature:rollback', version),
+  getFeatureUpdateStatus: () => ipcRenderer.invoke('feature:status'),
+  updateFeatures: () => ipcRenderer.invoke('feature:update'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSetting: (key, value) => ipcRenderer.invoke('settings:update', key, value),
   chooseWatchFolder: () => ipcRenderer.invoke('settings:choose-watch-folder'),
@@ -83,5 +87,10 @@ contextBridge.exposeInMainWorld('neutronEngine', {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('proton:update-event', listener);
     return () => ipcRenderer.removeListener('proton:update-event', listener);
+  },
+  onFeatureUpdateEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('feature:update-event', listener);
+    return () => ipcRenderer.removeListener('feature:update-event', listener);
   },
 });

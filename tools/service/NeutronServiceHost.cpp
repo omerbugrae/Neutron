@@ -63,8 +63,14 @@ void ConfigureServiceEnvironment() {
     std::wstring path(modulePath);
     size_t lastSlash = path.find_last_of(L"\\/");
     if (lastSlash != std::wstring::npos) {
-        std::wstring bundledDataDir = path.substr(0, lastSlash) + L"\\..\\..\\..\\data";
+        std::wstring serviceDir = path.substr(0, lastSlash);
+        std::wstring bundledDataDir = serviceDir + L"\\..\\..\\..\\app\\data";
         SetEnvironmentVariableW(L"NEUTRON_BUNDLED_DATA_DIR", bundledDataDir.c_str());
+        // Exclude the exact installed Neutron tree from file, behavior and
+        // memory scans. Four levels up from runtime\service\x64 is the app
+        // installation root containing Neutron.exe.
+        std::wstring installRoot = serviceDir + L"\\..\\..\\..\\..";
+        SetEnvironmentVariableW(L"NEUTRON_INTERNAL_PATHS", installRoot.c_str());
     }
 }
 

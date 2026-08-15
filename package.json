@@ -1,7 +1,7 @@
 {
   "name": "neutron",
   "productName": "Neutron",
-  "version": "0.1.0",
+  "version": "0.31.0",
   "private": true,
   "description": "Neutron desktop security application",
   "main": "src/main.cjs",
@@ -15,12 +15,12 @@
     "make": "electron-forge make",
     "make:win:x64": "electron-forge make --platform=win32 --arch=x64",
     "make:win:ia32": "electron-forge make --platform=win32 --arch=ia32",
-    "setup:test": "node tools/build-test-setup.cjs",
     "make:proton": "node tools/proton/make-with-runtime-key.cjs",
     "icon:build": "electron tools/build-windows-icon.cjs",
     "installer-images:build": "electron tools/build-installer-images.cjs",
     "archive:check": "node --check src/neutron-archive.cjs",
     "archive:version": "node src/neutron-archive.cjs --version",
+    "engine:models:verify": "node tools/engine/verify-ember-models.cjs",
     "engine:build": ".\\venv\\Scripts\\python.exe -m PyInstaller --noconfirm --clean --distpath runtime\\engine\\x64 --workpath build\\pyinstaller tools\\engine\\neutron-engine.spec",
     "engine:verify": "node tools/engine/verify-engine.cjs x64",
     "engine:version": ".\\runtime\\engine\\x64\\neutron-engine\\neutron-engine.exe --engine-version --json-lines",
@@ -28,6 +28,8 @@
     "amsi:verify": "node tools/amsi/verify-amsi.cjs x64",
     "service:build": "powershell -ExecutionPolicy Bypass -File tools\\service\\build.ps1 x64",
     "service:verify": "node tools/service/verify-service.cjs x64",
+    "security:provision-test": "node tools/security/provision-self-test.cjs",
+    "security:av-core-test": ".\\venv\\Scripts\\python.exe tools\\security\\av-core-self-test.py",
     "proton:keygen": "node tools/proton/keygen.cjs",
     "proton:pack": "node tools/proton/pack.cjs",
     "proton:verify": "node tools/proton/verify.cjs",
@@ -35,16 +37,21 @@
     "proton:update-test": "node tools/proton/updater-self-test.cjs",
     "proton:publish": "node tools/proton/publish.cjs",
     "proton:publish-test": "node tools/proton/publish-self-test.cjs",
+    "feature:pack": "node tools/feature-update/pack.cjs",
+    "feature:verify": "node tools/feature-update/verify.cjs",
+    "feature:publish": "node tools/feature-update/publish.cjs",
     "proton:collect": "node tools/proton/collect-abusech.cjs",
     "proton:collect-test": "node tools/proton/collect-self-test.cjs",
     "proton:sync": "node tools/proton/collect-and-publish.cjs",
     "license:keygen": "node tools/license/keygen.cjs",
     "license:issue": "node tools/license/issue.cjs",
-    "license:test": "node tools/license/self-test.cjs"
+    "license:gui": ".\\venv\\Scripts\\python.exe tools\\license\\gui.py",
+    "license:test": "node tools/license/self-test.cjs",
+    "license:installer-test": "node tools/license/installer-self-test.cjs"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
-    "@electron-forge/maker-wix": "^7.11.2",
+    "@electron-forge/maker-base": "^7.11.2",
     "@electron-forge/publisher-github": "^7.11.2",
     "electron": "^43.3.0",
     "patch-package": "^8.0.1"
@@ -74,7 +81,12 @@
           "^/runtime($|/)",
           "^/tests($|/)",
           "^/tools($|/)",
-          "^/data/neutron\\.db$"
+          "^/data/(?!rules(?:/|$)|ml(?:/|$))",
+          "^/data/ml/(?!ember2024(?:/|$))",
+          "^/data/ml/ember2024/(?!ensemble\\.json$|MODEL_PROVENANCE\\.json$)",
+          "^/(?:\\.claude|\\.github|docs|patches)(?:$|/)",
+          "^/(?:bypass\\.md|crtlisence\\.bat|lisence\\.ps1|plan\\.md|requirements(?:-ml)?-build\\.txt|requirements\\.txt|nsis-.*\\.(?:exe|zip))$",
+          "^/src/__pycache__(?:$|/)"
         ],
         "executableName": "Neutron",
         "icon": "assets/neutron",
@@ -88,19 +100,8 @@
       },
       "makers": [
         {
-          "name": "@electron-forge/maker-wix",
-          "config": {
-            "language": 1033,
-            "manufacturer": "Neutron",
-            "icon": "assets/neutron.ico",
-            "ui": {
-              "chooseDirectory": true,
-              "images": {
-                "background": "C:\\Users\\omerb\\Desktop\\Neutron\\assets\\installer-dialog.bmp",
-                "banner": "C:\\Users\\omerb\\Desktop\\Neutron\\assets\\installer-banner.bmp"
-              }
-            }
-          }
+          "name": "./tools/forge-maker-nsis.cjs",
+          "config": {}
         }
       ],
       "publishers": [
@@ -116,8 +117,5 @@
         }
       ]
     }
-  },
-  "allowScripts": {
-    "electron-winstaller@5.4.4": true
   }
 }

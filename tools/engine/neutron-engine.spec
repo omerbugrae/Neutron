@@ -1,6 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import importlib.util
+
+from PyInstaller.utils.hooks import collect_all
 
 project_root = Path(SPECPATH).parents[1]
 engine_source = project_root / "src" / "engine.py"
@@ -14,11 +17,27 @@ hidden_imports = [
     "watchdog.observers.winapi",
 ]
 
+required_ml_packages = ["lightgbm", "thrember"]
+missing_ml_packages = [name for name in required_ml_packages if importlib.util.find_spec(name) is None]
+if missing_ml_packages:
+    raise SystemExit(
+        "ML build paketleri eksik: " + ", ".join(missing_ml_packages)
+        + ". Yalnız build ortamında requirements-ml-build.txt kullanılmalıdır."
+    )
+
+ml_datas = []
+ml_binaries = []
+for package_name in required_ml_packages:
+    package_datas, package_binaries, package_hidden_imports = collect_all(package_name)
+    ml_datas += package_datas
+    ml_binaries += package_binaries
+    hidden_imports += package_hidden_imports
+
 analysis = Analysis(
     [str(engine_source)],
     pathex=[str(project_root / "src")],
-    binaries=[],
-    datas=[],
+    binaries=ml_binaries,
+    datas=ml_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

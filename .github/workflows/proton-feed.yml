@@ -4,13 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Yeni Proton sürümü (ör. 1.00.007)'
-        required: true
+        description: 'Proton sürümü; boş bırakılırsa yayımlanmış son sürümden türetilir (bkz. docs/proton-versioning.md)'
+        required: false
         type: string
       limit:
-        description: 'Kaynak başına en fazla kayıt (1-1000)'
+        description: 'URLhaus kaynağı başına en fazla kayıt (1-1000)'
         required: false
-        default: '500'
+        default: '1000'
+        type: string
+      bulk_limit:
+        description: 'MalwareBazaar toplu tarama sorgusu başına kayıt (0-1000, 0 = kapalı)'
+        required: false
+        default: '1000'
+        type: string
+      threatfox_days:
+        description: 'ThreatFox geriye dönük pencere, gün (1-7)'
+        required: false
+        default: '7'
         type: string
   schedule:
     - cron: '17 3 * * *'
@@ -31,7 +41,11 @@ jobs:
       NEUTRON_PROTON_SIGNING_PRIVATE_KEY: ${{ secrets.NEUTRON_PROTON_SIGNING_PRIVATE_KEY }}
       NEUTRON_PROTON_SIGNING_PUBLIC_KEY: ${{ secrets.NEUTRON_PROTON_SIGNING_PUBLIC_KEY }}
       PROTON_VERSION: ${{ inputs.version }}
-      PROTON_LIMIT: ${{ inputs.limit || '500' }}
+      PROTON_LIMIT: ${{ inputs.limit || '1000' }}
+      PROTON_BULK_LIMIT: ${{ inputs.bulk_limit || '1000' }}
+      PROTON_THREATFOX_DAYS: ${{ inputs.threatfox_days || '7' }}
+      # Hem sürüm türetme (gh api) hem de yayın oluşturma (gh release create) için gerekli.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,11 +61,6 @@ jobs:
           test -n "$NEUTRON_PROTON_SIGNING_PRIVATE_KEY"
           test -n "$NEUTRON_PROTON_SIGNING_PUBLIC_KEY"
 
-      - name: Calculate scheduled version
-        if: ${{ github.event_name == 'schedule' }}
-        shell: bash
-        run: echo "PROTON_VERSION=1.$(date -u +%y).$(date -u +%j)" >> "$GITHUB_ENV"
-
       - name: Write publishing keys
         shell: bash
         run: |
@@ -64,13 +73,35 @@ jobs:
       - name: Collect, verify, sign and publish Proton
         shell: bash
         run: |
+          # Sürüm girilmemişse bayrak hiç eklenmez; araç yayımlanmış son sürümden türetir.
+          version_argument=()
+          if [ -n "$PROTON_VERSION" ]; then version_argument=(--version "$PROTON_VERSION"); fi
           node tools/proton/collect-and-publish.cjs \
             --source tools/proton/production-base/definitions.json \
-            --version "$PROTON_VERSION" \
+            "${version_argument[@]}" \
             --limit "$PROTON_LIMIT" \
+            --bulk-limit "$PROTON_BULK_LIMIT" \
+            --threatfox-days "$PROTON_THREATFOX_DAYS" \
             --keys "$RUNNER_TEMP/proton-keys" \
             --output "$RUNNER_TEMP/proton-release" \
-            --repo "${{ github.repository }}"
+            --repo "${{ github.repository }}" \
+            --persist-base
+
+      # --persist-base yayimlanan adayi tools/proton/production-base/definitions.json uzerine yazdi;
+      # bunu commit etmezsek bir sonraki calisma yine eski statik tabandan baslar ve surumler
+      # birbirinin ust kumesi olma garantisini kaybeder (bkz. docs/proton-versioning.md).
+      - name: Commit accumulated base
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git diff --quiet -- tools/proton/production-base/definitions.json; then
+            echo 'Kaynak dosyada degisiklik yok, commit atlanacak.'
+          else
+            git add tools/proton/production-base/definitions.json
+            git commit -m "Proton kaynagini yayimlanan surume gore guncelle [skip ci]"
+            git push
+          fi
 
       - name: Remove publishing keys
         if: always()

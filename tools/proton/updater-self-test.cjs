@@ -144,9 +144,34 @@ async function main() {
     const retainedStatus = JSON.parse(statusAfterRejection.stdout.trim().split(/\r?\n/).at(-1));
     assert.equal(retainedStatus.version, '1.00.002', 'Reddedilen paket kurulu sürümü değiştirmemeli.');
 
+    const nextPayload = { ...downloaded.payload, version: '1.00.003' };
+    const nextInstall = spawnSync(python, [enginePath, '--install-proton-stdin', '--json-lines'], {
+      cwd: path.dirname(enginePath),
+      env: { ...process.env, NEUTRON_DATA_DIR: dataDirectory },
+      input: JSON.stringify(nextPayload), encoding: 'utf8', windowsHide: true,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    assert.equal(nextInstall.status, 0, nextInstall.stderr || nextInstall.stdout);
+    const rollback = spawnSync(python, [enginePath, '--rollback-proton', '1.00.002', '--json-lines'], {
+      cwd: path.dirname(enginePath),
+      env: { ...process.env, NEUTRON_DATA_DIR: dataDirectory },
+      encoding: 'utf8', windowsHide: true,
+    });
+    assert.equal(rollback.status, 0, rollback.stderr || rollback.stdout);
+    const rollbackEvent = JSON.parse(rollback.stdout.trim().split(/\r?\n/).at(-1));
+    assert.equal(rollbackEvent.type, 'signature-rolled-back');
+    assert.equal(rollbackEvent.version, '1.00.002');
+    assert.ok(rollbackEvent.update_history.some((entry) => entry.action === 'rollback'));
+
     const archived = updater.archiveVerifiedUpdate(downloaded);
     assert.equal(archived.version, '1.00.002');
     assert.equal(fs.existsSync(path.join(testRoot, 'archive', archived.package_file)), true);
+    const localVerified = updater.verifyLocalArchive(
+      path.join(testRoot, 'archive', archived.package_file),
+      path.join(testRoot, 'archive', archived.signature_file),
+      '1.00.002',
+    );
+    assert.deepEqual(localVerified.payload, payload);
     const currentCheck = await updater.check('1.00.002');
     assert.equal(currentCheck.available, false);
     assert.equal(currentCheck.reason, 'current');

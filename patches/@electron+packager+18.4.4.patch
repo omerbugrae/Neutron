@@ -25,8 +25,10 @@ index d37e170..bd4d66b 100644
 +    return new Promise((resolve, reject) => {
 +        const escapedZip = zipPath.replace(/'/g, "''");
 +        const escapedDir = targetDir.replace(/'/g, "''");
-+        const command = `New-Item -ItemType Directory -Force -Path '${escapedDir}' | Out-Null; ` +
-+            `Expand-Archive -Path '${escapedZip}' -DestinationPath '${escapedDir}' -Force`;
++        const archiveModule = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Archive\\Microsoft.PowerShell.Archive.psd1';
++        const command = `Import-Module -Name '${archiveModule}' -Force -ErrorAction Stop; ` +
++            `New-Item -ItemType Directory -Force -Path '${escapedDir}' | Out-Null; ` +
++            `Microsoft.PowerShell.Archive\\Expand-Archive -Path '${escapedZip}' -DestinationPath '${escapedDir}' -Force`;
 +        (0, child_process_1.execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: 1024 * 1024 * 16 }, (error, _stdout, stderr) => {
 +            if (error) {
 +                reject(new Error(`Expand-Archive failed: ${stderr || error.message}`));

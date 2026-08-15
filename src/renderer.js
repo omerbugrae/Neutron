@@ -24,6 +24,8 @@
   const wscProtectionToggle = document.querySelector('[data-action="toggle-wsc-protection"]');
   const serviceProtectionToggle = document.querySelector('[data-action="toggle-service-protection"]');
   const signatureUpdateButton = document.querySelector('[data-action="update-signatures"]');
+  const signatureRollbackButton = document.querySelector('[data-action="rollback-signatures"]');
+  const featureUpdateButton = document.querySelector('[data-action="update-features"]');
   const clearAnalysisCacheButton = document.querySelector('[data-action="clear-analysis-cache"]');
   const settingToggles = [...document.querySelectorAll('[data-setting-toggle]')];
   const scanLimitSelect = document.querySelector('[data-setting-select="scan_max_files"]');
@@ -447,15 +449,15 @@
     }
   };
 
-  const setWscProtectionState = (enabled, heading, detail) => {
+  const setWscProtectionState = (enabled, heading, detail, available = true) => {
     wscEnabled = enabled;
     setText('wsc-protection-state', heading);
     setText('wsc-protection-detail', detail);
-    setText('wsc-toggle-label', enabled ? 'Kapat' : 'Aç');
+    setText('wsc-toggle-label', available ? (enabled ? 'Kapat' : 'Aç') : 'Windows yönetiyor');
     if (wscProtectionToggle) {
       wscProtectionToggle.classList.toggle('is-active', enabled);
       wscProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-      wscProtectionToggle.disabled = false;
+      wscProtectionToggle.disabled = !available;
     }
   };
 
@@ -580,12 +582,16 @@
           : 'Otomatik yeniden başlatma kapalı. Etkinleştirmek yönetici izni gerektirir.',
       );
       const wscConfigured = typeof status.wscConfigured === 'boolean' ? status.wscConfigured : false;
+      const wscAvailable = status.wscAvailable !== false;
       setWscProtectionState(
-        wscConfigured,
-        wscConfigured ? 'Kayıtlı (deneysel)' : 'Kapalı',
-        wscConfigured
+        wscAvailable && wscConfigured,
+        !wscAvailable ? 'Windows tarafından yönetiliyor' : (wscConfigured ? 'Kayıtlı' : 'Kapalı'),
+        !wscAvailable
+          ? (status.wscMessage || 'Windows Güvenlik Merkezi kaydı bu derlemede desteklenmiyor.')
+          : wscConfigured
           ? 'Neutron, Windows Güvenlik Merkezi\'ne bildirildi. Defender\'ın pasif moda geçip geçmediği cihaza bağlıdır.'
           : 'Windows Güvenlik Merkezi kaydı kapalı. Etkinleştirmek yönetici izni gerektirir.',
+        wscAvailable,
       );
       const serviceConfigured = typeof status.serviceConfigured === 'boolean' ? status.serviceConfigured : false;
       const serviceConnected = typeof status.serviceConnected === 'boolean' ? status.serviceConnected : false;
@@ -669,19 +675,26 @@
     if (!list || !count) return;
     list.replaceChildren();
     const pendingEvents = events.filter((event) => (event.disposition || 'pending') === 'pending');
-    const criticalPending = pendingEvents.some((event) => ['high', 'critical'].includes(event.severity));
+    const isHighConfidenceEvent = (event) => (
+      ['test-signature', 'signature', 'cloud-reputation'].includes(event.finding_kind)
+      || Number(event.risk_score) >= 60
+      || ['high', 'critical'].includes(event.severity)
+    );
+    const pendingThreats = pendingEvents.filter(isHighConfidenceEvent);
+    const pendingReviews = pendingEvents.filter((event) => !isHighConfidenceEvent(event));
+    const criticalPending = pendingThreats.length > 0;
     const latestQuarantined = events.find((event) => event.disposition === 'quarantined');
     if (latestQuarantined) activeThreatDetected = true;
     document.body.classList.toggle('threat-alert', criticalPending || activeThreatDetected);
     if (criticalPending) {
       setText('engine-state', 'Tehdit müdahalesi gerekiyor');
       setText('protection-label', 'TEHDİT BULUNDU');
-      setText('file-protection-detail', `${pendingEvents.length} gerçek zamanlı koruma olayı işlem bekliyor.`);
+      setText('file-protection-detail', `${pendingThreats.length} yüksek güvenli koruma olayı işlem bekliyor.`);
     } else if (activeThreatDetected) {
       applyThreatAlertState();
     }
     count.textContent = pendingEvents.length
-      ? `${pendingEvents.length} müdahale bekliyor · ${events.length} olay`
+      ? `${pendingThreats.length} müdahale · ${pendingReviews.length} inceleme · ${events.length} olay`
       : `${events.length} olay`;
 
     if (!events.length) {
@@ -697,6 +710,7 @@
       row.className = 'protection-event-row';
       row.dataset.protectionEventId = String(event.id);
       const disposition = event.disposition || 'pending';
+      const reviewOnly = disposition === 'pending' && !isHighConfidenceEvent(event);
       row.classList.toggle('is-resolved', disposition !== 'pending');
       row.classList.toggle('is-critical', disposition === 'pending' && ['high', 'critical'].includes(event.severity));
       const content = document.createElement('div');
@@ -712,17 +726,22 @@
       badge.textContent = event.finding_kind === 'test-signature'
         ? 'EICAR TEST'
         : event.finding_kind === 'signature' ? 'İMZA'
-          : event.finding_kind === 'yara' ? 'YARA'
+            : event.finding_kind === 'yara' ? 'YARA'
+              : event.finding_kind === 'pe-analysis' ? 'PE İNCELEMESİ'
             : event.finding_kind === 'behavior' ? 'DAVRANIŞ'
               : event.finding_kind === 'persistence' ? 'KALICILIK' : 'İNCELEME';
       const stamp = document.createElement('time');
       stamp.textContent = formatScanDate(event.occurred_at);
       const dispositionLabel = document.createElement('strong');
       dispositionLabel.className = `protection-disposition protection-disposition--${disposition}`;
-      dispositionLabel.textContent = ({
+      dispositionLabel.textContent = reviewOnly ? 'İNCELEME ÖNERİLİR' : ({
         pending: 'MÜDAHALE BEKLİYOR',
         quarantined: 'KARANTİNADA',
+        remediated: 'MÜDAHALE EDİLDİ',
+        restored: 'GERİ YÜKLENDİ',
+        'rollback-partial': 'KISMEN GERİ ALINDI',
         trusted: 'GÜVENİLİR',
+        'trusted-publisher': 'YAYINCI GÜVENİLİR',
         ignored: 'YOK SAYILDI',
       }[disposition] || disposition.toLocaleUpperCase('tr-TR'));
       meta.append(badge, dispositionLabel, stamp);
@@ -730,21 +749,28 @@
       actions.className = 'protection-event-row__actions';
       if (disposition === 'pending') {
         const actionDefinitions = [
+          ['remediate', 'Müdahale et'],
           ['quarantine', 'Karantinaya al'],
           ['trust', 'Güvenilir say'],
+          ['trust-publisher', 'Yayıncıyı güvenilir say'],
           ['ignore', 'Yoksay'],
         ];
         actionDefinitions.forEach(([actionName, label]) => {
+          if (reviewOnly && actionName === 'remediate') return;
           if (event.finding_kind === 'persistence' && actionName !== 'ignore') return;
+          if (actionName === 'remediate' && (!event.file_path || event.file_path.startsWith('registry://') || event.file_path.startsWith('startup://'))) return;
           if (actionName === 'trust' && !/^[a-f0-9]{64}$/i.test(event.sha256 || '')) return;
+          if (actionName === 'trust-publisher' && !/^[a-f0-9]{40,64}$/i.test(event.publisher_thumbprint || '')) return;
           const button = document.createElement('button');
           button.type = 'button';
           button.dataset.protectionAction = actionName;
           button.textContent = label;
           button.addEventListener('click', async () => {
             const confirmations = {
+              remediate: `“${event.file_path}” için çalışan süreç ağacı durdurulsun, dosya karantinaya alınsın ve eşleşen kullanıcı başlangıç girdileri geri alınabilir biçimde kapatılsın mı?`,
               quarantine: `“${event.file_path}” karantinaya taşınsın mı? Dosya silinmez.`,
               trust: `Bu dosyanın mevcut SHA-256 özeti güvenilir sayılsın mı? Dosya değişirse yeniden taranır.`,
+              'trust-publisher': `“${event.publisher_subject || 'Bu yayıncı'}” sertifikası güvenilir sayılsın mı? Aynı sertifikayla imzalanmış ve Windows tarafından doğrulanan dosyalar sezgisel uyarı üretmez.`,
               ignore: `“${event.file_path}” için bu uyarı yoksayılsın mı? Dosyada değişiklik yapılmaz.`,
             };
             if (!window.confirm(confirmations[actionName])) return;
@@ -757,11 +783,29 @@
               return;
             }
             if (actionName === 'quarantine') applyQuarantine();
+            if (actionName === 'remediate') applyQuarantine();
             if (actionName === 'trust') applyExclusions();
             applyProtectionHistory();
           });
           actions.append(button);
         });
+      } else if (disposition === 'remediated' && Number.isInteger(event.incident_id)) {
+        const rollback = document.createElement('button');
+        rollback.type = 'button';
+        rollback.textContent = 'Müdahaleyi geri al';
+        rollback.addEventListener('click', async () => {
+          if (!window.confirm('Karantinadaki dosya ve geri alınabilir başlangıç değişiklikleri eski hâline getirilsin mi? Durdurulan süreçler yeniden başlatılmaz.')) return;
+          rollback.disabled = true;
+          const result = await engine?.rollbackIncident?.(Number(event.incident_id));
+          if (!result?.ok) {
+            rollback.disabled = false;
+            rollback.textContent = result?.message || 'Tekrar dene';
+            return;
+          }
+          applyQuarantine();
+          applyProtectionHistory();
+        });
+        actions.append(rollback);
       }
       row.append(content, actions, meta);
       list.append(row);
@@ -798,12 +842,36 @@
       signatureLabel = `${databaseName} ${result.version || '1.00.001'}`;
       setText('database-state', signatureLabel);
       setText('signature-version', `${databaseName} ${result.version || '1.00.001'}`);
-      setText('signature-detail', `${count} etkin tehdit tanımı · Proton kullanıma hazır.`);
+      const rollbackVersions = Array.isArray(result.rollback_versions) ? result.rollback_versions : [];
+      if (signatureRollbackButton) {
+        signatureRollbackButton.hidden = rollbackVersions.length === 0;
+        signatureRollbackButton.dataset.version = rollbackVersions[0] || '';
+      }
+      setText('signature-detail', `${count} etkin tehdit tanımı · Proton kullanıma hazır.${rollbackVersions.length ? ` Geri dönüş: ${rollbackVersions[0]}.` : ''}`);
     } catch {
       signatureLabel = 'İmza veritabanı kullanılamıyor';
       setText('database-state', signatureLabel);
       setText('signature-version', 'Durum okunamadı');
       setText('signature-detail', 'Yerel imza veritabanına bağlanılamadı.');
+    }
+  };
+
+  const applyFeatureUpdateStatus = async () => {
+    if (!engine?.getFeatureUpdateStatus) return;
+    try {
+      const result = await engine.getFeatureUpdateStatus();
+      if (!result?.ok) throw new Error('Feature Update status unavailable');
+      if (result.ready) {
+        setText('feature-update-version', `Machine Learning Models ${result.version}`);
+        setText('feature-update-detail', `${Number(result.model_count) || 0} verified models are installed and ready.`);
+        if (featureUpdateButton) featureUpdateButton.textContent = 'Check for Feature Update';
+      } else {
+        setText('feature-update-version', 'Machine Learning Feature Update');
+        setText('feature-update-detail', 'The optional machine learning models are not installed yet.');
+        if (featureUpdateButton) featureUpdateButton.textContent = 'Download Feature Update';
+      }
+    } catch {
+      setText('feature-update-detail', 'Feature Update status could not be read.');
     }
   };
 
@@ -870,6 +938,15 @@
       mbApiKeyInput.value = typeof settings.malwarebazaar_api_key === 'string' ? settings.malwarebazaar_api_key : '';
     }
     setText('settings-save-state', 'Tüm ayarlar bu bilgisayarda saklanıyor');
+    const updateHours = Number(settings.signature_update_interval_hours) || 6;
+    const lastSuccess = Number(settings.signature_update_last_success_at) || 0;
+    const autoUpdateText = settings.signature_auto_update_enabled
+      ? `${updateHours} saatte bir${lastSuccess ? ` · Son başarılı: ${formatScanDate(new Date(lastSuccess).toISOString())}` : ''}`
+      : 'Kapalı';
+    setText('signature-auto-status', autoUpdateText);
+    if (settings.signature_update_last_error) {
+      setText('signature-detail', `Son otomatik denetim: ${settings.signature_update_last_error}`);
+    }
     if (!scanning) {
       setText('scan-page-summary', `${scanLimitText(settings.scan_max_files)} dosya incelenir. Dosyalara otomatik işlem uygulanmaz.`);
     }
@@ -1462,7 +1539,30 @@
     if (!state) return;
     if (signatureUpdateButton) signatureUpdateButton.textContent = state[0];
     setText('signature-detail', state[1]);
-    if (event.stage === 'complete' || event.stage === 'current') applyEngineStatus();
+    if (event.stage === 'complete' || event.stage === 'current') {
+      applyEngineStatus();
+      applySettings();
+      applySignatureStatus();
+    }
+  });
+
+  engine?.onFeatureUpdateEvent?.((event) => {
+    if (!event || typeof event.stage !== 'string') return;
+    const progress = Number.isFinite(event.progress) ? ` ${event.progress}%` : '';
+    const states = {
+      checking: ['Checking…', 'Checking GitHub Releases for a Machine Learning Feature Update.'],
+      'downloading-manifest': ['Preparing…', `Verifying Feature Update ${event.version || ''}.`],
+      downloading: [`Downloading${progress}`, `Downloading encrypted model components${progress}.`],
+      installing: ['Installing…', 'The verified Feature Update is being activated.'],
+      current: ['Up to date', `Machine Learning Feature Update ${event.version || ''} is current.`],
+      complete: ['Up to date', `Machine Learning Feature Update ${event.version || ''} was installed successfully.`],
+      error: ['Try Again', event.message || 'Feature Update could not be installed.'],
+    };
+    const state = states[event.stage];
+    if (!state) return;
+    if (featureUpdateButton) featureUpdateButton.textContent = state[0];
+    setText('feature-update-detail', state[1]);
+    if (event.stage === 'complete' || event.stage === 'current') applyFeatureUpdateStatus();
   });
 
   protectionToggle?.addEventListener('click', async () => {
@@ -1655,6 +1755,40 @@
       signatureUpdateButton.textContent = 'Tekrar dene';
     } finally {
       signatureUpdateButton.disabled = false;
+    }
+  });
+
+  signatureRollbackButton?.addEventListener('click', async () => {
+    if (!engine?.rollbackSignatures) return;
+    const version = signatureRollbackButton.dataset.version || '';
+    if (!version || !window.confirm(`Proton ${version} sürümüne geri dönülsün mü?`)) return;
+    signatureRollbackButton.disabled = true;
+    try {
+      const result = await engine.rollbackSignatures(version);
+      if (!result?.ok) throw new Error(result?.message || 'Proton geri alınamadı.');
+      await applySignatureStatus();
+      await applyYaraStatus();
+    } catch (error) {
+      setText('signature-detail', error?.message || 'Proton geri alınamadı.');
+    } finally {
+      signatureRollbackButton.disabled = false;
+    }
+  });
+
+  featureUpdateButton?.addEventListener('click', async () => {
+    if (!engine?.updateFeatures) return;
+    featureUpdateButton.disabled = true;
+    featureUpdateButton.textContent = 'Checking…';
+    try {
+      const result = await engine.updateFeatures();
+      if (!result?.ok) throw new Error(result?.message || 'Feature Update could not be installed.');
+      await applyFeatureUpdateStatus();
+      if (result.message) setText('feature-update-detail', result.message);
+    } catch (error) {
+      setText('feature-update-detail', error?.message || 'Feature Update could not be installed.');
+      featureUpdateButton.textContent = 'Try Again';
+    } finally {
+      featureUpdateButton.disabled = false;
     }
   });
 
@@ -1973,6 +2107,7 @@
   applyHistory();
   applyProtectionHistory();
   applySignatureStatus();
+  applyFeatureUpdateStatus();
   applyYaraStatus();
   applySettings();
   renderLicenseAccount();

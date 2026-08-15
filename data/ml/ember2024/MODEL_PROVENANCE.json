@@ -1,0 +1,100 @@
+{
+  "source": "https://huggingface.co/joyce8/EMBER2024-benchmark-models",
+  "revision": "50c0eb10461a9fbb1b276e3cbf2bf4b9f65c0cfc",
+  "license": "apache-2.0",
+  "downloaded_at": "2026-08-15",
+  "models": [
+    {
+      "file": "EMBER2024_PE.model",
+      "sha256": "4252027863492ac138785c8c18576f43dad77d00faddc14e8c0072e8db419f99",
+      "category": "static-pe",
+      "family": "ember2024",
+      "applies_to": ["pe"]
+    },
+    {
+      "file": "EMBER2024_Win32.model",
+      "sha256": "b1e9fc174e4fcc6c0aba3ff29eb6d96ee9e240057f76940a8a1d6009ac0a4267",
+      "category": "static-pe",
+      "family": "ember2024",
+      "applies_to": ["win32"]
+    },
+    {
+      "file": "EMBER2024_Win64.model",
+      "sha256": "8eddddc26eb346d74810a0dfcc672342eca5709ece4da259934d6d3c77ca971b",
+      "category": "static-pe",
+      "family": "ember2024",
+      "applies_to": ["win64"]
+    },
+    {
+      "file": "EMBER2024_Dot_Net.model",
+      "sha256": "cbd91b4a823d5dac3f56f38640a5599836501ccbd4fcce273d28c9aed0afc24c",
+      "category": "static-pe",
+      "family": "ember2024",
+      "applies_to": ["dotnet"]
+    },
+    {
+      "file": "EMBER2024_APK.model",
+      "sha256": "a13274463201e7d3ddec74b098350051266fcf0812aff302617397f1765cbc90",
+      "category": "static-apk",
+      "family": "ember2024",
+      "applies_to": ["apk"]
+    },
+    {
+      "file": "EMBER2024_ELF.model",
+      "sha256": "8e4072938955ac6020f80bca6cff7c12e97865102d578b3099e2011048eb9c43",
+      "category": "static-elf",
+      "family": "ember2024",
+      "applies_to": ["elf"]
+    },
+    {
+      "file": "EMBER2024_PDF.model",
+      "sha256": "a7e30eb883f8918cf28aaa98b6124cf2eb25a98ea3d58f3053a4fb49e24c3161",
+      "category": "static-pdf",
+      "family": "ember2024",
+      "applies_to": ["pdf"]
+    },
+    {
+      "file": "EMBER2024_all.model",
+      "sha256": "af4ec038685797c586142d177965fe451cac96f424f631aeb66f8d116c161d07",
+      "category": "static-multiformat",
+      "family": "ember2024",
+      "applies_to": ["pe", "apk", "elf", "pdf"]
+    },
+    {
+      "file": "EMBER2024_behavior.model",
+      "sha256": "33a86f31b9c807533b8e957393b54fd3b77a0168ae288edf4344a417fb49716b",
+      "purpose": "malware-behavior-enrichment",
+      "eligible_for_malicious_consensus": false
+    },
+    {
+      "file": "EMBER2024_exploit.model",
+      "sha256": "3d132b17fff763c24c447afa24b60939032fa95b14905dc1fbddb79701cbae01",
+      "purpose": "malware-exploit-enrichment",
+      "eligible_for_malicious_consensus": false
+    },
+    {
+      "file": "EMBER2024_family.model",
+      "sha256": "3897caaa1a3e4a9e0d23277d890e2267123f2e1f94fbfb4f2e2a36f7b6ce3af2",
+      "purpose": "malware-family-enrichment",
+      "eligible_for_malicious_consensus": false
+    },
+    {
+      "file": "EMBER2024_file_property.model",
+      "sha256": "6bc87d796843f89fa79d29e9cc12c49b8ee1ad01aa3024314d28b6a2175728ea",
+      "purpose": "malware-file-property-enrichment",
+      "eligible_for_malicious_consensus": false
+    },
+    {
+      "file": "EMBER2024_group.model",
+      "sha256": "ef202c5c8d7056d0e9a3bb660962256f9c9ad501e7b6ea5bfac1467a09afc08b",
+      "purpose": "malware-group-enrichment",
+      "eligible_for_malicious_consensus": false
+    },
+    {
+      "file": "EMBER2024_packer.model",
+      "sha256": "b11c3679e8462c23d020642872b5c06ca43b660bc188dbf836b2ff0e05686b7d",
+      "purpose": "malware-packer-enrichment",
+      "eligible_for_malicious_consensus": false
+    }
+  ]
+}
