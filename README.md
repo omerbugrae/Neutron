@@ -56,7 +56,10 @@ flowchart LR
 
 ## ✅ Requirements
 
-- Windows 10 or Windows 11
+- Windows 10 (64-bit, version 1809+) or Windows 11 — x64 (AMD64) only, no ARM64/x86 build
+- AMD64-architecture processor, 2 GHz or faster
+- 4 GB RAM minimum, 8 GB recommended
+- At least 1 GB free disk space for the installed application, plus ~250 MB more if you download the optional Machine Learning Feature Update
 - Administrator privileges may be required for some system-level protection features
 - A trusted, up-to-date Windows installation
 - Current backups of important data

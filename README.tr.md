@@ -56,7 +56,10 @@ flowchart LR
 
 ## ✅ Gereksinimler
 
-- Windows 10 veya Windows 11
+- Windows 10 (64-bit, 1809 sürümü veya üzeri) ya da Windows 11 — yalnızca x64 (AMD64), ARM64/x86 derlemesi yok
+- AMD64 mimarili işlemci, 2 GHz veya üzeri
+- En az 4 GB RAM, 8 GB önerilir
+- Kurulum için en az 1 GB boş disk alanı, isteğe bağlı Makine Öğrenmesi Feature Update indirilirse ~250 MB daha
 - Bazı sistem seviyesi koruma özellikleri için yönetici yetkisi
 - Güvenilir ve güncel bir Windows kurulumu
 - Önemli veriler için güncel yedek
