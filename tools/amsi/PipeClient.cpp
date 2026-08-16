@@ -28,6 +28,18 @@ DWORD RemainingMillis(ULONGLONG deadline) {
     return static_cast<DWORD>(deadline - now);
 }
 
+// Abandoning an overlapped operation is memory corruption waiting to happen:
+// CancelIoEx only *requests* cancellation, and neither it nor CloseHandle
+// waits for the kernel to stop touching the buffer and the OVERLAPPED block.
+// Both live in this function's frame, so returning while an I/O is still in
+// flight lets the kernel write into a frame that no longer exists. Always
+// block on GetOverlappedResult(..., TRUE) after cancelling.
+void AbandonPendingIo(HANDLE pipe, OVERLAPPED* overlapped) {
+    CancelIoEx(pipe, overlapped);
+    DWORD transferred = 0;
+    GetOverlappedResult(pipe, overlapped, &transferred, TRUE);
+}
+
 }  // namespace
 
 std::string Base64Encode(const unsigned char* data, size_t size) {
@@ -112,7 +124,7 @@ PipeVerdict ScanViaPipe(const std::wstring& contentName, const std::wstring& app
     if (writeWait == 0 ||
         WaitForSingleObject(event, writeWait) != WAIT_OBJECT_0 ||
         !GetOverlappedResult(pipe, &overlapped, &written, FALSE)) {
-        CancelIoEx(pipe, &overlapped);
+        AbandonPendingIo(pipe, &overlapped);
         CloseHandle(event);
         CloseHandle(pipe);
         return verdict;
@@ -133,11 +145,12 @@ PipeVerdict ScanViaPipe(const std::wstring& contentName, const std::wstring& app
     if (readWait == 0 ||
         WaitForSingleObject(event, readWait) != WAIT_OBJECT_0 ||
         !GetOverlappedResult(pipe, &readOverlapped, &readBytes, FALSE)) {
-        CancelIoEx(pipe, &readOverlapped);
+        AbandonPendingIo(pipe, &readOverlapped);
         CloseHandle(event);
         CloseHandle(pipe);
         return verdict;
     }
+    if (readBytes > sizeof(responseBuffer) - 1) readBytes = sizeof(responseBuffer) - 1;
 
     CloseHandle(event);
     CloseHandle(pipe);

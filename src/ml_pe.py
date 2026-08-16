@@ -82,6 +82,16 @@ class EnsemblePrediction:
     independent_categories: int
     high_confidence_categories: int
     consensus_state: str
+    # How many members actually scored this sample, and how far apart they
+    # landed. `disagreement` above measures the spread *between categories*,
+    # which is identically zero while EMBER is the only category -- so it says
+    # nothing about whether the individual models agreed with each other. Not
+    # every member sees every file either: applies_to means a 64-bit PE is
+    # scored by a different subset than a .NET assembly. A caller that wants
+    # to act on the score needs both of these to tell a genuine multi-model
+    # agreement from one model dragging the average up.
+    member_count: int = 0
+    member_spread: int = 0
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -92,6 +102,8 @@ class EnsemblePrediction:
             "independent_categories": self.independent_categories,
             "high_confidence_categories": self.high_confidence_categories,
             "consensus_state": self.consensus_state,
+            "member_count": self.member_count,
+            "member_spread": self.member_spread,
             "members": [
                 {
                     "model_id": member.model_id,
@@ -209,11 +221,14 @@ def _ensemble_result(version: str, members: list[ShadowPrediction]) -> EnsembleP
         state = "insufficient-diversity"
     else:
         state = "observe"
+    member_probabilities = [member.probability for member in members]
+    member_spread = round((max(member_probabilities) - min(member_probabilities)) * 100)
     return EnsemblePrediction(
         ensemble_version=version, members=tuple(members), score=score,
         disagreement=disagreement, independent_families=len(family_members),
         independent_categories=len(category_scores),
         high_confidence_categories=high_categories, consensus_state=state,
+        member_count=len(members), member_spread=member_spread,
     )
 
 
@@ -237,7 +252,10 @@ def predict_ember2024(
         model_version=score.model_version, weight=score.weight,
         probability=score.probability,
     ) for score in scores]
-    return _ensemble_result(version, members)
+    # score_pe_models can legitimately return no scores -- applies_to may rule
+    # every member out for this sample. _ensemble_result takes max()/min() over
+    # the members, so an empty list raises rather than returning "no opinion".
+    return _ensemble_result(version, members) if members else None
 
 
 def predict_ensemble(

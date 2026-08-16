@@ -68,6 +68,12 @@ contextBridge.exposeInMainWorld('neutronEngine', {
   disableStartupItem: (item) => ipcRenderer.invoke('startup:disable', item),
   restoreStartupItem: (itemId) => ipcRenderer.invoke('startup:restore', itemId),
   getVulnerableSoftware: () => ipcRenderer.invoke('vulnerability:scan'),
+  runSystemAudit: () => ipcRenderer.invoke('system:audit'),
+  getMlShadowReport: () => ipcRenderer.invoke('ml:shadow-report'),
+  getTempUsage: () => ipcRenderer.invoke('performance:temp-usage'),
+  cleanTempFiles: () => ipcRenderer.invoke('performance:temp-clean'),
+  getMemoryStatus: () => ipcRenderer.invoke('performance:memory-status'),
+  trimMemory: () => ipcRenderer.invoke('performance:memory-trim'),
   onScanEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('scan:event', listener);

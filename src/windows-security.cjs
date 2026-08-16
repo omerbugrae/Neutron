@@ -72,7 +72,11 @@ async function runPowerShell(psCommand, options = {}) {
     return { ok: false, code: 'ELEVATION_CANCELLED', message: 'Yönetici izni verilmedi.' };
   }
   if (processResult.status !== 0 || detail?.ok === false) {
-    const message = detail?.message || processResult.stderr.trim() || processResult.stdout.trim();
+    const windowsStatus = Number(processResult.status) >>> 0;
+    const crashedPowerShell = windowsStatus === 0xC0000374
+      ? 'Windows PowerShell işlemi çöktü (STATUS_HEAP_CORRUPTION / 0xC0000374).'
+      : '';
+    const message = detail?.message || processResult.stderr.trim() || processResult.stdout.trim() || crashedPowerShell;
     return {
       ok: false,
       code: 'PRIVILEGED_COMMAND_FAILED',
@@ -83,34 +87,71 @@ async function runPowerShell(psCommand, options = {}) {
   return { ok: true };
 }
 
+// Two separate traps, both of which have already bitten this function:
+//
+// 1. regsvr32.exe is a GUI-subsystem binary, so PowerShell's call operator
+//    does not wait for it and $LASTEXITCODE reflects some earlier native
+//    command instead of the registration result. Start-Process -Wait
+//    -PassThru is the only form that reliably yields regsvr32's own code.
+// 2. Start-Process -ArgumentList joins an array with spaces and does NOT
+//    quote the elements, so "C:\Program Files\Neutron\..." arrives at
+//    regsvr32 split in two and it answers with code 3 (module not found).
+//    The DLL path therefore has to carry its own embedded double quotes in a
+//    single pre-built argument string.
 function amsiRegistrationCommand(dllPath, unregister = false) {
-  const unregisterArgument = unregister ? "'/u'," : '';
+  const argumentText = `${unregister ? '/s /u' : '/s'} "${dllPath}"`;
   return (
     `$regsvr = Join-Path $env:SystemRoot 'System32\\regsvr32.exe'; ` +
-    `$arguments = @('/s',${unregisterArgument} '${psQuoteSingle(dllPath)}'); ` +
-    `& $regsvr @arguments; ` +
-    `if ($LASTEXITCODE -ne 0) { throw 'AMSI kaydı başarısız oldu (regsvr32 kodu ' + $LASTEXITCODE + ').' }`
+    `$arguments = '${psQuoteSingle(argumentText)}'; ` +
+    `$proc = Start-Process -FilePath $regsvr -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden; ` +
+    `if ($proc.ExitCode -ne 0) { throw 'AMSI kaydı başarısız oldu (regsvr32 kodu ' + $proc.ExitCode + ').' }`
   );
 }
 
+// Built with the ScheduledTasks cmdlets rather than schtasks.exe. The CLI
+// form could not survive PowerShell's native-argument quoting: /tr needs a
+// single argument that itself contains quotes around a "C:\Program Files\..."
+// path, and PowerShell 5.1 mangles exactly that shape, so Task Scheduler
+// received a malformed action and answered with a bare, undiagnosable
+// 0x80004005 (-2147467259). The cmdlets take the path and the arguments as
+// separate parameters -- there is no command line to mis-quote -- and they
+// raise a real error message when the Schedule service is stopped or policy
+// forbids task creation, instead of an opaque exit code.
+//
+// Repetition is expressed by copying the Repetition block off a second
+// trigger: passing -RepetitionInterval/-RepetitionDuration directly to a
+// -Once trigger is rejected as malformed task XML on several Windows builds.
+// The duration is a long finite span for the same reason ([TimeSpan]::MaxValue
+// trips the same formatting bug).
 function watchdogCreateCommand(taskName, executable, args = []) {
-  const target = [executable, ...args]
-    .map((value) => `"${String(value).replace(/"/g, '\\"')}"`)
-    .join(' ');
-  return (
-    `$schtasks = Join-Path $env:SystemRoot 'System32\\schtasks.exe'; ` +
-    `$taskAction = '${psQuoteSingle(target)}'; ` +
-    `& $schtasks /create /tn '${psQuoteSingle(taskName)}' /tr $taskAction /sc minute /mo 2 /rl highest /f; ` +
-    `if ($LASTEXITCODE -ne 0) { throw 'Watchdog görevi oluşturulamadı (schtasks kodu ' + $LASTEXITCODE + ').' }`
-  );
+  const argumentText = args.map((value) => String(value)).join(' ');
+  const argumentClause = argumentText ? ` -Argument '${psQuoteSingle(argumentText)}'` : '';
+  return [
+    `$start = (Get-Date).AddMinutes(1)`,
+    `$action = New-ScheduledTaskAction -Execute '${psQuoteSingle(executable)}'${argumentClause}`,
+    `$trigger = New-ScheduledTaskTrigger -Once -At $start`,
+    `$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $start ` +
+      `-RepetitionInterval (New-TimeSpan -Minutes 2) ` +
+      `-RepetitionDuration (New-TimeSpan -Days 3650)).Repetition`,
+    // The task relaunches Neutron's window and tray icon, so it has to run in
+    // the interactive session -- a SYSTEM principal would start it in session
+    // 0 where the user could never see it.
+    `$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name`,
+    `$principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest`,
+    `$taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries ` +
+      `-DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew ` +
+      `-ExecutionTimeLimit (New-TimeSpan -Hours 1)`,
+    `Register-ScheduledTask -TaskName '${psQuoteSingle(taskName)}' -Action $action ` +
+      `-Trigger $trigger -Principal $principal -Settings $taskSettings -Force ` +
+      `-ErrorAction Stop | Out-Null`,
+  ].join('; ');
 }
 
 function watchdogDeleteCommand(taskName) {
   return (
-    `$schtasks = Join-Path $env:SystemRoot 'System32\\schtasks.exe'; ` +
-    `& $schtasks /delete /tn '${psQuoteSingle(taskName)}' /f; ` +
-    `if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) { ` +
-    `throw 'Watchdog görevi kaldırılamadı (schtasks kodu ' + $LASTEXITCODE + ').' }`
+    `$existing = Get-ScheduledTask -TaskName '${psQuoteSingle(taskName)}' -ErrorAction SilentlyContinue; ` +
+    `if ($existing) { Unregister-ScheduledTask -TaskName '${psQuoteSingle(taskName)}' ` +
+    `-Confirm:$false -ErrorAction Stop }`
   );
 }
 

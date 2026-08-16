@@ -62,6 +62,14 @@ bool ReadStreamBuffer(IAmsiStream* stream, std::vector<unsigned char>& out) {
         ULONG readSize = 0;
         HRESULT readHr = stream->Read(offset, chunk, out.data() + offset, &readSize);
         if (FAILED(readHr) || readSize == 0) break;
+        // The host owns this implementation; a readSize larger than the
+        // chunk we asked for would walk the next iteration's write past the
+        // end of `out` and corrupt the heap of whatever process AMSI loaded
+        // us into. Never trust it further than the request.
+        if (readSize > chunk) {
+            offset += chunk;
+            break;
+        }
         offset += readSize;
     }
     out.resize(static_cast<size_t>(offset));
@@ -79,7 +87,11 @@ std::wstring ReadStreamName(IAmsiStream* stream, AMSI_ATTRIBUTE attribute) {
     HRESULT hr = stream->GetAttribute(attribute, sizeof(buffer),
                                        reinterpret_cast<unsigned char*>(buffer), &retData);
     if (FAILED(hr) || retData == 0) return L"";
+    // retData is the host's claim about how much it wrote; clamp it to what
+    // the buffer can actually hold before it is used as a length.
+    if (retData > sizeof(buffer)) retData = sizeof(buffer);
     size_t charCount = retData / sizeof(wchar_t);
+    while (charCount > 0 && buffer[charCount - 1] == L'\0') --charCount;
     return std::wstring(buffer, charCount);
 }
 
@@ -91,8 +103,10 @@ bool LocalFastVerdictIsDetection(const unsigned char* data, size_t size) {
 // The real scanning logic, kept in its own function so the SEH __try/
 // __except wrapper below (which cannot share a frame with C++ objects that
 // need unwinding, e.g. the std::vector/std::wstring used here) stays a
-// thin, object-free shell.
-void ScanInternal(IAmsiStream* stream, AMSI_RESULT* result) {
+// thin, object-free shell. __declspec(noinline) is load-bearing: at /O2 the
+// optimizer would otherwise pull this body into Scan's __try frame, where a
+// caught SEH exception skips the C++ destructors entirely.
+__declspec(noinline) void ScanInternal(IAmsiStream* stream, AMSI_RESULT* result) {
     std::vector<unsigned char> buffer;
     if (!ReadStreamBuffer(stream, buffer)) return;  // nothing to scan -> fail open
 
@@ -114,7 +128,13 @@ void ScanInternal(IAmsiStream* stream, AMSI_RESULT* result) {
 
 }  // namespace
 
-CNeutronAmsiProvider::CNeutronAmsiProvider() : refCount_(0) { NeutronAmsi_AddModuleRef(); }
+// Starts at one reference, held on behalf of the caller that is about to
+// receive this pointer. With a zero start, CreateInstance's QueryInterface/
+// Release pair took the count 0 -> 1 -> 0 and deleted the provider before
+// returning it, leaving AMSI to call Scan on freed memory -- a use-after-free
+// that corrupts the heap of every host that loads us (PowerShell dying with
+// STATUS_HEAP_CORRUPTION / 0xC0000374 during setup).
+CNeutronAmsiProvider::CNeutronAmsiProvider() : refCount_(1) { NeutronAmsi_AddModuleRef(); }
 
 HRESULT STDMETHODCALLTYPE CNeutronAmsiProvider::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;

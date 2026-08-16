@@ -24,6 +24,16 @@ function locateMakeNsis() {
   );
 }
 
+function toFileVersion(version) {
+  const numbers = String(version)
+    .split(/[+-]/, 1)[0]
+    .split('.')
+    .map((part) => Number.parseInt(part, 10))
+    .map((part) => (Number.isFinite(part) && part >= 0 ? Math.min(part, 65535) : 0));
+  while (numbers.length < 4) numbers.push(0);
+  return numbers.slice(0, 4).join('.');
+}
+
 function nsisEscape(value) {
   return String(value).replace(/\$/g, '$$').replace(/"/g, '$\\"');
 }
@@ -58,6 +68,21 @@ function writeUninstallManifest(appDirectory, manifestPath) {
   fs.writeFileSync(manifestPath, lines.join('\r\n'));
 }
 
+function assertNoBundledModelArtifacts(appDirectory) {
+  const { files } = collectInstalledPaths(appDirectory);
+  const forbidden = files.filter((relative) => {
+    const normalized = relative.replace(/\\/g, '/').toLowerCase();
+    return normalized.endsWith('.model')
+      || normalized.endsWith('.nfchunk')
+      || normalized.includes('/feature-dist/');
+  });
+  if (forbidden.length) {
+    throw new Error(
+      `Model dosyaları kurucu paketine giremez. Bulunan ilk dosya: ${forbidden[0]}`,
+    );
+  }
+}
+
 class MakerNsis extends MakerBase {
   constructor(...args) {
     super(...args);
@@ -75,6 +100,7 @@ class MakerNsis extends MakerBase {
     await this.ensureDirectory(outputDirectory);
     const manifestPath = path.join(outputDirectory, 'uninstall-files.nsh');
     const outputPath = path.join(outputDirectory, `${appName}-${packageJSON.version}-${targetArch}-Setup.exe`);
+    assertNoBundledModelArtifacts(dir);
     writeUninstallManifest(dir, manifestPath);
 
     const scriptPath = path.resolve(__dirname, 'installer', 'neutron.nsi');
@@ -82,6 +108,7 @@ class MakerNsis extends MakerBase {
       APP_DIR: dir,
       APP_NAME: appName,
       APP_VERSION: packageJSON.version,
+      APP_FILE_VERSION: toFileVersion(packageJSON.version),
       TARGET_ARCH: targetArch,
       OUTPUT_FILE: outputPath,
       PROJECT_ROOT: path.resolve(__dirname, '..'),

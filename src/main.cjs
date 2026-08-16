@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const https = require('https');
 const net = require('net');
 const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
@@ -9,7 +9,6 @@ const { FeatureUpdater } = require('./feature-updater.cjs');
 const { deviceHash, parseLicense } = require('./license.cjs');
 const {
   amsiRegistrationCommand,
-  legacyDriverCleanupCommand,
   psQuoteSingle,
   runPowerShell,
   serviceInstallCommand,
@@ -146,28 +145,150 @@ function readableLicensePaths() {
     : [userPath];
 }
 
+// The licence is also kept in HKLM, and that is the copy the app trusts first.
+//
+// The installer activates while elevated and wrote only to
+// ProgramData\Neutron\license. Whether the desktop app -- a normal,
+// unelevated process, possibly a different account than the one that clicked
+// through UAC -- can then read that file depends on directory ACLs, on
+// ProgramData resolving the same way in both contexts, and on the folder
+// surviving. It did not, and the app asked for a licence that had already
+// been entered.
+//
+// HKLM\SOFTWARE\Neutron has none of those failure modes: the elevated
+// installer can always write it, every user can always read it, and the
+// uninstaller already deletes the key. reg.exe is used rather than a native
+// module so no build dependency is added for four lines of registry access.
+const LICENSE_REGISTRY_KEY = 'HKLM\\SOFTWARE\\Neutron';
+const LICENSE_REGISTRY_VALUE = 'ActivationKey';
+
+function regExePath() {
+  return path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
+}
+
+function readMachineLicenseFromRegistry() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const output = execFileSync(
+      regExePath(),
+      ['query', LICENSE_REGISTRY_KEY, '/v', LICENSE_REGISTRY_VALUE, '/reg:64'],
+      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    const match = new RegExp(`${LICENSE_REGISTRY_VALUE}\\s+REG_SZ\\s+([^\\r\\n]+)`, 'i').exec(output);
+    return match ? match[1].trim() : null;
+  } catch {
+    // Absent value: reg.exe exits non-zero. Not an error, just no licence.
+    return null;
+  }
+}
+
+function writeMachineLicenseToRegistry(key) {
+  if (process.platform !== 'win32') return false;
+  try {
+    execFileSync(
+      regExePath(),
+      ['add', LICENSE_REGISTRY_KEY, '/v', LICENSE_REGISTRY_VALUE, '/t', 'REG_SZ',
+        '/d', String(key).trim(), '/f', '/reg:64'],
+      { windowsHide: true, stdio: 'ignore' },
+    );
+    return true;
+  } catch {
+    // Writing HKLM needs elevation. In-app activation by a normal user
+    // legitimately cannot do this, and falls back to the file copy.
+    return false;
+  }
+}
+
+function removeMachineLicenseFromRegistry() {
+  if (process.platform !== 'win32') return;
+  try {
+    execFileSync(
+      regExePath(),
+      ['delete', LICENSE_REGISTRY_KEY, '/v', LICENSE_REGISTRY_VALUE, '/f', '/reg:64'],
+      { windowsHide: true, stdio: 'ignore' },
+    );
+  } catch { /* nothing stored, or not elevated */ }
+}
+
 let activeLicensePath = null;
 
 function licenseStatus() {
-  const errors = [];
+  // Every failure is recorded with the path it came from. The installer
+  // activates machine-wide into ProgramData, so when the app then claims to
+  // be unlicensed the useful question is always "which file, and why did it
+  // not parse" -- a bare "enter a licence" message hides whether the file is
+  // missing, unreadable, or bound to a different device hash.
+  const failures = [];
+
+  // Once a machine-wide copy has been read and accepted, keep a copy in this
+  // user's own profile. The machine-wide copies live in ProgramData and HKLM,
+  // both of which the app can only read, never repair; a profile copy is one
+  // this account always owns. Best effort -- failing to mirror must never
+  // turn a working licence into a blocked app.
+  const mirrorToUserProfile = (key) => {
+    try {
+      const target = userLicensePath();
+      if (existsSync(target)) return;
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, `${String(key).trim()}\n`, { encoding: 'utf8' });
+    } catch { /* the machine-wide copy still works */ }
+  };
+
+  const registryKey = readMachineLicenseFromRegistry();
+  if (registryKey) {
+    try {
+      activeLicense = parseLicense(registryKey);
+      activeLicensePath = LICENSE_REGISTRY_KEY;
+      mirrorToUserProfile(registryKey);
+      return { ok: true, active: true, license: activeLicense };
+    } catch (error) {
+      failures.push({ path: LICENSE_REGISTRY_KEY, reason: error.message });
+    }
+  } else {
+    failures.push({ path: LICENSE_REGISTRY_KEY, reason: 'Kayıt bulunamadı.' });
+  }
+
   for (const candidate of readableLicensePaths()) {
-    if (!existsSync(candidate)) continue;
+    if (!existsSync(candidate)) {
+      failures.push({ path: candidate, reason: 'Dosya yok.' });
+      continue;
+    }
     try {
       const stored = readFileSync(candidate, 'utf8').trim();
       activeLicense = parseLicense(stored);
       activeLicensePath = candidate;
+      mirrorToUserProfile(stored);
       return { ok: true, active: true, license: activeLicense };
     } catch (error) {
-      errors.push(error.message);
+      const reason = error?.code === 'EACCES' || error?.code === 'EPERM'
+        ? `Dosya okunamadı (erişim reddedildi): ${error.message}`
+        : error.message;
+      failures.push({ path: candidate, reason });
     }
   }
   activeLicense = null;
   activeLicensePath = null;
+
+  let currentDeviceHash = null;
+  let deviceHashError = null;
+  try {
+    currentDeviceHash = deviceHash();
+  } catch (error) {
+    deviceHashError = error.message;
+  }
+
+  // A licence file that exists but did not parse is a different situation
+  // from no licence at all, and the user needs to be told which one it is.
+  const presentButRejected = failures.find((failure) => failure.reason !== 'Dosya yok.');
   return {
     ok: true,
     active: false,
-    deviceHash: deviceHash(),
-    message: errors[0] || 'Kurulum sırasında geçerli bir lisans girilmesi gerekiyor.',
+    deviceHash: currentDeviceHash,
+    failures,
+    message: deviceHashError
+      || (presentButRejected
+        ? `Lisans dosyası bulundu ama kabul edilmedi (${presentButRejected.path}): ${presentButRejected.reason}`
+        : 'Kurulum sırasında geçerli bir lisans girilmesi gerekiyor.'),
   };
 }
 
@@ -176,17 +297,32 @@ function requireLicense() {
   return status.active ? null : { ok: false, code: 'LICENSE_REQUIRED', message: 'Neutron etkinleştirilmedi.' };
 }
 
+// deviceHash() now throws on Windows rather than silently substituting a
+// per-user identity (see license.cjs). Callers that only want it for display
+// must not turn that into an unhandled failure of their own operation.
+function safeDeviceHash() {
+  try {
+    return deviceHash();
+  } catch {
+    return null;
+  }
+}
+
 function saveLicense(key, options = {}) {
   try {
     const license = parseLicense(String(key || ''));
     const target = options.machineWide ? machineLicensePath() : userLicensePath();
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
     writeFileSync(target, `${String(key).trim()}\n`, { encoding: 'utf8', mode: 0o600 });
+    // Machine-wide activation is the installer's path, and it runs elevated,
+    // so this is where the registry copy every account can read gets written.
+    // The file above stays as the fallback and for unelevated in-app activation.
+    if (options.machineWide) writeMachineLicenseToRegistry(key);
     activeLicense = license;
     activeLicensePath = target;
     return { ok: true, active: true, license };
   } catch (error) {
-    return { ok: false, active: false, deviceHash: deviceHash(), message: error.message };
+    return { ok: false, active: false, deviceHash: safeDeviceHash(), message: error.message };
   }
 }
 
@@ -195,9 +331,10 @@ function removeStoredLicense() {
     for (const target of readableLicensePaths()) {
       if (existsSync(target)) require('fs').rmSync(target, { force: true });
     }
+    removeMachineLicenseFromRegistry();
     activeLicense = null;
     activeLicensePath = null;
-    return { ok: true, active: false, deviceHash: deviceHash() };
+    return { ok: true, active: false, deviceHash: safeDeviceHash() };
   } catch (error) {
     return { ok: false, message: error.message };
   }
@@ -206,6 +343,14 @@ function removeStoredLicense() {
 function revealStoredLicense() {
   const status = licenseStatus();
   if (!status.active) return { ok: false, message: 'Gösterilecek etkin lisans yok.' };
+  // activeLicensePath is a registry key, not a file path, when the licence
+  // came from HKLM -- reading it as a file would throw.
+  if (activeLicensePath === LICENSE_REGISTRY_KEY) {
+    const key = readMachineLicenseFromRegistry();
+    return key
+      ? { ok: true, key }
+      : { ok: false, message: 'Kayıtlı lisans okunamadı.' };
+  }
   return { ok: true, key: readFileSync(activeLicensePath, 'utf8').trim() };
 }
 
@@ -378,6 +523,32 @@ function amsiDllPath() {
 // The old Start-Process ArgumentList construction split paths containing
 // spaces and regsvr32 returned code 3. The shared command builder quotes the
 // path and the asynchronous runner keeps Electron's main thread responsive.
+//
+// When we are already elevated (the installer case) regsvr32 is spawned
+// directly instead of through PowerShell. Registering an AMSI provider from
+// inside a PowerShell process is a trap: PowerShell is itself an AMSI host
+// and scans every statement, so the statement *after* regsvr32 loads the
+// brand-new provider in-process. A faulty provider then takes the host down
+// (0xC0000374) before it can report anything, and the failure looks like
+// "registration failed" when registration in fact succeeded.
+function runRegsvr32Directly(dllPath, unregister) {
+  const regsvr32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'regsvr32.exe');
+  const args = unregister ? ['/s', '/u', dllPath] : ['/s', dllPath];
+  return new Promise((resolve) => {
+    const child = spawn(regsvr32, args, { windowsHide: true, shell: false, stdio: 'ignore' });
+    child.once('error', (error) => resolve({ ok: false, message: error.message }));
+    child.once('close', (code) => {
+      if (code === 0) return resolve({ ok: true });
+      resolve({
+        ok: false,
+        code: 'PRIVILEGED_COMMAND_FAILED',
+        exitCode: code,
+        message: `AMSI kaydı başarısız oldu (regsvr32 kodu ${code}).`,
+      });
+    });
+  });
+}
+
 function runElevatedRegsvr32(dllPath, unregister, options = {}) {
   if (!existsSync(dllPath)) {
     return Promise.resolve({
@@ -385,7 +556,56 @@ function runElevatedRegsvr32(dllPath, unregister, options = {}) {
       message: 'AMSI sağlayıcı DLL bulunamadı. Önce "npm run amsi:build" ile derlenmeli.',
     });
   }
+  if (options.elevated === false) return runRegsvr32Directly(dllPath, unregister);
   return runPowerShell(amsiRegistrationCommand(dllPath, unregister), options);
+}
+
+// Every AMSI host in the system -- PowerShell, wscript, Office -- loads this
+// DLL in-process from now on, so a provider that faults takes those hosts
+// with it. Before leaving a fresh registration in place, spend one throwaway
+// PowerShell process proving that an AMSI-scanned statement still survives.
+// If it does not, the registration is rolled back immediately: a machine
+// whose PowerShell has been made unusable is a far worse outcome than an
+// installation without AMSI protection.
+function probeAmsiHostSurvivesScan() {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', "& { Write-Output 'neutron-amsi-probe' }"],
+      { windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stdout = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-4_000); });
+    child.stderr.resume();
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* best effort */ } }, 30_000);
+    child.once('error', (error) => { clearTimeout(timer); resolve({ ok: false, message: error.message }); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0 && stdout.includes('neutron-amsi-probe')) return resolve({ ok: true });
+      const status = Number(code) >>> 0;
+      const crashed = status === 0xC0000374
+        ? 'Windows PowerShell işlemi çöktü (STATUS_HEAP_CORRUPTION / 0xC0000374).'
+        : `Windows PowerShell beklenmedik biçimde sonlandı (kod ${code}).`;
+      resolve({
+        ok: false,
+        code: 'AMSI_PROVIDER_UNSAFE',
+        exitCode: code,
+        message: `AMSI sağlayıcısı yüklendikten sonra Windows PowerShell çalışamadı, kayıt geri alındı. ${crashed}`,
+      });
+    });
+  });
+}
+
+// Registers the provider and keeps it only if the probe above passes.
+async function registerAmsiProviderVerified(options = {}) {
+  const dllPath = amsiDllPath();
+  const registration = await runElevatedRegsvr32(dllPath, false, options);
+  if (!registration.ok) return registration;
+  const probe = await probeAmsiHostSurvivesScan();
+  if (probe.ok) return registration;
+  await runElevatedRegsvr32(dllPath, true, options);
+  return probe;
 }
 
 const WATCHDOG_TASK_NAME = 'NeutronWatchdog';
@@ -517,10 +737,11 @@ function installProtectionService(options = {}) {
     return Promise.resolve({ ok: false, message: 'Servis çalıştırıcı bulunamadı. Önce "npm run service:build" ile derlenmeli.' });
   }
   const oldDataDir = path.join(app.getPath('userData'), 'data');
-  return runElevatedPowerShell(
-    `${legacyDriverCleanupCommand()}; ${serviceInstallCommand(SERVICE_NAME, hostPath, oldDataDir)}`,
-    options,
-  );
+  // Provisioning already attempts the broad legacy-driver cleanup once.
+  // Do not prepend that large registry sweep here: on a few Windows builds
+  // Windows PowerShell itself can terminate with STATUS_HEAP_CORRUPTION.
+  // serviceInstallCommand still blocks an exact same-name kernel driver.
+  return runElevatedPowerShell(serviceInstallCommand(SERVICE_NAME, hostPath, oldDataDir), options);
 }
 
 function uninstallProtectionService(options = {}) {
@@ -700,14 +921,31 @@ function cleanupPrivilegedComponentsOnUninstall(options = {}) {
   const serviceUnregisterLine = serviceUninstallCommand(SERVICE_NAME);
   const firewallUnregisterLine =
     `try { Get-NetFirewallRule -Name 'Neutron-FW-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue } catch {}`;
+  // Each component is isolated in its own try/catch and the failures are
+  // collected, rather than chaining everything with ';' under
+  // $ErrorActionPreference='Stop'. Chained, the first component that threw
+  // aborted every later one -- so a machine that never enabled the watchdog
+  // kept its service and firewall rules -- and the caller got one opaque
+  // message with no indication of what had actually been removed.
+  //
+  // The broad legacy driver sweep is deliberately absent: it is the command
+  // that crashed Windows PowerShell with 0xC0000374 (see
+  // provisionDefaultSecurityComponents). tools/security/ carries the offline
+  // recovery scripts for the old experimental builds that need it.
+  const steps = [
+    ['AMSI kaydı', amsiUnregisterLine],
+    ['Watchdog görevi', watchdogDeleteCommand(WATCHDOG_TASK_NAME)],
+    ['Güvenlik Merkezi kaydı', wscUnregisterLine],
+    ['Neutron servisi', serviceUnregisterLine],
+    ['Güvenlik duvarı kuralları', firewallUnregisterLine],
+  ].filter(([, command]) => Boolean(command));
+
   const psCommand = [
-    legacyDriverCleanupCommand(),
-    amsiUnregisterLine,
-    watchdogDeleteCommand(WATCHDOG_TASK_NAME),
-    wscUnregisterLine,
-    serviceUnregisterLine,
-    firewallUnregisterLine,
-  ].filter(Boolean).join('; ');
+    `$failed = @()`,
+    ...steps.map(([label, command]) =>
+      `try { ${command} } catch { $failed += '${psQuoteSingle(label)}: ' + $_.Exception.Message }`),
+    `if ($failed.Count -gt 0) { throw ($failed -join ' | ') }`,
+  ].join('; ');
   return runElevatedPowerShell(psCommand, options);
 }
 
@@ -750,11 +988,19 @@ async function provisionDefaultSecurityComponents() {
     return { ok: false, stage: 'settings', message: settingsResult.message || 'Koruma ayarları kaydedilemedi.' };
   }
 
-  const legacy = await runElevatedPowerShell(legacyDriverCleanupCommand(), { elevated: false });
-  if (!legacy.ok) return { ok: false, stage: 'legacy-driver-cleanup', results: { legacy }, message: legacy.message };
+  // Do not run the old broad Services/Class registry sweep during setup.
+  // It crashed Windows PowerShell with 0xC0000374 on a clean test machine.
+  // The service installer below still performs a targeted same-name kernel
+  // driver check; the offline Recovery script remains available for older
+  // experimental installations that actually carried a file-system driver.
+  const legacy = {
+    ok: true,
+    skipped: true,
+    message: 'Geniş eski sürücü taraması kurulum sırasında güvenli biçimde atlandı.',
+  };
 
   const results = {
-    amsi: await runElevatedRegsvr32(amsiDllPath(), false, { elevated: false }),
+    amsi: await registerAmsiProviderVerified({ elevated: false }),
     watchdog: {
       ok: true,
       skipped: true,
@@ -773,7 +1019,13 @@ async function provisionDefaultSecurityComponents() {
     results.service = { ok: false, skipped: true, message: 'AMSI kurulamadığı için servis kurulumu başlatılmadı.' };
   }
 
-  const failedCore = Object.entries(results).filter(([, result]) => !result.ok);
+  // WSC cleanup only removes an obsolete experimental registration. Some
+  // Windows editions or enterprise policies do not expose SecurityCenter2,
+  // so it is deliberately not a mandatory protection component.
+  const failedCore = [
+    ['amsi', results.amsi],
+    ['service', results.service],
+  ].filter(([, result]) => !result?.ok);
   if (failedCore.length) {
     if (results.service?.ok) await uninstallProtectionService({ elevated: false });
     if (results.amsi?.ok) await runElevatedRegsvr32(amsiDllPath(), true, { elevated: false });
@@ -796,9 +1048,14 @@ async function provisionDefaultSecurityComponents() {
   return {
     ok: failedCore.length === 0,
     results,
+    warnings: [
+      ...(legacy.skipped ? [legacy.message] : []),
+      ...(!legacy.ok ? [`Eski sürücü temizliği atlandı: ${legacy.message}`] : []),
+      ...(!results.wsc.ok ? [`Windows Güvenlik Merkezi temizliği atlandı: ${results.wsc.message}`] : []),
+    ],
     message: failedCore.length
       ? failedCore.map(([name, result]) => `${name}: ${result.message}`).join(' | ')
-      : 'AMSI ve gecikmeli Windows servisi etkinleştirildi; Windows Güvenlik Merkezi Neutron eski kaydından arındırıldı.',
+      : 'AMSI ve gecikmeli Windows servisi etkinleştirildi.',
   };
 }
 
@@ -1272,33 +1529,47 @@ function startAutomaticSignatureUpdateTimer() {
 }
 
 function protectionStatus() {
+  // In service mode the LocalSystem service owns every watcher, so this
+  // process deliberately spawns none of them (see createWindow). Readiness
+  // therefore cannot be read off the local child handles -- they are all
+  // null by design -- and has to follow the service connection instead.
+  // Reading them anyway is what left AMSI and web protection reporting
+  // "Başlatılıyor" forever while the service was in fact running them.
+  const viaService = Boolean(appSettings.service_mode_enabled);
+  const moduleReady = (configured, localWatcher) => (viaService
+    ? Boolean(configured && serviceConnected)
+    : Boolean(localWatcher?.ready));
+  const moduleRunning = (configured, localWatcher) => (viaService
+    ? Boolean(configured && serviceConnected)
+    : Boolean(localWatcher));
+
   return {
     ok: true,
-    enabled: Boolean(protectionWatcher),
-    ready: Boolean(protectionWatcher?.ready),
-    behaviorEnabled: Boolean(behaviorWatcher),
-    behaviorReady: Boolean(behaviorWatcher?.ready),
+    enabled: moduleRunning(appSettings.protection_enabled, protectionWatcher),
+    ready: moduleReady(appSettings.protection_enabled, protectionWatcher),
+    behaviorEnabled: moduleRunning(appSettings.behavior_protection_enabled, behaviorWatcher),
+    behaviorReady: moduleReady(appSettings.behavior_protection_enabled, behaviorWatcher),
     behaviorConfigured: Boolean(appSettings.behavior_protection_enabled),
-    webEnabled: Boolean(webWatcher),
-    webReady: Boolean(webWatcher?.ready),
+    webEnabled: moduleRunning(appSettings.web_protection_enabled, webWatcher),
+    webReady: moduleReady(appSettings.web_protection_enabled, webWatcher),
     webConfigured: Boolean(appSettings.web_protection_enabled),
-    amsiEnabled: Boolean(amsiService),
-    amsiReady: Boolean(amsiService?.ready),
+    amsiEnabled: moduleRunning(appSettings.amsi_protection_enabled, amsiService),
+    amsiReady: moduleReady(appSettings.amsi_protection_enabled, amsiService),
     amsiConfigured: Boolean(appSettings.amsi_protection_enabled),
     watchdogConfigured: Boolean(appSettings.watchdog_protection_enabled),
     wscConfigured: Boolean(appSettings.wsc_registration_enabled),
     wscAvailable: false,
     wscMessage: 'Windows Güvenlik Merkezi ve Microsoft Defender normal durumda bırakılır; eski Neutron test kaydı kurulumda temizlenir.',
-    networkEnabled: Boolean(networkWatcher),
-    networkReady: Boolean(networkWatcher?.ready),
+    networkEnabled: moduleRunning(appSettings.network_protection_enabled, networkWatcher),
+    networkReady: moduleReady(appSettings.network_protection_enabled, networkWatcher),
     networkConfigured: Boolean(appSettings.network_protection_enabled),
     serviceConfigured: Boolean(appSettings.service_mode_enabled),
     serviceConnected: Boolean(serviceConnected),
-    memoryEnabled: Boolean(memoryWatcher),
-    memoryReady: Boolean(memoryWatcher?.ready),
+    memoryEnabled: moduleRunning(appSettings.memory_scan_enabled, memoryWatcher),
+    memoryReady: moduleReady(appSettings.memory_scan_enabled, memoryWatcher),
     memoryConfigured: Boolean(appSettings.memory_scan_enabled),
-    usbEnabled: Boolean(usbWatcher),
-    usbReady: Boolean(usbWatcher?.ready),
+    usbEnabled: moduleRunning(appSettings.usb_protection_enabled, usbWatcher),
+    usbReady: moduleReady(appSettings.usb_protection_enabled, usbWatcher),
     usbConfigured: Boolean(appSettings.usb_protection_enabled),
   };
 }
@@ -1760,6 +2031,7 @@ async function updateApplicationSetting(key, value) {
     'watchdog_protection_enabled',
     'wsc_registration_enabled',
     'cloud_lookup_enabled',
+    'ml_assisted_detection_enabled',
     'malwarebazaar_api_key',
     'virustotal_api_key',
     'network_protection_enabled',
@@ -1984,13 +2256,19 @@ ipcMain.handle('protection:status', () => requireLicense() || protectionStatus()
 ipcMain.handle('protection:amsi-register', async () => {
   const licenseError = requireLicense();
   if (licenseError) return licenseError;
-  const result = await runElevatedRegsvr32(amsiDllPath(), false);
+  const result = await registerAmsiProviderVerified();
   if (!result.ok) return result;
   return updateApplicationSetting('amsi_protection_enabled', true);
 });
+// The privileged step runs first and the setting is only persisted once it
+// actually succeeded. Writing the setting up front meant a declined UAC
+// prompt left the setting off while the component stayed installed: the
+// toggle then reported a state the machine did not have, and pressing it
+// again did nothing visible.
 ipcMain.handle('protection:amsi-unregister', async () => {
-  await updateApplicationSetting('amsi_protection_enabled', false);
-  return await runElevatedRegsvr32(amsiDllPath(), true);
+  const result = await runElevatedRegsvr32(amsiDllPath(), true);
+  if (!result.ok) return result;
+  return updateApplicationSetting('amsi_protection_enabled', false);
 });
 ipcMain.handle('protection:watchdog-register', async () => {
   const licenseError = requireLicense();
@@ -2000,8 +2278,9 @@ ipcMain.handle('protection:watchdog-register', async () => {
   return updateApplicationSetting('watchdog_protection_enabled', true);
 });
 ipcMain.handle('protection:watchdog-unregister', async () => {
-  await updateApplicationSetting('watchdog_protection_enabled', false);
-  return await unregisterWatchdogTask();
+  const result = await unregisterWatchdogTask();
+  if (!result.ok) return result;
+  return updateApplicationSetting('watchdog_protection_enabled', false);
 });
 ipcMain.handle('protection:wsc-register', async () => {
   const licenseError = requireLicense();
@@ -2011,8 +2290,9 @@ ipcMain.handle('protection:wsc-register', async () => {
   return updateApplicationSetting('wsc_registration_enabled', true);
 });
 ipcMain.handle('protection:wsc-unregister', async () => {
-  await updateApplicationSetting('wsc_registration_enabled', false);
-  return await unregisterWscProvider();
+  const result = await unregisterWscProvider();
+  if (!result.ok) return result;
+  return updateApplicationSetting('wsc_registration_enabled', false);
 });
 ipcMain.handle('protection:service-install', async () => {
   const licenseError = requireLicense();
@@ -2302,6 +2582,12 @@ ipcMain.handle('startup:restore', async (_event, itemId) => {
   return runEngineAction(['--startup-finalize-restore', String(itemId)], 'startup-item-finalized');
 });
 ipcMain.handle('vulnerability:scan', () => runEngineAction(['--check-vulnerable-software'], 'vulnerable-software'));
+ipcMain.handle('system:audit', () => runEngineAction(['--system-audit'], 'system-audit'));
+ipcMain.handle('ml:shadow-report', () => runEngineAction(['--ml-shadow-report'], 'ml-shadow-report'));
+ipcMain.handle('performance:temp-usage', () => runEngineAction(['--temp-usage'], 'temp-usage'));
+ipcMain.handle('performance:temp-clean', () => runEngineAction(['--temp-clean'], 'temp-cleaned'));
+ipcMain.handle('performance:memory-status', () => runEngineAction(['--memory-status'], 'memory-status'));
+ipcMain.handle('performance:memory-trim', () => runEngineAction(['--memory-trim'], 'memory-trimmed'));
 
 async function installLocalProtonArchiveForService() {
   const flagIndex = process.argv.indexOf('--install-proton-archive');

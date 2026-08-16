@@ -150,11 +150,19 @@
     return value < 1000 ? `${value} ms` : `${(value / 1000).toFixed(1)} sn`;
   };
 
+  // Goes up to TB: the performance page reports temp-directory totals, which
+  // pass a gigabyte on machines that have not been cleaned in a while.
   const formatBytes = (bytes) => {
     const value = Math.max(0, Number(bytes) || 0);
     if (value < 1024) return `${value} B`;
-    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let size = value / 1024;
+    let index = 0;
+    while (size >= 1024 && index < units.length - 1) {
+      size /= 1024;
+      index += 1;
+    }
+    return `${size.toFixed(size >= 100 ? 0 : 1)} ${units[index]}`;
   };
 
   const formatScanDate = (value) => {
@@ -247,6 +255,8 @@
 
   const pageNameFromHash = () => window.location.hash.slice(1);
 
+  let systemAuditLoaded = false;
+
   const showPage = (requestedPage, options = {}) => {
     const pageName = pages.some((page) => page.dataset.page === requestedPage)
       ? requestedPage
@@ -279,9 +289,15 @@
       applyFirewall();
       applyFirewallRecentApps();
     }
-    if (pageName === 'system-audit') {
+    if (pageName === 'startup-software') {
       applyStartupItems();
       applyVulnerableSoftware();
+    }
+    // Run once on first visit so the page is never an empty prompt, but not
+    // on every navigation -- the reader may be working through the findings.
+    if (pageName === 'system-audit' && !systemAuditLoaded) {
+      systemAuditLoaded = true;
+      applySystemAudit();
     }
     if (pageName === 'settings') {
       applySettings();
@@ -1394,6 +1410,267 @@
     });
   };
 
+  const AUDIT_STATUS_LABELS = {
+    pass: 'Geçti',
+    warn: 'Uyarı',
+    critical: 'Kritik',
+    unknown: 'Denetlenemedi',
+  };
+
+  const renderSystemAudit = (payload) => {
+    const list = document.querySelector('[data-role="audit-check-list"]');
+    if (!list) return;
+    const checks = Array.isArray(payload?.checks) ? payload.checks : [];
+    list.replaceChildren();
+
+    if (!checks.length) {
+      const empty = document.createElement('p');
+      empty.className = 'settings-empty';
+      empty.textContent = 'Denetim sonucu okunamadı.';
+      list.append(empty);
+      return;
+    }
+
+    // Worst first: a critical finding is what the reader has to act on, and
+    // burying it under a column of green rows defeats the point of the page.
+    const order = { critical: 0, warn: 1, unknown: 2, pass: 3 };
+    [...checks]
+      .sort((a, b) => (order[a.status] ?? 4) - (order[b.status] ?? 4))
+      .forEach((check) => {
+        const card = document.createElement('article');
+        card.className = `audit-check audit-check--${check.status}`;
+
+        const header = document.createElement('div');
+        header.className = 'audit-check__header';
+        const name = document.createElement('h3');
+        name.textContent = check.title;
+        const badge = document.createElement('span');
+        badge.className = 'audit-check__badge';
+        badge.textContent = AUDIT_STATUS_LABELS[check.status] || check.status;
+        header.append(name, badge);
+
+        const detail = document.createElement('p');
+        detail.textContent = check.detail;
+        card.append(header, detail);
+
+        if (check.remedy && check.status !== 'pass') {
+          const remedy = document.createElement('p');
+          remedy.className = 'audit-check__remedy';
+          remedy.textContent = check.remedy;
+          card.append(remedy);
+        }
+        list.append(card);
+      });
+
+    const counts = payload?.counts || {};
+    const critical = Number(counts.critical) || 0;
+    const warn = Number(counts.warn) || 0;
+    const unknown = Number(counts.unknown) || 0;
+    setText('audit-score', `${Number(payload?.score) || 0}/100`);
+    setText('audit-summary', critical || warn
+      ? `${critical} kritik, ${warn} uyarı${unknown ? `, ${unknown} denetlenemedi` : ''}.`
+      : `Denetlenen ayarların hepsi güvenli tarafta${unknown ? `, ${unknown} ayar okunamadı` : ''}.`);
+
+    const card = list.closest('.audit-score-card');
+    card?.classList.remove('audit-score-card--critical', 'audit-score-card--warn', 'audit-score-card--pass');
+    card?.classList.add(critical
+      ? 'audit-score-card--critical'
+      : (warn ? 'audit-score-card--warn' : 'audit-score-card--pass'));
+  };
+
+  const applySystemAudit = async () => {
+    const button = document.querySelector('[data-action="run-system-audit"]');
+    if (!engine?.runSystemAudit) return;
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Denetleniyor…';
+    }
+    try {
+      const result = await engine.runSystemAudit();
+      if (!result?.ok) {
+        setText('audit-summary', result?.message || 'Sistem denetimi tamamlanamadı.');
+        return;
+      }
+      renderSystemAudit(result);
+      const checkedAt = result?.checked_at ? new Date(result.checked_at) : null;
+      setText('audit-checked-at', checkedAt && !Number.isNaN(checkedAt.valueOf())
+        ? `Son denetim: ${checkedAt.toLocaleString('tr-TR')} · yalnızca kayıt defteri okundu, hiçbir ayar değiştirilmedi.`
+        : 'Denetim yalnızca kayıt defterini okur; hiçbir şey çalıştırmaz ve değiştirmez.');
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = 'Yeniden denetle';
+      }
+    }
+  };
+
+  document.querySelector('[data-action="run-system-audit"]')?.addEventListener('click', applySystemAudit);
+
+  const tempCleanButton = document.querySelector('[data-action="clean-temp-files"]');
+  let tempCleanableBytes = 0;
+
+  const applyTempUsage = async () => {
+    const button = document.querySelector('[data-action="scan-temp-files"]');
+    if (!engine?.getTempUsage) return;
+    if (button) { button.disabled = true; button.textContent = 'Hesaplanıyor…'; }
+    try {
+      const result = await engine.getTempUsage();
+      if (!result?.ok) {
+        setText('temp-usage-detail', result?.message || 'Geçici dosyalar hesaplanamadı.');
+        return;
+      }
+      tempCleanableBytes = Number(result.total_bytes) || 0;
+      setText('temp-usage-summary', `${formatBytes(tempCleanableBytes)} temizlenebilir`);
+      const roots = Array.isArray(result.roots) ? result.roots : [];
+      setText('temp-usage-detail', roots.length
+        ? `${Number(result.total_files) || 0} dosya · ${roots.map((root) => `${root.path} (${formatBytes(root.bytes)})`).join(' · ')}`
+        : 'Temizlenecek geçici dosya bulunamadı.');
+      // Nothing to delete means nothing to confirm; keep the destructive
+      // button unavailable rather than letting it run as a no-op.
+      if (tempCleanButton) tempCleanButton.disabled = tempCleanableBytes <= 0;
+    } finally {
+      if (button) { button.disabled = false; button.textContent = 'Yeniden hesapla'; }
+    }
+  };
+
+  document.querySelector('[data-action="scan-temp-files"]')?.addEventListener('click', applyTempUsage);
+
+  tempCleanButton?.addEventListener('click', async () => {
+    if (!engine?.cleanTempFiles) return;
+    if (!window.confirm(
+      `${formatBytes(tempCleanableBytes)} geçici dosya kalıcı olarak silinecek. Bu işlem geri alınamaz. Devam edilsin mi?`,
+    )) return;
+    tempCleanButton.disabled = true;
+    tempCleanButton.textContent = 'Temizleniyor…';
+    try {
+      const result = await engine.cleanTempFiles();
+      if (!result?.ok) {
+        setText('temp-usage-detail', result?.message || 'Temizlik tamamlanamadı.');
+        return;
+      }
+      const skipped = Number(result.skipped) || 0;
+      setText('temp-usage-summary', `${formatBytes(result.removed_bytes)} temizlendi`);
+      setText('temp-usage-detail', `${Number(result.removed_files) || 0} dosya silindi${
+        skipped ? ` · ${skipped} dosya kullanımda olduğu için atlandı` : ''}.`);
+      tempCleanableBytes = 0;
+    } finally {
+      tempCleanButton.textContent = 'Temizle';
+      tempCleanButton.disabled = true;
+    }
+  });
+
+  const renderMemoryStatus = (result) => {
+    const used = Number(result.used_bytes) || 0;
+    const total = Number(result.total_bytes) || 0;
+    setText('memory-summary', `${formatBytes(used)} / ${formatBytes(total)} kullanımda (%${Number(result.load_percent) || 0})`);
+    setText('memory-detail', `${Number(result.process_count) || 0} süreç okunabildi. Yönetici olmadan bazı sistem süreçleri görünmez.`);
+    const list = document.querySelector('[data-role="memory-process-list"]');
+    if (!list) return;
+    list.replaceChildren();
+    (Array.isArray(result.top_processes) ? result.top_processes : []).forEach((item) => {
+      const row = document.createElement('div');
+      row.className = 'performance-memory-row';
+      const name = document.createElement('span');
+      name.textContent = item.name || `PID ${item.pid}`;
+      const size = document.createElement('strong');
+      size.textContent = formatBytes(item.working_set_bytes);
+      row.append(name, size);
+      list.append(row);
+    });
+  };
+
+  const applyMemoryStatus = async () => {
+    if (!engine?.getMemoryStatus) return;
+    const result = await engine.getMemoryStatus();
+    if (!result?.ok) {
+      setText('memory-detail', result?.message || 'Bellek durumu okunamadı.');
+      return;
+    }
+    renderMemoryStatus(result);
+  };
+
+  document.querySelector('[data-action="read-memory-status"]')?.addEventListener('click', applyMemoryStatus);
+
+  document.querySelector('[data-action="trim-memory"]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    if (!engine?.trimMemory) return;
+    button.disabled = true;
+    button.textContent = 'Küçültülüyor…';
+    try {
+      const result = await engine.trimMemory();
+      if (!result?.ok) {
+        setText('memory-detail', result?.message || 'Çalışma kümesi küçültülemedi.');
+        return;
+      }
+      const freed = Number(result.freed_bytes) || 0;
+      setText('memory-summary', `${formatBytes(result.total_bytes - result.after_available_bytes)} / ${formatBytes(result.total_bytes)} kullanımda (%${Number(result.load_percent) || 0})`);
+      setText('memory-detail', freed > 0
+        ? `${Number(result.trimmed_processes) || 0} sürecin çalışma kümesi küçültüldü, ${formatBytes(freed)} boşaldı. Windows gerekeni geri yükledikçe bu sayı düşer.`
+        : `${Number(result.trimmed_processes) || 0} süreç işlendi ama ölçülebilir bir boşalma olmadı — bellek zaten sıkışık değildi.`);
+      await applyMemoryStatus();
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Çalışma kümesini küçült';
+    }
+  });
+
+  const applyMlShadowReport = async () => {
+    const button = document.querySelector('[data-action="read-ml-shadow"]');
+    const list = document.querySelector('[data-role="ml-shadow-thresholds"]');
+    if (!engine?.getMlShadowReport || !list) return;
+    if (button) { button.disabled = true; button.textContent = 'Okunuyor…'; }
+    try {
+      const result = await engine.getMlShadowReport();
+      list.replaceChildren();
+      if (!result?.ok) {
+        setText('ml-shadow-summary', result?.message || 'Gölge raporu okunamadı.');
+        return;
+      }
+      const total = Number(result.total) || 0;
+      if (!total) {
+        setText('ml-shadow-summary', 'Gözlem yok');
+        const empty = document.createElement('p');
+        empty.className = 'settings-empty';
+        empty.textContent = result.message || 'Henüz gölge gözlem kaydedilmedi.';
+        list.append(empty);
+        return;
+      }
+      setText('ml-shadow-summary', `${total} dosya puanlandı · ${Number(result.trusted_total) || 0} tanesi geçerli imzalı`);
+
+      const header = document.createElement('div');
+      header.className = 'ml-threshold-row ml-threshold-row--header';
+      ['Eşik', 'İşaretlenir', 'İmzalı', 'Yanlış pozitif oranı'].forEach((text) => {
+        const cell = document.createElement('span');
+        cell.textContent = text;
+        header.append(cell);
+      });
+      list.append(header);
+
+      (Array.isArray(result.thresholds) ? result.thresholds : []).forEach((item) => {
+        const row = document.createElement('div');
+        // Any signed file crossing the threshold is a file this build would
+        // have quarantined by mistake, so the row is called out.
+        const risky = Number(item.trusted_flagged) > 0;
+        row.className = `ml-threshold-row${risky ? ' ml-threshold-row--risky' : ''}`;
+        [
+          `≥ ${item.threshold}`,
+          `${item.flagged} (%${item.flagged_ratio})`,
+          String(item.trusted_flagged),
+          risky ? `%${item.trusted_flagged_ratio}` : 'temiz',
+        ].forEach((text) => {
+          const cell = document.createElement('span');
+          cell.textContent = text;
+          row.append(cell);
+        });
+        list.append(row);
+      });
+    } finally {
+      if (button) { button.disabled = false; button.textContent = 'Yeniden oku'; }
+    }
+  };
+
+  document.querySelector('[data-action="read-ml-shadow"]')?.addEventListener('click', applyMlShadowReport);
+
   pageTargets.forEach((target) => target.addEventListener('click', () => {
     showPage(target.dataset.pageTarget);
   }));
@@ -1598,9 +1875,10 @@
       if (result.settings) renderSettings(result.settings);
       await applyProtectionStatus();
     } catch (error) {
-      setText('behavior-protection-detail', error?.message || 'Davranış izleme değiştirilemedi.');
+      const message = error?.message || 'Davranış izleme değiştirilemedi.';
+      await applyProtectionStatus();
+      setText('behavior-protection-detail', message);
       behaviorProtectionToggle.disabled = false;
-      setText('behavior-toggle-label', behaviorEnabled ? 'Kapat' : 'Aç');
     }
   });
 
@@ -1614,7 +1892,9 @@
       if (result.settings) renderSettings(result.settings);
       await applyProtectionStatus();
     } catch (error) {
-      setText('web-protection-detail', error?.message || 'Web koruması değiştirilemedi.');
+      const message = error?.message || 'Web koruması değiştirilemedi.';
+      await applyProtectionStatus();
+      setText('web-protection-detail', message);
       webProtectionToggle.disabled = false;
     }
   });
@@ -1636,9 +1916,13 @@
       if (result.settings) currentSettings = result.settings;
       await applyProtectionStatus();
     } catch (error) {
-      setText('amsi-protection-detail', error?.message || 'Betik koruması değiştirilemedi.');
+      // Resync against what the machine actually has before showing the
+      // error: the privileged step may have been declined, in which case the
+      // toggle must go back to reflecting reality rather than the click.
+      const message = error?.message || 'Betik koruması değiştirilemedi.';
+      await applyProtectionStatus();
+      setText('amsi-protection-detail', message);
       amsiProtectionToggle.disabled = false;
-      setText('amsi-toggle-label', amsiEnabled ? 'Kapat' : 'Aç');
     }
   });
 
@@ -1659,9 +1943,10 @@
       if (result.settings) currentSettings = result.settings;
       await applyProtectionStatus();
     } catch (error) {
-      setText('watchdog-protection-detail', error?.message || 'Watchdog değiştirilemedi.');
+      const message = error?.message || 'Watchdog değiştirilemedi.';
+      await applyProtectionStatus();
+      setText('watchdog-protection-detail', message);
       watchdogProtectionToggle.disabled = false;
-      setText('watchdog-toggle-label', watchdogEnabled ? 'Kapat' : 'Aç');
     }
   });
 
@@ -1682,9 +1967,10 @@
       if (result.settings) currentSettings = result.settings;
       await applyProtectionStatus();
     } catch (error) {
-      setText('wsc-protection-detail', error?.message || 'Güvenlik Merkezi kaydı değiştirilemedi.');
+      const message = error?.message || 'Güvenlik Merkezi kaydı değiştirilemedi.';
+      await applyProtectionStatus();
+      setText('wsc-protection-detail', message);
       wscProtectionToggle.disabled = false;
-      setText('wsc-toggle-label', wscEnabled ? 'Kapat' : 'Aç');
     }
   });
 
@@ -1705,9 +1991,10 @@
       if (result.settings) currentSettings = result.settings;
       await applyProtectionStatus();
     } catch (error) {
-      setText('service-protection-detail', error?.message || 'Sistem servisi modu değiştirilemedi.');
+      const message = error?.message || 'Sistem servisi modu değiştirilemedi.';
+      await applyProtectionStatus();
+      setText('service-protection-detail', message);
       serviceProtectionToggle.disabled = false;
-      setText('service-toggle-label', serviceEnabled ? 'Kapat' : 'Aç');
     }
   });
 
@@ -2074,7 +2361,14 @@
     button.textContent = 'Hazırlanıyor…';
     try {
       const result = await engine?.prepareUninstall?.();
-      button.textContent = result?.ok ? 'Kaldırmaya hazır' : (result?.message || 'İşlem tamamlanamadı');
+      button.textContent = result?.ok ? 'Kaldırmaya hazır' : 'Tamamlanamadı';
+      // The failure text names the components that could not be removed and
+      // is far too long for a button label, where it used to be dumped.
+      setText('prepare-uninstall-detail', result?.ok
+        ? 'Watchdog, AMSI, Güvenlik Merkezi, servis ve güvenlik duvarı kayıtları kaldırıldı. Neutron\'u şimdi Denetim Masası\'ndan kaldırabilirsin.'
+        : (result?.code === 'ELEVATION_CANCELLED'
+          ? 'Yönetici izni verilmedi, hiçbir kayıt kaldırılmadı.'
+          : (result?.message || 'İşlem tamamlanamadı.')));
     } finally {
       setTimeout(() => {
         button.disabled = false;

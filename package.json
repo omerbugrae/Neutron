@@ -1,7 +1,7 @@
 {
   "name": "neutron",
   "productName": "Neutron",
-  "version": "0.35.0",
+  "version": "0.35",
   "private": true,
   "description": "Neutron desktop security application",
   "main": "src/main.cjs",
@@ -81,6 +81,7 @@
           "^/runtime($|/)",
           "^/tests($|/)",
           "^/tools($|/)",
+          "^/(?:feature-dist|proton-dist|proton-candidates|proton-secrets)(?:$|/)",
           "^/data/(?!rules(?:/|$)|ml(?:/|$))",
           "^/data/ml/(?!ember2024(?:/|$))",
           "^/data/ml/ember2024/(?!ensemble\\.json$|MODEL_PROVENANCE\\.json$)",

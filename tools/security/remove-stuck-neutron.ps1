@@ -17,14 +17,24 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit $LASTEXITCODE
 }
 
-if (-not $InstallRoot) {
-    $InstallRoot = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Neutron' -ErrorAction SilentlyContinue).InstallLocation
-}
+$registeredRoot = (Get-ItemProperty -LiteralPath 'HKLM:\Software\Neutron' -ErrorAction SilentlyContinue).InstallLocation
+if (-not $InstallRoot) { $InstallRoot = $registeredRoot }
 if (-not $InstallRoot) { $InstallRoot = Join-Path $env:ProgramFiles 'Neutron' }
-$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$programFilesRoot = [IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\') + '\'
-if (-not $InstallRoot.StartsWith($programFilesRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    [IO.Path]::GetFileName($InstallRoot) -ne 'Neutron') {
+$InstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+$allowedRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object {
+    [IO.Path]::GetFullPath($_).TrimEnd('\') + '\'
+}
+$insideProgramFiles = @($allowedRoots | Where-Object {
+    $InstallRoot.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+}).Count -gt 0
+$matchesRegisteredRoot = $registeredRoot -and
+    $InstallRoot.Equals([IO.Path]::GetFullPath($registeredRoot).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)
+$hasNeutronMarkers = (Test-Path -LiteralPath (Join-Path $InstallRoot 'Uninstall.exe') -PathType Leaf) -and (
+    (Test-Path -LiteralPath (Join-Path $InstallRoot 'Neutron.exe') -PathType Leaf) -or
+    (Test-Path -LiteralPath (Join-Path $InstallRoot 'resources\app\src\main.cjs') -PathType Leaf)
+)
+if ((-not $insideProgramFiles -and -not $matchesRegisteredRoot) -or -not $hasNeutronMarkers -or
+    $InstallRoot.Equals([IO.Path]::GetPathRoot($InstallRoot), [StringComparison]::OrdinalIgnoreCase)) {
     throw "Güvenli olmayan kurulum yolu reddedildi: $InstallRoot"
 }
 
@@ -51,22 +61,45 @@ Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct `
 Get-NetFirewallRule -Name 'Neutron-FW-*' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
-$uninstaller = Join-Path $InstallRoot 'Uninstall.exe'
-$appExecutable = Join-Path $InstallRoot 'Neutron.exe'
-$parkedExecutable = Join-Path $InstallRoot 'Neutron.exe.cleanup-disabled'
-if (Test-Path -LiteralPath $appExecutable -PathType Leaf) {
-    Move-Item -LiteralPath $appExecutable -Destination $parkedExecutable -Force
+Remove-Item -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Neutron' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Neutron' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\Neutron.exe' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKLM:\Software\Neutron' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $env:Public 'Desktop\Neutron.lnk') -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Neutron.lnk') -Force -ErrorAction SilentlyContinue
+
+$deleteOnReboot = $false
+try {
+    Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+} catch {
+    # The current PowerShell process may already have loaded the old AMSI DLL.
+    # Schedule only the already-validated Neutron tree for deletion at reboot.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NeutronDelayedDelete {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool MoveFileEx(string existingName, string newName, int flags);
 }
-if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
-    throw "Kaldırıcı bulunamadı: $uninstaller"
-}
-$process = Start-Process -FilePath $uninstaller -Wait -PassThru
-if ($process.ExitCode -ne 0) {
-    if ((Test-Path -LiteralPath $parkedExecutable) -and -not (Test-Path -LiteralPath $appExecutable)) {
-        Move-Item -LiteralPath $parkedExecutable -Destination $appExecutable -Force
+'@
+    $entries = @(Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue)
+    foreach ($entry in @($entries | Where-Object { -not $_.PSIsContainer })) {
+        $fullPath = [IO.Path]::GetFullPath($entry.FullName)
+        if (-not $fullPath.StartsWith($InstallRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Kurulum ağacı dışındaki yol reddedildi: $fullPath"
+        }
+        [void][NeutronDelayedDelete]::MoveFileEx($fullPath, $null, 4)
     }
-    throw "Neutron kaldırıcı kod $($process.ExitCode) ile durdu."
+    foreach ($entry in @($entries | Where-Object { $_.PSIsContainer } | Sort-Object { $_.FullName.Length } -Descending)) {
+        [void][NeutronDelayedDelete]::MoveFileEx($entry.FullName, $null, 4)
+    }
+    [void][NeutronDelayedDelete]::MoveFileEx($InstallRoot, $null, 4)
+    $deleteOnReboot = $true
 }
-Remove-Item -LiteralPath $parkedExecutable -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $InstallRoot -ErrorAction SilentlyContinue
-Write-Host 'Neutron kaldırıldı; yalnız Neutron bileşenleri temizlendi.' -ForegroundColor Green
+
+if ($deleteOnReboot) {
+    Write-Host 'Neutron kayıtları temizlendi. Kilitli program dosyaları yeniden başlatmada silinecek.' -ForegroundColor Yellow
+    Write-Host 'Şimdi bilgisayarı yeniden başlatın.' -ForegroundColor Yellow
+} else {
+    Write-Host 'Neutron tamamen kaldırıldı; yalnız Neutron bileşenleri temizlendi.' -ForegroundColor Green
+}

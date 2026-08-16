@@ -35,7 +35,11 @@ Var LicenseDeviceHash
 Var HadPreviousLicense
 Var ProgramDataDir
 
-VIProductVersion "${APP_VERSION}.0"
+!ifndef APP_FILE_VERSION
+  !error "APP_FILE_VERSION is required"
+!endif
+
+VIProductVersion "${APP_FILE_VERSION}"
 VIAddVersionKey /LANG=1055 "ProductName" "Neutron"
 VIAddVersionKey /LANG=1055 "ProductVersion" "${APP_VERSION}"
 VIAddVersionKey /LANG=1055 "FileVersion" "${APP_VERSION}"
@@ -146,13 +150,37 @@ Section "Neutron" SEC_MAIN
   SetOutPath "$PLUGINSDIR\\NeutronStage"
   File /r "${APP_DIR}\\*.*"
 
-  nsExec::ExecToStack /TIMEOUT=30000 '"$PLUGINSDIR\\NeutronStage\\Neutron.exe" --activate-license-file "$PLUGINSDIR\\activation.key"'
+  ; nsExec reports failures as the literal strings "error" and "timeout", not
+  ; as exit codes, and IntCmp reads "timeout" as 0 -- i.e. as success. Without
+  ; the two StrCmp guards below, a slow start here was silently treated as a
+  ; verified licence: the installer carried on, nothing was ever written to
+  ; ProgramData, and the installed app then asked for a licence the user had
+  ; already entered. The robocopy call further down always had these guards;
+  ; this one and the provisioning call did not.
+  ;
+  ; The timeout is generous because this is an Electron cold start from a
+  ; freshly written temp staging directory, with the on-access scanner
+  ; reading every file it touches. 30 s was not enough.
+  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\\NeutronStage\\Neutron.exe" --activate-license-file "$PLUGINSDIR\\activation.key"'
   Pop $0
   Pop $1
-  IntCmp $0 0 license_verified license_verification_failed license_verification_failed
+  StrCmp $0 "error" license_verification_failed
+  StrCmp $0 "timeout" license_verification_failed
+  IntCmp $0 0 license_check_persisted license_verification_failed license_verification_failed
+
+license_check_persisted:
+  ; Trusting the exit code alone is what produced an installed app that asked
+  ; for a licence the user had already entered: the activation reported
+  ; success but nothing survived it. Check the artefact itself, not the
+  ; report. HKLM is the copy the app reads first, so that is what must exist.
+  ClearErrors
+  ReadRegStr $2 HKLM "Software\\Neutron" "ActivationKey"
+  IfErrors 0 license_verified
+  StrCmp $2 "" 0 license_verified
+  StrCpy $0 "kayit dogrulanamadi"
 license_verification_failed:
   RMDir /r "$PLUGINSDIR\\NeutronStage"
-  MessageBox MB_OK|MB_ICONSTOP "Lisans doğrulanamadı (kod $0). Anahtar hatalı, süresi dolmuş veya başka bir bilgisayara bağlı olabilir. Hiçbir Neutron servisi ya da koruması kurulmadı."
+  MessageBox MB_OK|MB_ICONSTOP "Lisans doğrulanamadı (kod $0). Anahtar hatalı, süresi dolmuş, başka bir bilgisayara bağlı olabilir ya da lisans kaydı diske yazılamadı. Hiçbir Neutron servisi ya da koruması kurulmadı."
   SetErrorLevel 2
   Quit
 license_verified:
@@ -202,12 +230,19 @@ install_copy_ok:
   WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "NoModify" 1
   WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "NoRepair" 1
 
-  nsExec::ExecToStack /TIMEOUT=180000 '"$INSTDIR\\Neutron.exe" --provision-security'
+  nsExec::ExecToStack /TIMEOUT=300000 '"$INSTDIR\\Neutron.exe" --provision-security'
   Pop $0
   Pop $1
+  ; Same trap as the licence call above: "timeout" would parse as success and
+  ; leave the machine reporting a provisioned installation that never ran.
+  StrCmp $0 "error" provision_failed
+  StrCmp $0 "timeout" provision_failed
   IntCmp $0 0 provision_ok provision_failed provision_failed
 provision_failed:
   StrCpy $2 $0
+  FileOpen $3 "$TEMP\Neutron-install-error.txt" w
+  FileWrite $3 "Neutron ${APP_VERSION} security provisioning failed (code $2).$\r$\n$1$\r$\n"
+  FileClose $3
   nsExec::ExecToStack /TIMEOUT=180000 '"$INSTDIR\\Neutron.exe" --prepare-uninstall'
   Pop $0
   Pop $1
@@ -231,20 +266,41 @@ provision_remove_new_license:
   Delete "$ProgramDataDir\\Neutron\\license\\activation.key"
 provision_rollback_done:
   Delete "$PLUGINSDIR\\previous-activation.key"
-  MessageBox MB_OK|MB_ICONSTOP "Neutron'un zorunlu güvenlik bileşenleri kurulamadı (kod $2). Eksik kurulum geri alındı; program çalıştırılmadı."
+  MessageBox MB_OK|MB_ICONSTOP "Neutron'un zorunlu güvenlik bileşenleri kurulamadı (kod $2). Eksik kurulum geri alındı; program çalıştırılmadı.$\r$\n$\r$\nTanılama: $TEMP\Neutron-install-error.txt"
   SetErrorLevel 4
   Quit
 provision_ok:
+  Delete "$TEMP\Neutron-install-error.txt"
   Delete "$PLUGINSDIR\\previous-activation.key"
 SectionEnd
 
 Section "Uninstall"
   SetShellVarContext all
+
+  ; Nothing below can delete a file that is still open. The desktop app and
+  ; the LocalSystem service both run out of $INSTDIR, so they are stopped
+  ; first -- previously taskkill ran near the end and the service was only
+  ; ever asked to stop as part of the fallback, which left Neutron.exe and
+  ; the service host locked while the deletes ran.
+  nsExec::Exec '"$SYSDIR\\taskkill.exe" /F /T /IM Neutron.exe'
+  Pop $0
+  nsExec::Exec '"$SYSDIR\\sc.exe" stop "NeutronService"'
+  Pop $0
+  ; sc stop only submits the request; the SCM still has to take the service
+  ; down and release its image. Without this pause the RMDir at the end fails
+  ; and the installation is left half-removed.
+  Sleep 3000
+
   IfFileExists "$INSTDIR\\Neutron.exe" cleanup_retry cleanup_fallback
 cleanup_retry:
   nsExec::ExecToStack /TIMEOUT=180000 '"$INSTDIR\\Neutron.exe" --prepare-uninstall'
   Pop $0
   Pop $1
+  ; A timeout here would parse as success and skip the fallback cleanup
+  ; below, leaving the AMSI registration and the service behind on a machine
+  ; the user believes is clean.
+  StrCmp $0 "error" cleanup_failed
+  StrCmp $0 "timeout" cleanup_failed
   IntCmp $0 0 cleanup_done cleanup_failed cleanup_failed
 cleanup_failed:
   MessageBox MB_OK|MB_ICONEXCLAMATION "Standart bakım temizliği tamamlanamadı (kod $0). Kaldırıcı yalnız Neutron'a ait kayıtlar için yerleşik güvenli temizlemeye geçecek."
@@ -266,8 +322,11 @@ cleanup_fallback:
   Pop $0
   Pop $1
 cleanup_done:
+  ; --prepare-uninstall started another Neutron.exe; make sure that one is
+  ; gone too before anything is deleted.
   nsExec::Exec '"$SYSDIR\\taskkill.exe" /F /T /IM Neutron.exe'
   Pop $0
+  Sleep 1500
 
   Delete "$DESKTOP\\Neutron.lnk"
   Delete "$SMPROGRAMS\\Neutron.lnk"
@@ -281,4 +340,17 @@ cleanup_done:
   RMDir "$INSTDIR\\Recovery"
   Delete "$INSTDIR\\Uninstall.exe"
   RMDir "$INSTDIR"
+
+  ; The generated manifest only lists what this build shipped. An upgrade
+  ; from an older version, a stray log, or a file a locked process released
+  ; late all leave $INSTDIR behind, and a leftover Program Files folder makes
+  ; the next install look like it failed. Anything still here is Neutron's
+  ; own -- the folder is Neutron-specific and the manifest already removed
+  ; the known files -- so clear it and schedule whatever is still locked for
+  ; deletion at the next boot rather than leaving it forever.
+  IfFileExists "$INSTDIR\\*.*" 0 uninstall_done
+  RMDir /r "$INSTDIR"
+  IfFileExists "$INSTDIR\\*.*" 0 uninstall_done
+  RMDir /r /REBOOTOK "$INSTDIR"
+uninstall_done:
 SectionEnd

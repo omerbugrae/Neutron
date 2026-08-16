@@ -180,6 +180,10 @@
             <svg aria-hidden="true"><use href="#icon-chip"></use></svg>
             <span>Sistem Denetimi</span>
           </button>
+          <button class="navigation-item" type="button" data-page-target="startup-software">
+            <svg aria-hidden="true"><use href="#icon-history"></use></svg>
+            <span>Başlangıç ve Yazılım</span>
+          </button>
           <button class="navigation-item" type="button" data-page-target="activity">
             <svg aria-hidden="true"><use href="#icon-history"></use></svg>
             <span>Etkinlik</span>
@@ -688,10 +692,6 @@
               <div class="module-control-row">
                 <button class="settings-action" type="button" data-action="check-for-update">Güncellemeleri denetle</button>
               </div>
-              <p class="settings-empty">Neutron'u kaldırmadan önce: aşağıdaki butona basarsan watchdog, AMSI, WSC ve güvenlik duvarı kayıtları temizce kaldırılır (bir kere yönetici izni ister).</p>
-              <div class="module-control-row">
-                <button class="settings-action" type="button" data-action="prepare-uninstall">Kaldırmaya hazırla</button>
-              </div>
             </article>
           </div>
         </section>
@@ -728,7 +728,48 @@
         </section>
 
         <section class="app-page" data-page="system-audit" hidden>
-          <header class="page-header"><div><p class="section-eyebrow">SİSTEM DENETİMİ</p><h1>Başlangıç ve zafiyetli yazılım</h1><p>Windows ile otomatik başlayan öğeleri yönet, kurulu yazılımı bilinen açıklara karşı denetle.</p></div></header>
+          <header class="page-header"><div><p class="section-eyebrow">SİSTEM DENETİMİ</p><h1>Windows güvenlik duruşu</h1><p>Bu bilgisayarın kendi sertleştirme ayarları salt okunur denetlenir. Neutron hiçbir ayarı kendiliğinden değiştirmez; ne yapılması gerektiğini söyler, kararı sen verirsin.</p></div></header>
+          <article class="settings-card settings-card--wide audit-score-card">
+            <div class="settings-card-heading">
+              <div>
+                <p class="section-eyebrow">DURUŞ PUANI</p>
+                <h2 data-role="audit-score">Denetlenmedi</h2>
+                <p data-role="audit-summary">Makinenin güvenlik ayarlarını denetlemek için "Denetimi çalıştır"a bas.</p>
+              </div>
+              <button class="settings-action" type="button" data-action="run-system-audit">Denetimi çalıştır</button>
+            </div>
+            <div class="audit-grid" data-role="audit-check-list"><p class="settings-empty">Henüz denetim yapılmadı.</p></div>
+            <p class="settings-note" data-role="audit-checked-at">Denetim yalnızca kayıt defterini okur; hiçbir şey çalıştırmaz ve değiştirmez.</p>
+          </article>
+
+          <header class="page-header page-header--section"><div><p class="section-eyebrow">PERFORMANS</p><h1>Bakım araçları</h1><p>Kasıtlı olarak dar tutuldu: kayıt defteri temizleyicisi veya "hızlandırıcı" yok. Aşağıdaki iki iş gerçek, ölçülebilir ve geri dönüşü belli.</p></div></header>
+          <div class="performance-grid">
+            <article class="settings-card performance-card">
+              <p class="section-eyebrow">GEÇİCİ DOSYALAR</p>
+              <h2 data-role="temp-usage-summary">Hesaplanmadı</h2>
+              <p data-role="temp-usage-detail">Yalnız %TEMP%, %TMP% ve Windows\Temp klasörleri; yalnız 24 saattir dokunulmamış dosyalar. Kullanımdaki dosyalara dokunulmaz.</p>
+              <div class="performance-card__actions">
+                <button class="settings-action" type="button" data-action="scan-temp-files">Hesapla</button>
+                <button class="settings-action settings-action--danger" type="button" data-action="clean-temp-files" disabled>Temizle</button>
+              </div>
+              <p class="settings-note">Silme geri alınamaz. Önce hesapla, ne kadar yer açılacağını gör, sonra karar ver.</p>
+            </article>
+            <article class="settings-card performance-card">
+              <p class="section-eyebrow">BELLEK</p>
+              <h2 data-role="memory-summary">Okunmadı</h2>
+              <p data-role="memory-detail">Fiziksel bellek kullanımı ve en çok tüketen süreçler.</p>
+              <div class="performance-memory-list" data-role="memory-process-list"></div>
+              <div class="performance-card__actions">
+                <button class="settings-action" type="button" data-action="read-memory-status">Oku</button>
+                <button class="settings-action" type="button" data-action="trim-memory">Çalışma kümesini küçült</button>
+              </div>
+              <p class="settings-note">Dürüst olalım: bu bellek "üretmez". Süreçlerin tuttuğu sayfaları diske taşır, Windows gerekeni geri yükler. Ağır bir program kapandıktan sonra işe yarar, alışkanlık olarak yararsızdır.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="app-page" data-page="startup-software" hidden>
+          <header class="page-header"><div><p class="section-eyebrow">BAŞLANGIÇ VE YAZILIM</p><h1>Otomatik başlayanlar ve eski sürümler</h1><p>Windows ile otomatik başlayan öğeleri yönet, kurulu yazılımı bilinen açıklara karşı denetle.</p></div></header>
           <article class="settings-card settings-card--wide">
             <div class="settings-card-heading">
               <div><h2>Başlangıç öğeleri</h2><p>Windows ile otomatik çalışan programlar. Kapatmak dosyayı/kaydı silmez, geri alınabilir.</p></div>
@@ -784,6 +825,7 @@
                 <div class="settings-preference"><div><strong>Gerçek zamanlı dosya korumasını aç</strong><p>Neutron başladığında dosya izleyicisini otomatik etkinleştirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Davranış izlemeyi aç</strong><p>Yeni süreçleri ve Windows otomatik başlangıç noktalarını dosya korumasından bağımsız izler.</p></div><button class="settings-switch" type="button" data-setting-toggle="behavior_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Web korumasını aç</strong><p>İndirilen dosyaları ve kaynak URL/domain itibarını yerel olarak denetler.</p></div><button class="settings-switch" type="button" data-setting-toggle="web_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Makine öğrenmesi destekli tespit</strong><p>Statik PE modeli, sezgisel denetimlerin zaten şüpheli bulduğu imzasız bir dosyayı güçlendirebilir. Model tek başına asla karar veremez, geçerli Windows imzası taşıyan bir dosyaya dokunamaz, ve sezgisel puanı düşük olan hiçbir dosyayı yükseltemez. Kapatırsan model yalnız gözlem kaydeder.</p></div><button class="settings-switch" type="button" data-setting-toggle="ml_assisted_detection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Güvenlik bildirimleri</strong><p>Bir dosya işaretlendiğinde Windows bildirimi gösterir.</p></div><button class="settings-switch" type="button" data-setting-toggle="notifications_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Bulut itibar sorgusu</strong><p>Yerel imza eşleşmesi olmayan dosyalar için, yalnızca manuel taramalarda, SHA-256 hash'i aşağıdaki servislere sorulur. Dosya içeriği asla gönderilmez; gerçek zamanlı korumayı yavaşlatmaz. En az bir API anahtarı girilmeden hiçbir sorgu yapılmaz.</p></div><button class="settings-switch" type="button" data-setting-toggle="cloud_lookup_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Ağ bağlantısı izleme</strong><p>Bilinen kötü amaçlı IP adreslerine (C2/botnet) giden bağlantıları periyodik olarak denetler ve bildirir. Paket incelemesi veya engelleme yapmaz, yalnızca tespit eder.</p></div><button class="settings-switch" type="button" data-setting-toggle="network_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
@@ -864,6 +906,25 @@
               <p data-role="cache-detail">Değişmeyen dosyaların güvenli analiz sonuçları bu bilgisayarda tutulur.</p>
               <button class="settings-action" type="button" data-action="clear-analysis-cache">Önbelleği temizle</button>
               <p class="settings-note">Dosya, Proton veya YARA kuralları değiştiğinde ilgili sonuç otomatik geçersiz olur.</p>
+            </article>
+            <article class="settings-card settings-card--wide">
+              <div class="settings-card-heading">
+                <div>
+                  <p class="section-eyebrow">ML GÖLGE MODU</p>
+                  <h2 data-role="ml-shadow-summary">Okunmadı</h2>
+                  <p>Modeller şu an puan üretiyor ama <strong>hiçbir dosyaya dokunmuyor</strong>. Bu rapor, karar akışına alınırlarsa ne olacağını gösterir. Kayıtlar dosya yolu içermez.</p>
+                </div>
+                <button class="settings-action" type="button" data-action="read-ml-shadow">Raporu oku</button>
+              </div>
+              <div class="ml-threshold-list" data-role="ml-shadow-thresholds"><p class="settings-empty">Henüz rapor okunmadı.</p></div>
+              <p class="settings-note">"İmzalı" sütunu ölçülebilen tek yanlış pozitif göstergesidir: geçerli Windows imzası taşıyan bir dosyayı model yüksek puanlıyorsa, o eşikte açmak meşru bir programı karantinaya atardı.</p>
+            </article>
+            <article class="settings-card">
+              <p class="section-eyebrow">KALDIRMA</p>
+              <h2>Kaldırmaya hazırla</h2>
+              <p>Neutron'u kaldırmadan önce çalıştır: watchdog görevi, AMSI kaydı, Güvenlik Merkezi kaydı, Windows servisi ve güvenlik duvarı kuralları makineden temizlenir. Tek seferlik yönetici izni ister.</p>
+              <button class="settings-action" type="button" data-action="prepare-uninstall">Kaldırmaya hazırla</button>
+              <p class="settings-note" data-role="prepare-uninstall-detail">Kurulumu Denetim Masası üzerinden kaldırırsan bu adım kendiliğinden çalışır; buradaki buton elle kurtarma yolu.</p>
             </article>
             <article class="settings-card"><p class="section-eyebrow">YEREL VERİ</p><h2>data/neutron.db</h2><p>Ayarlar, geçmiş ve analiz önbelleği yerel SQLite dosyasında tutulur. Taranan dosyalar veya sonuçları güncelleme sunucusuna gönderilmez.</p><p class="settings-save-state" data-role="settings-save-state">Ayarlar hazırlanıyor</p></article>
           </div>

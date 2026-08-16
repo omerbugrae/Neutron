@@ -130,6 +130,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "memory_scan_enabled": False,
     "usb_protection_enabled": True,
     "cloud_lookup_enabled": False,
+    "ml_assisted_detection_enabled": True,
     "malwarebazaar_api_key": "",
     "virustotal_api_key": "",
     "notifications_enabled": True,
@@ -691,7 +692,7 @@ def normalize_app_setting(key: str, value: Any) -> Any:
         "amsi_protection_enabled", "watchdog_protection_enabled", "wsc_registration_enabled",
         "network_protection_enabled", "service_mode_enabled", "memory_scan_enabled", "usb_protection_enabled",
         "cloud_lookup_enabled", "notifications_enabled", "scheduled_scan_enabled",
-        "signature_auto_update_enabled",
+        "signature_auto_update_enabled", "ml_assisted_detection_enabled",
     }:
         if not isinstance(value, bool):
             raise ValueError("Ayar true veya false olmalı")
@@ -752,7 +753,24 @@ def read_app_settings() -> dict[str, Any]:
     return settings
 
 
+# The PE analyser consults this once per scanned file, and read_app_settings()
+# is an uncached SELECT -- reading it per file would put thousands of database
+# round trips inside the scan loop. Cached until a setting is written.
+_ML_ASSIST_CACHE: dict[str, bool] = {}
+
+
+def ml_assisted_detection_enabled() -> bool:
+    if "value" not in _ML_ASSIST_CACHE:
+        try:
+            _ML_ASSIST_CACHE["value"] = bool(
+                read_app_settings().get("ml_assisted_detection_enabled", True))
+        except (OSError, sqlite3.Error):
+            _ML_ASSIST_CACHE["value"] = True
+    return _ML_ASSIST_CACHE["value"]
+
+
 def write_app_setting(key: str, value: Any) -> dict[str, Any]:
+    _ML_ASSIST_CACHE.pop("value", None)
     normalized = normalize_app_setting(key, value)
     with open_database() as connection:
         connection.execute(
@@ -1358,6 +1376,111 @@ def record_ml_shadow_observation(sha256: str | None, analysis: PEAnalysis | None
                  ORDER BY last_seen_at DESC LIMIT -1 OFFSET 10000
                )"""
         )
+
+
+# Candidate cut-offs for turning shadow mode into real decisions. Nothing in
+# the product uses these yet -- they exist so the report can answer "if we had
+# acted at this score, what would we have done to this machine's files?"
+ML_CANDIDATE_THRESHOLDS = (50, 70, 80, 90, 95)
+
+
+def ml_shadow_report(limit: int = 25) -> int:
+    """Reads back what shadow mode has been quietly recording.
+
+    Shadow mode exists to produce evidence before the models are allowed to
+    act, but nothing could read that evidence until now, so the models were
+    scoring into a table nobody looked at.
+
+    The observations are path-free by design (privacy), so this cannot show
+    which file was scored. What it can show is the honest false-positive
+    proxy: a file carrying a valid Windows Authenticode signature that the
+    models score highly is almost certainly something legitimate that would
+    have been quarantined. That ratio is the number that decides whether a
+    threshold is safe to enable.
+    """
+    with open_database() as connection:
+        total = int(connection.execute(
+            "SELECT COUNT(*) FROM ml_shadow_observations").fetchone()[0] or 0)
+        if not total:
+            emit(
+                "ml-shadow-report", total=0, thresholds=[], histogram=[], samples=[],
+                model_versions=[], first_seen_at=None, last_seen_at=None,
+                message="Henüz gölge gözlem kaydedilmedi. Modeller yalnız PE dosyaları "
+                        "tarandığında puan üretir; bir tarama çalıştırıp tekrar bak.",
+            )
+            return 0
+
+        first_seen, last_seen = connection.execute(
+            "SELECT MIN(first_seen_at), MAX(last_seen_at) FROM ml_shadow_observations").fetchone()
+        model_versions = [
+            {"version": str(row[0]), "count": int(row[1])}
+            for row in connection.execute(
+                """SELECT model_version, COUNT(*) FROM ml_shadow_observations
+                   GROUP BY model_version ORDER BY COUNT(*) DESC""")
+        ]
+
+        trusted_total = int(connection.execute(
+            "SELECT COUNT(*) FROM ml_shadow_observations WHERE signature_status = 'trusted'"
+        ).fetchone()[0] or 0)
+
+        thresholds = []
+        for threshold in ML_CANDIDATE_THRESHOLDS:
+            flagged, trusted_flagged = connection.execute(
+                """SELECT COUNT(*),
+                          SUM(CASE WHEN signature_status = 'trusted' THEN 1 ELSE 0 END)
+                   FROM ml_shadow_observations WHERE ml_score >= ?""",
+                (threshold,),
+            ).fetchone()
+            flagged = int(flagged or 0)
+            trusted_flagged = int(trusted_flagged or 0)
+            thresholds.append({
+                "threshold": threshold,
+                "flagged": flagged,
+                "flagged_ratio": round(flagged / total * 100, 2),
+                # Signed-and-flagged: the closest thing to a measured false
+                # positive that path-free observations can give.
+                "trusted_flagged": trusted_flagged,
+                "trusted_flagged_ratio": round(trusted_flagged / flagged * 100, 2) if flagged else 0.0,
+            })
+
+        histogram = [
+            {"bucket": int(row[0]) * 10, "count": int(row[1])}
+            for row in connection.execute(
+                """SELECT MIN(ml_score / 10, 9) AS bucket, COUNT(*)
+                   FROM ml_shadow_observations GROUP BY bucket ORDER BY bucket""")
+        ]
+
+        # The highest scorers are what a reviewer actually needs to eyeball.
+        samples = [
+            {
+                "sha256": str(row[0]),
+                "ml_score": int(row[1]),
+                "heuristic_score": int(row[2]),
+                "signature_status": str(row[3]),
+                "disagreement": int(row[4] or 0),
+                "last_seen_at": str(row[5]),
+            }
+            for row in connection.execute(
+                """SELECT sha256, ml_score, heuristic_score, signature_status,
+                          disagreement, last_seen_at
+                   FROM ml_shadow_observations
+                   ORDER BY ml_score DESC, last_seen_at DESC LIMIT ?""",
+                (max(1, min(int(limit), 200)),),
+            )
+        ]
+
+    emit(
+        "ml-shadow-report",
+        total=total,
+        trusted_total=trusted_total,
+        first_seen_at=first_seen,
+        last_seen_at=last_seen,
+        model_versions=model_versions,
+        thresholds=thresholds,
+        histogram=histogram,
+        samples=samples,
+    )
+    return 0
 
 
 def save_scan_history(
@@ -2305,6 +2428,26 @@ def save_protection_event(event_kind: str, finding: Finding) -> int:
 # already agree) so it stays rare enough not to become a false-positive risk.
 HEURISTIC_AUTO_QUARANTINE_RISK_SCORE = 90
 
+# ML corroboration bounds (see the block in the PE analyser). The models may
+# only reinforce a file the heuristics already scored at least
+# ML_CORROBORATION_MIN_HEURISTIC, and only when they are near-certain
+# themselves. With the auto-quarantine bar at 90, a +15 bonus means the
+# affected band is heuristic 75-89: files that already tripped several
+# independent deterministic checks. Nothing below 60 can ever be moved by the
+# models, and no validly signed file can be moved by them at all.
+ML_CORROBORATION_MIN_SCORE = 90
+ML_CORROBORATION_MIN_HEURISTIC = 60
+ML_CORROBORATION_BONUS = 15
+# All five shipped classifiers are one family in one category, so the
+# ensemble's own "high-consensus" state (which needs two independent
+# categories) can never be reached today -- that state is reserved for when a
+# genuinely independent adaptor, e.g. raw-byte or behavioural, is added. Until
+# then the quorum is measured among the members that actually scored the file:
+# applies_to means a 64-bit PE is seen by a different subset than a .NET
+# assembly, so this is a count of models that looked, not of models that exist.
+ML_CORROBORATION_MIN_MEMBERS = 2
+ML_CORROBORATION_MAX_SPREAD = 25
+
 # Structural PE traits are useful supporting evidence, but common installers,
 # browsers and self-extracting archives legitimately share many of them.  A
 # weak, single heuristic must never be presented as a threat by itself.
@@ -2786,6 +2929,47 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
             pass
 
         risk_score = min(100, sum(points for points, _reason in reasons))
+
+        # --- ML corroboration -------------------------------------------
+        # The models are allowed to strengthen a case the deterministic
+        # heuristics already built, and nothing else. They cannot create a
+        # detection, cannot act on a validly signed file, and cannot lift
+        # anything that the heuristics found unremarkable.
+        #
+        # Why this shape rather than "quarantine at ML score >= X": picking
+        # that X safely needs measured false-positive data this build does
+        # not have yet (see --ml-shadow-report). Bounding the models to a
+        # bonus keeps the existing heuristic gate as the floor, so the worst
+        # case is a file that already looked suspicious on several
+        # independent deterministic grounds crossing the line sooner.
+        #
+        # Also deliberate: the five EMBER classifiers count as ONE piece of
+        # evidence, not five votes. They share a feature space and a training
+        # set, so their agreement is not independent corroboration.
+        ml_details = ml_shadow_details or {}
+        ml_member_count = int(ml_details.get("member_count") or 0)
+        ml_member_spread = int(ml_details.get("member_spread") or 0)
+        if (
+            ml_shadow_score is not None
+            and ml_shadow_score >= ML_CORROBORATION_MIN_SCORE
+            and risk_score >= ML_CORROBORATION_MIN_HEURISTIC
+            and signature_status not in {"trusted"}
+            # The ensemble collapses its members into one averaged score, so
+            # the score alone cannot distinguish "every applicable model said
+            # malicious" from "one model was certain and dragged the mean up".
+            # Require a real quorum, and require them to actually agree.
+            and ml_member_count >= ML_CORROBORATION_MIN_MEMBERS
+            and ml_member_spread <= ML_CORROBORATION_MAX_SPREAD
+            and ml_assisted_detection_enabled()
+        ):
+            risk_score = min(100, risk_score + ML_CORROBORATION_BONUS)
+            reasons.append((
+                ML_CORROBORATION_BONUS,
+                f"Statik PE modellerinin {ml_member_count} tanesi bu dosyayı yüksek olasılıkla "
+                f"zararlı buldu (ortak puan {ml_shadow_score}/100, modeller arası fark "
+                f"{ml_member_spread} puan, sezgisel bulgularla aynı yönde)",
+            ))
+
         if signature_status == "trusted" and risk_score:
             risk_score = max(0, risk_score - 18)
         if signature_status == "trusted" and publisher_thumbprint:
@@ -4322,6 +4506,549 @@ def check_vulnerable_software() -> int:
                 })
             break
     emit("vulnerable-software", items=findings)
+    return 0
+
+
+# --- Windows security posture audit -----------------------------------------
+# Read-only checks of the machine's own hardening settings. Everything here is
+# a registry read through winreg -- no PowerShell, no WMI, no subprocess -- so
+# the audit is fast, cannot be blocked by execution policy, and cannot take a
+# host process down with it. A setting that cannot be read reports "unknown"
+# rather than being silently scored as a pass: an audit that hides what it
+# could not see is worse than one that admits it.
+AUDIT_PASS = "pass"
+AUDIT_WARN = "warn"
+AUDIT_CRITICAL = "critical"
+AUDIT_UNKNOWN = "unknown"
+
+
+def read_registry_value(hive: int, key_path: str, value_name: str) -> Any:
+    """Returns the value, or None when the key/value is absent or unreadable.
+    Absent is not an error: most of these settings only exist once someone has
+    changed them away from the Windows default."""
+    if os.name != "nt" or winreg is None:
+        return None
+    for view in registry_wow64_views():
+        try:
+            with winreg.OpenKey(hive, key_path, 0, winreg.KEY_READ | view) as key:
+                return winreg.QueryValueEx(key, value_name)[0]
+        except OSError:
+            continue
+    return None
+
+
+def registry_int(hive: int, key_path: str, value_name: str, default: int | None = None) -> int | None:
+    raw = read_registry_value(hive, key_path, value_name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def audit_check(
+    check_id: str, title: str, status: str, detail: str, *, weight: int = 1, remedy: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": check_id, "title": title, "status": status,
+        "detail": detail, "weight": weight, "remedy": remedy,
+    }
+
+
+def audit_defender_realtime() -> dict[str, Any]:
+    policy_off = registry_int(
+        winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Microsoft\Windows Defender", "DisableAntiSpyware")
+    realtime_off = registry_int(
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Windows Defender\Real-Time Protection", "DisableRealtimeMonitoring")
+    if policy_off == 1:
+        return audit_check(
+            "defender", "Microsoft Defender", AUDIT_CRITICAL,
+            "Defender bir grup ilkesiyle tamamen kapatılmış.", weight=3,
+            remedy="HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\DisableAntiSpyware ilkesini kaldır.")
+    if realtime_off == 1:
+        return audit_check(
+            "defender", "Microsoft Defender", AUDIT_WARN,
+            "Defender'ın gerçek zamanlı koruması kapalı. Neutron'un dosya koruması bunun yerini "
+            "tam olarak tutmaz; ikisi birlikte çalışacak biçimde tasarlandı.", weight=3,
+            remedy="Windows Güvenliği > Virüs ve tehdit koruması ayarlarından gerçek zamanlı korumayı aç.")
+    return audit_check(
+        "defender", "Microsoft Defender", AUDIT_PASS,
+        "Gerçek zamanlı koruma kapatılmış görünmüyor. Kayıtlı başka bir antivirüs varsa Defender'ın "
+        "kendi isteğiyle pasif moda geçmiş olması normaldir.", weight=3)
+
+
+def audit_firewall() -> dict[str, Any]:
+    base = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy"
+    profiles = (("Etki alanı", "DomainProfile"), ("Özel", "StandardProfile"), ("Genel", "PublicProfile"))
+    # An absent EnableFirewall value means "never configured", and the
+    # Windows default for that is on -- so the default here is 1, not None.
+    disabled = [
+        label for label, key in profiles
+        if registry_int(winreg.HKEY_LOCAL_MACHINE, f"{base}\\{key}", "EnableFirewall", default=1) == 0
+    ]
+    if disabled:
+        return audit_check(
+            "firewall", "Windows Güvenlik Duvarı", AUDIT_CRITICAL,
+            f"Kapalı profiller: {', '.join(disabled)}.", weight=3,
+            remedy="Windows Güvenliği > Güvenlik duvarı ve ağ koruması bölümünden ilgili profili aç.")
+    return audit_check(
+        "firewall", "Windows Güvenlik Duvarı", AUDIT_PASS,
+        "Etki alanı, özel ve genel profillerin üçü de açık.", weight=3)
+
+
+def audit_uac() -> dict[str, Any]:
+    policy_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    enable_lua = registry_int(winreg.HKEY_LOCAL_MACHINE, policy_key, "EnableLUA", default=1)
+    consent = registry_int(winreg.HKEY_LOCAL_MACHINE, policy_key, "ConsentPromptBehaviorAdmin", default=5)
+    secure_desktop = registry_int(winreg.HKEY_LOCAL_MACHINE, policy_key, "PromptOnSecureDesktop", default=1)
+    if enable_lua == 0:
+        return audit_check(
+            "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_CRITICAL,
+            "UAC tamamen kapalı. Her yönetici süreci sormadan tam yetkiyle çalışır.", weight=3,
+            remedy="Denetim Masası > Kullanıcı Hesapları > Kullanıcı Hesabı Denetimi ayarlarını varsayılana getir.")
+    if consent == 0:
+        return audit_check(
+            "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_WARN,
+            "UAC açık ama yöneticiler için hiç onay istenmiyor (yükseltme sessizce veriliyor).", weight=2,
+            remedy="UAC bildirim seviyesini en az \"Yalnızca uygulamalar değişiklik yapmaya çalıştığında\" yap.")
+    if secure_desktop == 0:
+        return audit_check(
+            "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_WARN,
+            "UAC istemi güvenli masaüstünde gösterilmiyor; istem taklit edilebilir.", weight=2,
+            remedy="PromptOnSecureDesktop değerini 1 yap.")
+    return audit_check(
+        "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_PASS,
+        "UAC açık ve yükseltme istemi güvenli masaüstünde gösteriliyor.", weight=3)
+
+
+def audit_lsa_protection() -> dict[str, Any]:
+    run_as_ppl = registry_int(
+        winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Lsa", "RunAsPPL")
+    if run_as_ppl in (1, 2):
+        return audit_check(
+            "lsa", "LSA korumalı süreç", AUDIT_PASS,
+            "lsass.exe korumalı süreç olarak çalışıyor; oturum parolalarının bellekten çekilmesi zorlaşır.",
+            weight=2)
+    return audit_check(
+        "lsa", "LSA korumalı süreç", AUDIT_WARN,
+        "lsass.exe korumalı süreç olarak çalışmıyor. Yönetici yetkisi ele geçiren bir saldırgan "
+        "oturum kimlik bilgilerini bellekten okuyabilir.", weight=2,
+        remedy="HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\RunAsPPL değerini 1 yapıp yeniden başlat.")
+
+
+def audit_smb1() -> dict[str, Any]:
+    server_smb1 = registry_int(
+        winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters", "SMB1")
+    client_start = registry_int(
+        winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\mrxsmb10", "Start")
+    server_on = server_smb1 == 1
+    client_on = client_start is not None and client_start != 4
+    if server_on or client_on:
+        sides = []
+        if server_on:
+            sides.append("sunucu")
+        if client_on:
+            sides.append("istemci")
+        return audit_check(
+            "smb1", "SMBv1 protokolü", AUDIT_WARN,
+            f"SMBv1 hâlâ etkin ({', '.join(sides)}). WannaCry sınıfı solucanların yayılma yolu budur.",
+            weight=2,
+            remedy="Windows Özellikleri'nden \"SMB 1.0/CIFS Dosya Paylaşımı Desteği\"ni kaldır.")
+    return audit_check(
+        "smb1", "SMBv1 protokolü", AUDIT_PASS, "SMBv1 devre dışı.", weight=2)
+
+
+def audit_remote_desktop() -> dict[str, Any]:
+    deny = registry_int(
+        winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Terminal Server",
+        "fDenyTSConnections", default=1)
+    if deny != 0:
+        return audit_check(
+            "rdp", "Uzak Masaüstü", AUDIT_PASS, "Uzak Masaüstü bağlantıları kapalı.", weight=2)
+    nla = registry_int(
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
+        "UserAuthentication", default=1)
+    if nla != 1:
+        return audit_check(
+            "rdp", "Uzak Masaüstü", AUDIT_CRITICAL,
+            "Uzak Masaüstü açık ve Ağ Düzeyinde Kimlik Doğrulama (NLA) kapalı: oturum açmadan önce "
+            "kimlik doğrulanmıyor.", weight=2,
+            remedy="Sistem > Uzak Masaüstü ayarlarında NLA'yı zorunlu kıl, ya da RDP'yi kapat.")
+    return audit_check(
+        "rdp", "Uzak Masaüstü", AUDIT_WARN,
+        "Uzak Masaüstü açık (NLA etkin). Bu makineye dışarıdan bağlanmıyorsan kapatılması önerilir.",
+        weight=2, remedy="Kullanmıyorsan Sistem > Uzak Masaüstü'nü kapat.")
+
+
+def audit_auto_logon() -> dict[str, Any]:
+    winlogon = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    auto_logon = read_registry_value(winreg.HKEY_LOCAL_MACHINE, winlogon, "AutoAdminLogon")
+    stored_password = read_registry_value(winreg.HKEY_LOCAL_MACHINE, winlogon, "DefaultPassword")
+    if str(auto_logon or "0").strip() == "1":
+        if stored_password:
+            return audit_check(
+                "autologon", "Otomatik oturum açma", AUDIT_CRITICAL,
+                "Otomatik oturum açma açık ve parola kayıt defterinde düz metin olarak duruyor.",
+                weight=3,
+                remedy="netplwiz ile otomatik oturum açmayı kapat ve Winlogon\\DefaultPassword değerini sil.")
+        return audit_check(
+            "autologon", "Otomatik oturum açma", AUDIT_WARN,
+            "Otomatik oturum açma açık: bilgisayarı açan herkes parola girmeden oturuma düşer.",
+            weight=3, remedy="netplwiz ile otomatik oturum açmayı kapat.")
+    return audit_check(
+        "autologon", "Otomatik oturum açma", AUDIT_PASS,
+        "Oturum açmak için kimlik doğrulama gerekiyor.", weight=3)
+
+
+def audit_windows_update() -> dict[str, Any]:
+    no_auto = registry_int(
+        winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU", "NoAutoUpdate")
+    if no_auto == 1:
+        return audit_check(
+            "windows_update", "Windows Update", AUDIT_WARN,
+            "Otomatik güncelleme bir ilkeyle kapatılmış. Yamalanmamış Windows açıkları en yaygın "
+            "bulaşma yoludur.", weight=2,
+            remedy="WindowsUpdate\\AU\\NoAutoUpdate ilkesini kaldır ve bekleyen güncellemeleri kur.")
+    return audit_check(
+        "windows_update", "Windows Update", AUDIT_PASS,
+        "Otomatik güncelleme kapatılmış görünmüyor.", weight=2)
+
+
+def audit_autorun() -> dict[str, Any]:
+    # 0xFF disables AutoRun on every drive type; 0x91 is the Windows default
+    # (still autoruns on some), and anything lower is more permissive.
+    policy = registry_int(
+        winreg.HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer", "NoDriveTypeAutoRun")
+    if policy is not None and policy >= 0xFF:
+        return audit_check(
+            "autorun", "Çıkarılabilir sürücü AutoRun", AUDIT_PASS,
+            "Tüm sürücü türleri için AutoRun kapalı.", weight=1)
+    return audit_check(
+        "autorun", "Çıkarılabilir sürücü AutoRun", AUDIT_WARN,
+        "AutoRun tamamen kapatılmamış. Takılan bir USB'nin içeriği kullanıcı onayı olmadan "
+        "çalıştırılabilir.", weight=1,
+        remedy="Explorer ilkelerinde NoDriveTypeAutoRun değerini 255 yap.")
+
+
+def audit_hidden_extensions() -> dict[str, Any]:
+    hide = registry_int(
+        winreg.HKEY_CURRENT_USER,
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt", default=1)
+    if hide == 0:
+        return audit_check(
+            "file_extensions", "Dosya uzantıları", AUDIT_PASS,
+            "Bilinen dosya uzantıları gösteriliyor.", weight=1)
+    return audit_check(
+        "file_extensions", "Dosya uzantıları", AUDIT_WARN,
+        "Bilinen uzantılar gizli. \"fatura.pdf.exe\" gibi dosyalar Gezgin'de \"fatura.pdf\" olarak görünür.",
+        weight=1, remedy="Dosya Gezgini > Görünüm > Dosya adı uzantıları seçeneğini işaretle.")
+
+
+SYSTEM_AUDIT_CHECKS = (
+    audit_defender_realtime,
+    audit_firewall,
+    audit_uac,
+    audit_auto_logon,
+    audit_lsa_protection,
+    audit_remote_desktop,
+    audit_smb1,
+    audit_windows_update,
+    audit_autorun,
+    audit_hidden_extensions,
+)
+
+# Weight kept by a passing check. A warning keeps half its weight because it
+# is a real but survivable gap; a critical finding keeps none. Unknown checks
+# are excluded from both sides of the ratio so an unreadable setting cannot
+# quietly inflate or deflate the score.
+AUDIT_STATUS_CREDIT = {AUDIT_PASS: 1.0, AUDIT_WARN: 0.5, AUDIT_CRITICAL: 0.0}
+
+
+def system_audit() -> int:
+    if os.name != "nt" or winreg is None:
+        emit("error", code="SYSTEM_AUDIT_UNSUPPORTED",
+             message="Sistem denetimi yalnızca Windows üzerinde çalışır.")
+        return 2
+    checks: list[dict[str, Any]] = []
+    for check in SYSTEM_AUDIT_CHECKS:
+        try:
+            checks.append(check())
+        except Exception as error:  # noqa: BLE001 - one bad check must not sink the audit
+            checks.append(audit_check(
+                getattr(check, "__name__", "check"), "Denetim", AUDIT_UNKNOWN,
+                f"Bu denetim tamamlanamadı: {error}"))
+
+    scored = [item for item in checks if item["status"] in AUDIT_STATUS_CREDIT]
+    total_weight = sum(item["weight"] for item in scored)
+    earned = sum(AUDIT_STATUS_CREDIT[item["status"]] * item["weight"] for item in scored)
+    score = int(round(earned / total_weight * 100)) if total_weight else 0
+
+    counts = {
+        status: sum(1 for item in checks if item["status"] == status)
+        for status in (AUDIT_PASS, AUDIT_WARN, AUDIT_CRITICAL, AUDIT_UNKNOWN)
+    }
+    emit(
+        "system-audit",
+        checks=checks,
+        score=score,
+        counts=counts,
+        checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    return 0
+
+
+# --- Performance tools ------------------------------------------------------
+# Deliberately narrow. "PC cleaner" features are where security products
+# usually start shipping theatre: registry cleaners that break installs,
+# "boosters" that free memory Windows was using as cache on purpose. These two
+# do something real and nothing else.
+
+# Files still being written to are normal in a temp directory; a browser or an
+# installer mid-run owns them. Only files untouched for this long are removed,
+# which is what makes the operation safe to run while the machine is in use.
+TEMP_MIN_AGE_HOURS = 24
+
+
+def temp_clean_roots() -> list[Path]:
+    """Only these three, only ever these three. No registry, no user folders,
+    no browser profiles -- deleting is irreversible and the blast radius of a
+    'cleaner' that wanders is not worth the disk space it wins."""
+    roots: list[Path] = []
+    for variable in ("TEMP", "TMP"):
+        value = os.environ.get(variable)
+        if value:
+            roots.append(Path(value))
+    system_root = os.environ.get("SystemRoot")
+    if system_root:
+        roots.append(Path(system_root) / "Temp")
+
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            candidate = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if candidate.is_dir() and candidate not in resolved:
+            resolved.append(candidate)
+    return resolved
+
+
+def _temp_candidates(root: Path, cutoff: float) -> Iterator[Path]:
+    for current_directory, _directories, file_names in os.walk(root, onerror=lambda _error: None):
+        for file_name in file_names:
+            path = Path(current_directory) / file_name
+            try:
+                if path.is_symlink():
+                    continue
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime <= cutoff:
+                yield path
+
+
+def temp_usage() -> int:
+    cutoff = time.time() - TEMP_MIN_AGE_HOURS * 3600
+    entries = []
+    total_bytes = 0
+    total_files = 0
+    for root in temp_clean_roots():
+        root_bytes = 0
+        root_files = 0
+        for path in _temp_candidates(root, cutoff):
+            try:
+                root_bytes += path.stat().st_size
+            except OSError:
+                continue
+            root_files += 1
+        entries.append({"path": str(root), "bytes": root_bytes, "files": root_files})
+        total_bytes += root_bytes
+        total_files += root_files
+    emit(
+        "temp-usage", roots=entries, total_bytes=total_bytes, total_files=total_files,
+        min_age_hours=TEMP_MIN_AGE_HOURS,
+    )
+    return 0
+
+
+def temp_clean() -> int:
+    cutoff = time.time() - TEMP_MIN_AGE_HOURS * 3600
+    removed_files = 0
+    removed_bytes = 0
+    skipped = 0
+    for root in temp_clean_roots():
+        for path in _temp_candidates(root, cutoff):
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                # In use, locked, or owned by another account. Never force it.
+                skipped += 1
+                continue
+            removed_files += 1
+            removed_bytes += size
+        # Second pass for the directory shells the deleted files left behind.
+        # rmdir only succeeds on genuinely empty directories, so nothing that
+        # still holds a file can be taken out from under its owner.
+        for current_directory, directories, _files in os.walk(root, topdown=False, onerror=lambda _error: None):
+            for name in directories:
+                try:
+                    (Path(current_directory) / name).rmdir()
+                except OSError:
+                    continue
+    emit(
+        "temp-cleaned", removed_files=removed_files, removed_bytes=removed_bytes,
+        skipped=skipped, min_age_hours=TEMP_MIN_AGE_HOURS,
+    )
+    return 0
+
+
+class _MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def physical_memory_snapshot() -> dict[str, int] | None:
+    if os.name != "nt":
+        return None
+    status = _MEMORYSTATUSEX()
+    status.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+    try:
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+    except (OSError, AttributeError):
+        return None
+    return {
+        "total_bytes": int(status.ullTotalPhys),
+        "available_bytes": int(status.ullAvailPhys),
+        "used_bytes": int(status.ullTotalPhys - status.ullAvailPhys),
+        "load_percent": int(status.dwMemoryLoad),
+    }
+
+
+def _process_working_sets() -> list[dict[str, Any]]:
+    """(pid, name, working set) for every process this account can open."""
+    if os.name != "nt":
+        return []
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", ctypes.c_ulong),
+            ("PageFaultCount", ctypes.c_ulong),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_SET_QUOTA = 0x0100
+    kernel32 = ctypes.windll.kernel32
+    psapi = ctypes.windll.psapi
+    results: list[dict[str, Any]] = []
+
+    for pid in psapi_process_ids():
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA, False, pid)
+        if not handle:
+            continue
+        try:
+            counters = PROCESS_MEMORY_COUNTERS()
+            counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+            if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                continue
+            name = ""
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = ctypes.c_ulong(len(buffer))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                name = Path(buffer.value).name
+            results.append({
+                "pid": int(pid), "name": name,
+                "working_set_bytes": int(counters.WorkingSetSize),
+                "handle": int(handle),
+            })
+            handle = None  # ownership moves to the caller for the trim pass
+        finally:
+            if handle:
+                kernel32.CloseHandle(handle)
+    return results
+
+
+def memory_status() -> int:
+    snapshot = physical_memory_snapshot()
+    if snapshot is None:
+        emit("error", code="MEMORY_STATUS_UNAVAILABLE", message="Bellek durumu okunamadı.")
+        return 2
+    entries = _process_working_sets()
+    kernel32 = ctypes.windll.kernel32
+    top = sorted(entries, key=lambda item: item["working_set_bytes"], reverse=True)[:12]
+    top_payload = [
+        {"pid": item["pid"], "name": item["name"], "working_set_bytes": item["working_set_bytes"]}
+        for item in top
+    ]
+    for item in entries:
+        kernel32.CloseHandle(item["handle"])
+    emit("memory-status", **snapshot, process_count=len(entries), top_processes=top_payload)
+    return 0
+
+
+def memory_trim() -> int:
+    """Asks Windows to page out each reachable process's working set.
+
+    Honest about what this is: it does not create memory, it moves pages the
+    processes were holding out to disk. Windows reloads whatever is needed
+    again, so "available memory" rises briefly and then settles back, and the
+    processes involved run slower for a moment while they fault their pages
+    back in. It is genuinely useful in one case -- reclaiming a bloated
+    working set after something heavy exits -- and useless as a routine habit.
+    """
+    before = physical_memory_snapshot()
+    if before is None:
+        emit("error", code="MEMORY_TRIM_UNAVAILABLE", message="Bellek durumu okunamadı.")
+        return 2
+    kernel32 = ctypes.windll.kernel32
+    psapi = ctypes.windll.psapi
+    trimmed = 0
+    skipped = 0
+    for item in _process_working_sets():
+        handle = item["handle"]
+        try:
+            if psapi.EmptyWorkingSet(handle):
+                trimmed += 1
+            else:
+                skipped += 1
+        except OSError:
+            skipped += 1
+        finally:
+            kernel32.CloseHandle(handle)
+    after = physical_memory_snapshot() or before
+    emit(
+        "memory-trimmed",
+        trimmed_processes=trimmed,
+        skipped_processes=skipped,
+        before_available_bytes=before["available_bytes"],
+        after_available_bytes=after["available_bytes"],
+        freed_bytes=max(0, after["available_bytes"] - before["available_bytes"]),
+        total_bytes=after["total_bytes"],
+        load_percent=after["load_percent"],
+    )
     return 0
 
 
@@ -5996,6 +6723,12 @@ def main() -> int:
     action.add_argument("--startup-cancel-disable", metavar="ID", type=int, help="Başarısız elevated devre dışı bırakmayı geri al")
     action.add_argument("--startup-finalize-restore", metavar="ID", type=int, help="Elevated geri yüklemeyi onayla")
     action.add_argument("--check-vulnerable-software", action="store_true", help="Yüklü yazılımı bilinen zafiyetli sürümlere göre tara")
+    action.add_argument("--system-audit", action="store_true", help="Windows güvenlik duruşunu salt okunur denetle")
+    action.add_argument("--ml-shadow-report", action="store_true", help="Gölge modda kaydedilen model gözlemlerini raporla")
+    action.add_argument("--temp-usage", action="store_true", help="Geçici dosya klasörlerinin kapladığı alanı hesapla")
+    action.add_argument("--temp-clean", action="store_true", help="Geçici dosya klasörlerini temizle")
+    action.add_argument("--memory-status", action="store_true", help="Bellek kullanımını ve en çok tüketen süreçleri oku")
+    action.add_argument("--memory-trim", action="store_true", help="Erişilebilir süreçlerin çalışma kümesini küçült")
     parser.add_argument("--firewall-action", choices=("block", "allow"), default="block", help="Güvenlik duvarı kuralı eylemi")
     parser.add_argument("--firewall-direction", choices=("out", "in"), default="out", help="Güvenlik duvarı kuralı yönü")
     parser.add_argument("--reason", default="Kullanıcı onaylı tarama bulgusu", help="Karantina nedeni")
@@ -6129,6 +6862,18 @@ def main() -> int:
         return startup_finalize_restore(args.startup_finalize_restore)
     if args.check_vulnerable_software:
         return check_vulnerable_software()
+    if args.system_audit:
+        return system_audit()
+    if args.ml_shadow_report:
+        return ml_shadow_report(args.limit or 25)
+    if args.temp_usage:
+        return temp_usage()
+    if args.temp_clean:
+        return temp_clean()
+    if args.memory_status:
+        return memory_status()
+    if args.memory_trim:
+        return memory_trim()
     return quick_scan()
 
 

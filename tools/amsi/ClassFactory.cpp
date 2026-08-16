@@ -1,7 +1,11 @@
 #include "ClassFactory.h"
 #include "AmsiProvider.h"
 
-CNeutronClassFactory::CNeutronClassFactory() : refCount_(0) { NeutronAmsi_AddModuleRef(); }
+// Constructed with one reference already held, on behalf of whoever is about
+// to receive the pointer. Starting at zero and relying on QueryInterface to
+// take the first reference makes the matching Release() in the creator drop
+// the count to zero and free the object it is handing out.
+CNeutronClassFactory::CNeutronClassFactory() : refCount_(1) { NeutronAmsi_AddModuleRef(); }
 
 HRESULT STDMETHODCALLTYPE CNeutronClassFactory::QueryInterface(REFIID riid, void** ppvObject) {
     if (!ppvObject) return E_POINTER;

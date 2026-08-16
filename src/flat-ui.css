@@ -917,6 +917,248 @@ body.flat-ui.protection-pending {
   margin-bottom: 4px;
 }
 
+/* Rows in these lists are built from .settings-preference, which carries a
+   bottom rule and expects to sit inside .settings-preference-list. Dropped
+   into a bare container the rules collided with the card heading's own edge
+   and the last row left a rule hanging under nothing, which read as a stack
+   of doubled-up lines. Give the container the same frame the settings lists
+   get, and let the long registry paths and commands wrap instead of forcing
+   the row wider. */
+.flat-ui .firewall-recent-list {
+  border-top: 1px solid var(--flat-border);
+  margin-top: 18px;
+}
+
+.flat-ui .firewall-recent-list > .settings-empty {
+  margin: 0;
+  padding-top: 16px;
+}
+
+.flat-ui .firewall-recent-list .settings-preference {
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.flat-ui .firewall-recent-list .settings-preference > div:first-child {
+  min-width: 0;
+}
+
+.flat-ui .firewall-recent-list .settings-preference p {
+  color: var(--flat-muted);
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.flat-ui .firewall-recent-list .quarantine-row__actions {
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+/* Security posture audit. Each check is its own card: a flat column of text
+   rows made ten unrelated findings read as one wall of prose. The badge
+   carries the verdict in words, so the grid never depends on colour alone. */
+.flat-ui .audit-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  margin-top: 18px;
+}
+
+.flat-ui .audit-grid > .settings-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.flat-ui .audit-check {
+  background: var(--flat-surface-raised);
+  border: 1px solid var(--flat-border);
+  border-left: 3px solid var(--flat-border-strong);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.flat-ui .audit-check__header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.flat-ui .audit-check__header h3 {
+  color: var(--flat-text);
+  font-size: 13px;
+  margin: 0;
+}
+
+.flat-ui .audit-check p {
+  color: var(--flat-muted);
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.flat-ui .audit-check__remedy {
+  border-top: 1px solid var(--flat-border);
+  color: var(--flat-text) !important;
+  padding-top: 8px;
+}
+
+.flat-ui .audit-check__remedy::before {
+  content: 'Öneri: ';
+  color: var(--flat-muted);
+}
+
+.flat-ui .audit-check--pass { border-left-color: rgba(76, 175, 122, 0.75); }
+.flat-ui .audit-check--warn { border-left-color: rgba(224, 168, 68, 0.8); }
+.flat-ui .audit-check--critical { border-left-color: rgba(219, 84, 84, 0.85); }
+
+.flat-ui .audit-check__badge {
+  border: 1px solid var(--flat-border-strong);
+  border-radius: 999px;
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.flat-ui .audit-check--pass .audit-check__badge {
+  border-color: rgba(76, 175, 122, 0.55);
+  color: rgb(76, 175, 122);
+}
+
+.flat-ui .audit-check--warn .audit-check__badge {
+  border-color: rgba(224, 168, 68, 0.6);
+  color: rgb(214, 156, 48);
+}
+
+.flat-ui .audit-check--critical .audit-check__badge {
+  border-color: rgba(219, 84, 84, 0.6);
+  color: rgb(211, 74, 74);
+}
+
+.flat-ui .audit-check--unknown .audit-check__badge {
+  color: var(--flat-muted);
+}
+
+.flat-ui .audit-score-card [data-role="audit-score"] {
+  font-size: 26px;
+  letter-spacing: -0.01em;
+}
+
+.flat-ui .audit-score-card--critical [data-role="audit-score"] {
+  color: rgb(211, 74, 74);
+}
+
+.flat-ui .audit-score-card--warn [data-role="audit-score"] {
+  color: rgb(214, 156, 48);
+}
+
+.flat-ui .audit-score-card--pass [data-role="audit-score"] {
+  color: rgb(76, 175, 122);
+}
+
+/* Performance tools */
+.flat-ui .page-header--section {
+  margin-top: 28px;
+}
+
+.flat-ui .performance-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+}
+
+.flat-ui .performance-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* Deleting is irreversible, so the button that does it must not look like
+   the button that measures. */
+.flat-ui .settings-action--danger:not(:disabled) {
+  border-color: rgba(219, 84, 84, 0.55) !important;
+  color: rgb(211, 74, 74) !important;
+}
+
+.flat-ui .settings-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.flat-ui .performance-memory-list:not(:empty) {
+  border-top: 1px solid var(--flat-border);
+  margin-top: 14px;
+  padding-top: 6px;
+}
+
+.flat-ui .performance-memory-row {
+  display: flex;
+  font-size: 11px;
+  gap: 14px;
+  justify-content: space-between;
+  padding: 5px 0;
+}
+
+.flat-ui .performance-memory-row span {
+  color: var(--flat-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flat-ui .performance-memory-row strong {
+  color: var(--flat-text);
+  flex: 0 0 auto;
+}
+
+/* ML shadow threshold table */
+.flat-ui .ml-threshold-list {
+  border-top: 1px solid var(--flat-border);
+  margin-top: 18px;
+}
+
+.flat-ui .ml-threshold-list > .settings-empty {
+  margin: 0;
+  padding-top: 16px;
+}
+
+.flat-ui .ml-threshold-row {
+  border-bottom: 1px solid var(--flat-border);
+  display: grid;
+  font-size: 12px;
+  gap: 12px;
+  grid-template-columns: 70px 1fr 80px 130px;
+  padding: 9px 0;
+}
+
+.flat-ui .ml-threshold-row:last-child {
+  border-bottom: 0;
+}
+
+.flat-ui .ml-threshold-row--header span {
+  color: var(--flat-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.flat-ui .ml-threshold-row--risky span:last-child {
+  color: rgb(211, 74, 74);
+  font-weight: 700;
+}
+
 .flat-ui .settings-switch {
   align-items: center;
   background: transparent;

@@ -43,7 +43,7 @@ class EmberScore:
 @dataclass(frozen=True)
 class _Runtime:
     lightgbm: Any
-    thrember: Any
+    features: Any
 
 
 _RUNTIME_CHECKED = False
@@ -60,7 +60,12 @@ def _optional_runtime() -> _Runtime | None:
     try:
         _RUNTIME = _Runtime(
             lightgbm=importlib.import_module("lightgbm"),
-            thrember=importlib.import_module("thrember"),
+            # ember_features is thrember 0.1.0's features.py vendored verbatim
+            # (see the header there). Importing the thrember package instead
+            # would execute its __init__, which pulls the training and
+            # dataset-download modules -- and with them polars and
+            # huggingface_hub -- into a build that never trains anything.
+            features=importlib.import_module("ember_features"),
         )
     except Exception:
         # Optional native runtimes can fail with loader-specific exception
@@ -172,7 +177,7 @@ def score_pe_models(
             if sample_path.stat().st_size > SAMPLE_MAX_BYTES:
                 return None
             bytez = sample_path.read_bytes()
-        extractor = runtime.thrember.PEFeatureExtractor()
+        extractor = runtime.features.PEFeatureExtractor()
         feature_vector = extractor.feature_vector(bytez)
         scores: list[EmberScore] = []
         for item, model_path in selected:

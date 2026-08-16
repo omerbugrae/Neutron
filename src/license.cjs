@@ -44,11 +44,21 @@ function clean(value, label, max) {
 }
 function deviceMaterial() {
   if (process.platform === 'win32') {
+    // Absolute path, not bare 'reg.exe': resolving through PATH means the
+    // lookup can fail in one process context and succeed in another.
+    const regPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
     try {
-      const output = execFileSync('reg.exe', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      const output = execFileSync(regPath, ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
       const match = /MachineGuid\s+REG_SZ\s+([^\r\n]+)/i.exec(output);
       if (match) return `win:${match[1].trim()}`;
-    } catch { /* fall through */ }
+    } catch { /* handled below */ }
+    // Falling back to hostname+username here would be worse than failing.
+    // MachineGuid is machine-wide and identical everywhere; the fallback is
+    // per-user, so a single failed lookup silently produces a different
+    // device hash. That is exactly how a licence activated by the elevated
+    // installer stops matching the same licence read by the desktop app --
+    // the key is fine, the binding moved underneath it. Fail loudly instead.
+    throw new Error('Cihaz kimligi okunamadi (MachineGuid). Lisans dogrulanamaz.');
   }
   return `${process.platform}:${os.hostname()}:${os.userInfo().username}`;
 }
