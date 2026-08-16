@@ -34,6 +34,10 @@ Var LicenseKey
 Var LicenseDeviceHash
 Var HadPreviousLicense
 Var ProgramDataDir
+Var DeleteUserData
+Var ProfileIndex
+Var ProfileKey
+Var ProfilePath
 
 !ifndef APP_FILE_VERSION
   !error "APP_FILE_VERSION is required"
@@ -143,6 +147,36 @@ Function un.onInit
 !if "${TARGET_ARCH}" == "x64"
   SetRegView 64
 !endif
+
+  ReadEnvStr $ProgramDataDir "ProgramData"
+  StrCmp $ProgramDataDir "" 0 un_program_data_ready
+  StrCpy $ProgramDataDir "C:\\ProgramData"
+un_program_data_ready:
+
+  ; The uninstaller only ever removed $INSTDIR, which left the machine
+  ; learning models behind -- roughly half a gigabyte per user profile, in a
+  ; folder the user has no reason to know about. Ask once, here, so the
+  ; answer is known before anything is deleted.
+  StrCpy $DeleteUserData "0"
+  MessageBox MB_YESNO|MB_ICONQUESTION \
+    "Neutron'un kişisel verileri de silinsin mi?$\r$\n$\r$\nSilinecekler:$\r$\n  · Makine öğrenmesi modelleri (yaklaşık 500 MB)$\r$\n  · Tarama geçmişi, ayarlar ve veritabanı$\r$\n  · Karantinadaki dosyalar (KALICI olarak silinir, geri alınamaz)$\r$\n  · Lisans anahtarı (yeniden kurulumda tekrar aktivasyon gerekir)$\r$\n$\r$\nHayır derseniz bu veriler diskte kalır ve Neutron'u yeniden kurarsanız kullanılmaya devam eder." \
+    /SD IDNO IDNO un_keep_user_data
+  StrCpy $DeleteUserData "1"
+un_keep_user_data:
+FunctionEnd
+
+; Removes one user profile's Neutron data folder. Called for every profile on
+; the machine because the models are stored per user (%APPDATA%\Neutron) while
+; the uninstaller itself runs elevated -- $APPDATA under elevation belongs to
+; whichever account approved the UAC prompt, which is not necessarily the
+; account that installed and used Neutron.
+Function un.RemoveProfileData
+  Exch $ProfilePath
+  StrCmp $ProfilePath "" un_remove_profile_done
+  IfFileExists "$ProfilePath\\AppData\\Roaming\\Neutron\\*.*" 0 un_remove_profile_done
+  RMDir /r "$ProfilePath\\AppData\\Roaming\\Neutron"
+un_remove_profile_done:
+  Pop $ProfilePath
 FunctionEnd
 
 Section "Neutron" SEC_MAIN
@@ -348,9 +382,38 @@ cleanup_done:
   ; own -- the folder is Neutron-specific and the manifest already removed
   ; the known files -- so clear it and schedule whatever is still locked for
   ; deletion at the next boot rather than leaving it forever.
-  IfFileExists "$INSTDIR\\*.*" 0 uninstall_done
+  IfFileExists "$INSTDIR\\*.*" 0 uninstall_user_data
   RMDir /r "$INSTDIR"
-  IfFileExists "$INSTDIR\\*.*" 0 uninstall_done
+  IfFileExists "$INSTDIR\\*.*" 0 uninstall_user_data
   RMDir /r /REBOOTOK "$INSTDIR"
+
+uninstall_user_data:
+  StrCmp $DeleteUserData "1" 0 uninstall_done
+
+  ; Machine-wide state: the licence lives here, and so does the data
+  ; directory when Neutron runs as a service.
+  RMDir /r "$ProgramDataDir\\Neutron"
+
+  ; Per-user state (models, database, quarantine, per-user licence). The
+  ; elevated uninstaller's own $APPDATA is not necessarily the user who
+  ; installed Neutron, so walk every profile registered on the machine
+  ; instead of trusting it.
+  SetShellVarContext current
+  Push "$PROFILE"
+  Call un.RemoveProfileData
+  SetShellVarContext all
+
+  StrCpy $ProfileIndex 0
+uninstall_profile_loop:
+  EnumRegKey $ProfileKey HKLM \
+    "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList" $ProfileIndex
+  StrCmp $ProfileKey "" uninstall_done
+  ReadRegStr $ProfilePath HKLM \
+    "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\$ProfileKey" "ProfileImagePath"
+  Push "$ProfilePath"
+  Call un.RemoveProfileData
+  IntOp $ProfileIndex $ProfileIndex + 1
+  Goto uninstall_profile_loop
+
 uninstall_done:
 SectionEnd

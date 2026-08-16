@@ -14,6 +14,7 @@
   const quickScanButtons = [...document.querySelectorAll('[data-action="quick-scan"]')];
   const heroPrimaryAction = document.querySelector('.hero-actions [data-action="quick-scan"]');
   const folderScanButtons = [...document.querySelectorAll('[data-action="choose-folder-scan"]')];
+  const cancelScanButton = document.querySelector('[data-action="cancel-scan"]');
   const scanModeTabs = [...document.querySelectorAll('[data-scan-mode]')];
   const scanModeOptions = document.querySelector('[data-role="scan-mode-options"]');
   const protectionToggle = document.querySelector('[data-action="toggle-protection"]');
@@ -182,6 +183,10 @@
       button.setAttribute('aria-busy', disabled ? 'true' : 'false');
     });
     folderScanButtons.forEach((button) => { button.disabled = disabled; });
+    if (cancelScanButton) {
+      cancelScanButton.hidden = !disabled;
+      cancelScanButton.disabled = false;
+    }
   };
 
   const renderScanMode = async (mode) => {
@@ -644,7 +649,7 @@
       const confirmed = Number(scan.confirmed_count) || 0;
       const review = Number(scan.review_count) || 0;
       const row = document.createElement('article');
-      row.className = 'history-row glass-dom-surface';
+      row.className = 'history-row surface-card';
 
       const stamp = document.createElement('p');
       stamp.className = 'history-row__stamp';
@@ -934,13 +939,18 @@
   const renderSettings = (settings) => {
     currentSettings = settings;
     settingToggles.forEach((button) => {
-      const enabled = Boolean(settings[button.dataset.settingToggle]);
+      const key = button.dataset.settingToggle;
+      const enabled = Boolean(settings[key]);
       button.classList.toggle('is-active', enabled);
       button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-      const label = button.querySelector('span');
+      // The protection-page switches put the visual track in the first span,
+      // so a bare querySelector('span') would overwrite the switch itself
+      // with text. Those mark their text span with data-toggle-label.
+      const label = button.querySelector('[data-toggle-label]') || button.querySelector('span');
       if (label) label.textContent = enabled ? 'Açık' : 'Kapalı';
       button.disabled = false;
     });
+    setText('ransomware-protection-state', settings.ransomware_protection_enabled ? 'Etkin' : 'Kapalı');
     if (scanLimitSelect) {
       const limit = Number(settings.scan_max_files);
       scanLimitSelect.value = String(Number.isFinite(limit) ? limit : 1500);
@@ -1417,6 +1427,8 @@
     unknown: 'Denetlenemedi',
   };
 
+  let auditFixInfo = {};
+
   const renderSystemAudit = (payload) => {
     const list = document.querySelector('[data-role="audit-check-list"]');
     if (!list) return;
@@ -1459,19 +1471,80 @@
           remedy.textContent = check.remedy;
           card.append(remedy);
         }
+
+        const fix = check.status !== 'pass' ? auditFixInfo[check.fix] : null;
+        if (fix) {
+          const state = document.createElement('p');
+          state.className = 'audit-check__remedy';
+          state.hidden = true;
+
+          const button = document.createElement('button');
+          button.className = 'settings-action';
+          button.type = 'button';
+          button.textContent = fix.label;
+          button.addEventListener('click', async () => {
+            if (!window.confirm(fix.confirm)) return;
+            button.disabled = true;
+            button.textContent = 'Uygulanıyor…';
+            const result = await engine?.applyAuditFix?.(check.fix);
+            if (result?.ok) {
+              state.hidden = false;
+              state.textContent = fix.note
+                || (fix.restart
+                  ? 'Uygulandı. Bilgisayarı yeniden başlattıktan sonra etkin olacak.'
+                  : 'Uygulandı.');
+              // A restart-gated fix still reads as unfixed, so re-running the
+              // audit right after would only tell the user it failed. That
+              // also means this card is not re-rendered, so the button has to
+              // be settled here -- it used to stay disabled reading
+              // "Uygulanıyor…" forever.
+              if (!fix.restart) {
+                await applySystemAudit();
+                return;
+              }
+              button.textContent = 'Uygulandı';
+              return;
+            }
+            state.hidden = false;
+            state.textContent = result?.code === 'ELEVATION_CANCELLED'
+              ? 'Yönetici izni verilmedi, hiçbir ayar değiştirilmedi.'
+              : (result?.message || 'Düzeltme uygulanamadı.');
+            button.disabled = false;
+            button.textContent = fix.label;
+          });
+          card.append(button, state);
+        }
         list.append(card);
       });
 
     const counts = payload?.counts || {};
     const critical = Number(counts.critical) || 0;
     const warn = Number(counts.warn) || 0;
+    const pass = Number(counts.pass) || 0;
     const unknown = Number(counts.unknown) || 0;
-    setText('audit-score', `${Number(payload?.score) || 0}/100`);
+    const score = Number(payload?.score) || 0;
+
+    setText('audit-score', String(score));
+    setText('audit-count-critical', String(critical));
+    setText('audit-count-warn', String(warn));
+    setText('audit-count-pass', String(pass));
+    setText('audit-count-unknown', String(unknown));
+    setText('audit-verdict', critical
+      ? 'Acil müdahale gerekiyor'
+      : (warn ? 'İyileştirilebilir' : 'Sertleştirme yeterli'));
     setText('audit-summary', critical || warn
-      ? `${critical} kritik, ${warn} uyarı${unknown ? `, ${unknown} denetlenemedi` : ''}.`
+      ? `${critical} kritik, ${warn} uyarı${unknown ? `, ${unknown} denetlenemedi` : ''}. Aşağıdaki kartlardan düzeltebilirsin.`
       : `Denetlenen ayarların hepsi güvenli tarafta${unknown ? `, ${unknown} ayar okunamadı` : ''}.`);
 
-    const card = list.closest('.audit-score-card');
+    // 2 * pi * r, with r = 52 as set on the circles in the markup.
+    const circumference = 2 * Math.PI * 52;
+    const ring = document.querySelector('[data-role="audit-ring"]');
+    if (ring) {
+      ring.style.strokeDasharray = String(circumference);
+      ring.style.strokeDashoffset = String(circumference * (1 - Math.min(100, Math.max(0, score)) / 100));
+    }
+
+    const card = document.querySelector('.audit-score-card');
     card?.classList.remove('audit-score-card--critical', 'audit-score-card--warn', 'audit-score-card--pass');
     card?.classList.add(critical
       ? 'audit-score-card--critical'
@@ -1486,6 +1559,9 @@
       button.textContent = 'Denetleniyor…';
     }
     try {
+      if (!Object.keys(auditFixInfo).length) {
+        auditFixInfo = (await engine?.getAuditFixInfo?.()) || {};
+      }
       const result = await engine.runSystemAudit();
       if (!result?.ok) {
         setText('audit-summary', result?.message || 'Sistem denetimi tamamlanamadı.');
@@ -2276,7 +2352,26 @@
       setText('activity-title', 'Tarama hatası');
       setText('activity-detail', message);
       updateScanResult('Tarama tamamlanamadı', message);
+      return;
     }
+
+    if (event.type === 'cancelled') {
+      scanning = false;
+      setReadyState();
+      renderScanMode(selectedScanMode);
+      const message = 'Tarama kullanıcı tarafından iptal edildi.';
+      setText('scan-page-heading', 'Tarama iptal edildi');
+      setText('scan-page-summary', message);
+      setText('activity-title', 'Tarama iptal edildi');
+      setText('activity-detail', message);
+      updateScanResult('Tarama iptal edildi', message);
+    }
+  });
+
+  cancelScanButton?.addEventListener('click', async () => {
+    if (!scanning || !engine?.cancelScan) return;
+    cancelScanButton.disabled = true;
+    await engine.cancelScan();
   });
 
   quickScanButtons.forEach((button) => button.addEventListener('click', async () => {

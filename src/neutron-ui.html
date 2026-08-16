@@ -63,6 +63,21 @@
       <symbol id="icon-arrow" viewBox="0 0 24 24">
         <path d="M5 12h14M14 7l5 5-5 5" />
       </symbol>
+      <!-- Ransomware: a document whose contents have been locked away. A plain
+           padlock would read as generic security next to the shield icon. -->
+      <symbol id="icon-file-lock" viewBox="0 0 24 24">
+        <path d="M13 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21H10" />
+        <path d="M13 3v4.5h4.5M17.5 7.5v3" />
+        <rect x="12.5" y="14" width="8.5" height="6.5" rx="1.5" />
+        <path d="M14.8 14v-1.9a2.45 2.45 0 0 1 4.9 0V14" />
+      </symbol>
+      <!-- Performance gauge: needle sweeping a dial. -->
+      <symbol id="icon-gauge" viewBox="0 0 24 24">
+        <path d="M3.4 16.5a9 9 0 1 1 17.2 0" />
+        <path d="M12 15.6 16.3 10" />
+        <circle cx="12" cy="16.4" r="1.5" />
+        <path d="M5.6 10.4l1.4 1M12 7.6v1.6M18.4 10.4l-1.4 1" />
+      </symbol>
       <symbol id="icon-chevron" viewBox="0 0 24 24">
         <path d="m9 6 6 6-6 6" />
       </symbol>
@@ -104,17 +119,7 @@
     </section>
 
     <header
-      class="native-titlebar glass-dom-surface"
-      data-liquidglass
-      data-glass-id="titlebar"
-      data-glass-radius="4"
-      data-glass-depth="0.4"
-      data-glass-refraction="0.5"
-      data-glass-dispersion="0.18"
-      data-glass-frost="0.1"
-      data-glass-specular="0.6"
-      data-glass-interactive="false"
-    >
+      class="native-titlebar surface-card">
       <a class="titlebar-brand" href="#dashboard" aria-label="Neutron ana sayfa">
         <img class="titlebar-logo" src="../assets/neutron-logo.png" alt="" />
         <span class="titlebar-product">Neutron</span>
@@ -139,17 +144,7 @@
 
     <div class="application-layout">
       <aside
-        class="sidebar glass-dom-surface"
-        data-liquidglass
-        data-glass-id="sidebar"
-        data-glass-radius="28"
-        data-glass-depth="0.72"
-        data-glass-refraction="0.82"
-        data-glass-dispersion="0.36"
-        data-glass-frost="0.14"
-        data-glass-specular="0.78"
-        data-glass-interactive="true"
-      >
+        class="sidebar surface-card">
         <div class="sidebar-edition">
           <span>NEUTRON</span>
           <strong>STANDARD</strong>
@@ -181,7 +176,7 @@
             <span>Sistem Denetimi</span>
           </button>
           <button class="navigation-item" type="button" data-page-target="startup-software">
-            <svg aria-hidden="true"><use href="#icon-history"></use></svg>
+            <svg aria-hidden="true"><use href="#icon-gauge"></use></svg>
             <span>Başlangıç ve Yazılım</span>
           </button>
           <button class="navigation-item" type="button" data-page-target="activity">
@@ -205,8 +200,7 @@
         <button
           class="navigation-item navigation-item--account"
           type="button"
-          data-page-target="account"
-        >
+          data-page-target="account">
           <svg aria-hidden="true"><use href="#icon-shield"></use></svg>
           <span>Hesap</span>
         </button>
@@ -214,8 +208,7 @@
         <button
           class="navigation-item navigation-item--settings"
           type="button"
-          data-page-target="settings"
-        >
+          data-page-target="settings">
           <svg aria-hidden="true"><use href="#icon-settings"></use></svg>
           <span>Ayarlar</span>
         </button>
@@ -232,55 +225,25 @@
 
           <div class="header-actions">
             <button
-              class="database-pill glass-dom-surface"
+              class="database-pill surface-card"
               type="button"
-              data-page-target="activity"
-              data-liquidglass
-              data-glass-id="database-status"
-              data-glass-radius="24"
-              data-glass-depth="0.48"
-              data-glass-refraction="0.64"
-              data-glass-dispersion="0.24"
-              data-glass-frost="0.08"
-              data-glass-specular="0.72"
-              data-glass-interactive="true"
-            >
+              data-page-target="activity">
               <span class="live-dot live-dot--pending"></span>
               <span data-role="database-state">Yerel tarama hazırlanıyor</span>
             </button>
             <button
-              class="icon-button glass-dom-surface"
+              class="icon-button surface-card"
               type="button"
               aria-label="Bildirimler"
-              data-page-target="activity"
-              data-liquidglass
-              data-glass-id="notifications"
-              data-glass-radius="22"
-              data-glass-depth="0.52"
-              data-glass-refraction="0.7"
-              data-glass-dispersion="0.3"
-              data-glass-frost="0.06"
-              data-glass-specular="0.82"
-              data-glass-interactive="true"
-            >
+              data-page-target="activity">
               <svg aria-hidden="true"><use href="#icon-bell"></use></svg>
             </button>
           </div>
         </header>
 
         <section
-          class="hero-protection glass-dom-surface"
-          id="scan"
-          data-liquidglass
-          data-glass-id="protection-hero"
-          data-glass-radius="38"
-          data-glass-depth="0.92"
-          data-glass-refraction="1"
-          data-glass-dispersion="0.58"
-          data-glass-frost="0.1"
-          data-glass-specular="1"
-          data-glass-interactive="true"
-        >
+          class="hero-protection surface-card"
+          id="scan">
           <div class="hero-shield-column">
             <div class="hero-cube" role="img" aria-label="Neutron koruma motoru">
               <div class="rendered-cube" aria-hidden="true">
@@ -303,20 +266,10 @@
             <p data-role="scan-summary">Dosyalar, çalışan işlemler ve sistemin kritik alanları güvenlik motoruna bağlanmaya hazır.</p>
             <div class="hero-actions">
               <button
-                class="primary-action glass-prominent-button"
+                class="primary-action"
                 type="button"
                 data-action="quick-scan"
-                title="Kritik kullanıcı alanları için salt-okunur hızlı tarama"
-                data-liquidglass
-                data-glass-id="quick-scan-action"
-                data-glass-radius="28"
-                data-glass-depth="0.78"
-                data-glass-refraction="0.88"
-                data-glass-dispersion="0.42"
-                data-glass-frost="0.04"
-                data-glass-specular="1"
-                data-glass-interactive="false"
-              >
+                title="Kritik kullanıcı alanları için salt-okunur hızlı tarama">
                 <span data-action-label>Hızlı tarama başlat</span>
                 <svg aria-hidden="true"><use href="#icon-arrow"></use></svg>
               </button>
@@ -357,17 +310,7 @@
 
           <div class="module-grid">
             <article
-              class="protection-module glass-dom-surface"
-              data-liquidglass
-              data-glass-id="module-file-protection"
-              data-glass-radius="26"
-              data-glass-depth="0.66"
-              data-glass-refraction="0.78"
-              data-glass-dispersion="0.3"
-              data-glass-frost="0.1"
-              data-glass-specular="0.76"
-              data-glass-interactive="true"
-            >
+              class="protection-module surface-card">
               <header class="module-header">
                 <span class="module-icon"><svg aria-hidden="true"><use href="#icon-file"></use></svg></span>
                 <span class="module-status module-status--pending"><i></i><span data-role="overview-file-protection-state">Başlatılıyor</span></span>
@@ -378,24 +321,13 @@
                 class="module-open"
                 type="button"
                 aria-label="Dosya koruması ayrıntılarını aç"
-                data-page-target="protection"
-              >
+                data-page-target="protection">
                 <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
               </button>
             </article>
 
             <article
-              class="protection-module glass-dom-surface"
-              data-liquidglass
-              data-glass-id="module-behavior-monitoring"
-              data-glass-radius="26"
-              data-glass-depth="0.66"
-              data-glass-refraction="0.8"
-              data-glass-dispersion="0.32"
-              data-glass-frost="0.08"
-              data-glass-specular="0.78"
-              data-glass-interactive="true"
-            >
+              class="protection-module surface-card">
               <header class="module-header">
                 <span class="module-icon"><svg aria-hidden="true"><use href="#icon-pulse"></use></svg></span>
                 <span class="module-status module-status--pending"><i></i><span data-role="overview-behavior-state">Başlatılıyor</span></span>
@@ -406,24 +338,13 @@
                 class="module-open"
                 type="button"
                 aria-label="Davranış izleme ayrıntılarını aç"
-                data-page-target="protection"
-              >
+                data-page-target="protection">
                 <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
               </button>
             </article>
 
             <article
-              class="protection-module glass-dom-surface"
-              data-liquidglass
-              data-glass-id="module-web-protection"
-              data-glass-radius="26"
-              data-glass-depth="0.66"
-              data-glass-refraction="0.76"
-              data-glass-dispersion="0.34"
-              data-glass-frost="0.12"
-              data-glass-specular="0.72"
-              data-glass-interactive="true"
-            >
+              class="protection-module surface-card">
               <header class="module-header">
                 <span class="module-icon"><svg aria-hidden="true"><use href="#icon-globe"></use></svg></span>
                 <span class="module-status module-status--pending"><i></i><span data-role="overview-web-state">Başlatılıyor</span></span>
@@ -434,24 +355,13 @@
                 class="module-open"
                 type="button"
                 aria-label="Web koruması ayrıntılarını aç"
-                data-page-target="protection"
-              >
+                data-page-target="protection">
                 <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
               </button>
             </article>
 
             <article
-              class="protection-module protection-module--pending glass-dom-surface"
-              data-liquidglass
-              data-glass-id="module-neutron-engine"
-              data-glass-radius="26"
-              data-glass-depth="0.58"
-              data-glass-refraction="0.7"
-              data-glass-dispersion="0.26"
-              data-glass-frost="0.16"
-              data-glass-specular="0.66"
-              data-glass-interactive="true"
-            >
+              class="protection-module protection-module--pending surface-card">
               <header class="module-header">
                 <span class="module-icon"><svg aria-hidden="true"><use href="#icon-chip"></use></svg></span>
                 <span class="module-status module-status--pending" data-role="overview-engine-status"><i></i><span data-role="overview-engine-state">Hazırlanıyor</span></span>
@@ -462,8 +372,7 @@
                 class="module-open"
                 type="button"
                 aria-label="Neutron Engine ayrıntılarını aç"
-                data-page-target="protection"
-              >
+                data-page-target="protection">
                 <svg aria-hidden="true"><use href="#icon-chevron"></use></svg>
               </button>
             </article>
@@ -472,18 +381,7 @@
 
         <section class="activity-section" id="activity">
           <article
-            class="activity-card glass-dom-surface"
-            data-liquidglass
-            data-glass-id="security-activity"
-            data-glass-radius="28"
-            data-glass-depth="1.12"
-            data-glass-refraction="1.34"
-            data-glass-dispersion="0.58"
-            data-glass-frost="0.05"
-            data-glass-specular="1.28"
-            data-glass-tint="rgba(82, 236, 207, 0.2)"
-            data-glass-interactive="true"
-          >
+            class="activity-card surface-card">
             <header class="activity-card__header">
               <div>
                 <p class="section-eyebrow">SON ETKİNLİK</p>
@@ -501,18 +399,7 @@
           </article>
 
           <article
-            class="health-card glass-dom-surface"
-            data-liquidglass
-            data-glass-id="protection-coverage"
-            data-glass-radius="28"
-            data-glass-depth="1.16"
-            data-glass-refraction="1.38"
-            data-glass-dispersion="0.66"
-            data-glass-frost="0.045"
-            data-glass-specular="1.34"
-            data-glass-tint="rgba(134, 123, 255, 0.22)"
-            data-glass-interactive="true"
-          >
+            class="health-card surface-card">
             <p class="section-eyebrow">KORUMA KAPSAMI</p>
             <div class="health-score">
               <div
@@ -521,8 +408,7 @@
                 aria-label="Planlanan dört koruma modülünün üçü arayüzde hazır"
                 aria-valuemin="0"
                 aria-valuemax="4"
-                aria-valuenow="3"
-              >
+                aria-valuenow="3">
                 <span>3</span>
                 <small>/4</small>
               </div>
@@ -555,19 +441,20 @@
           </div>
 
           <div class="scan-page-grid">
-            <article class="scan-primary-panel glass-dom-surface" data-liquidglass data-glass-id="scan-page-primary" data-glass-radius="34" data-glass-depth="1.08" data-glass-refraction="1.22" data-glass-dispersion="0.58" data-glass-frost="0.06" data-glass-specular="1.22" data-glass-tint="rgba(61, 219, 203, 0.18)">
+            <article class="scan-primary-panel surface-card">
               <div class="scan-primary-icon"><svg aria-hidden="true"><use href="#icon-scan"></use></svg></div>
               <p class="section-eyebrow" data-role="scan-page-label">HIZLI TARAMA</p>
               <h2 data-role="scan-page-heading">Kritik alanlar</h2>
               <p data-role="scan-page-summary">En fazla 1.500 dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.</p>
-              <button class="primary-action glass-prominent-button" type="button" data-action="quick-scan">
+              <button class="primary-action" type="button" data-action="quick-scan">
                 <span data-action-label>Hızlı tarama başlat</span>
                 <svg aria-hidden="true"><use href="#icon-arrow"></use></svg>
               </button>
+              <button class="settings-action" type="button" data-action="cancel-scan" hidden>Taramayı iptal et</button>
               <div class="scan-mode-options" data-role="scan-mode-options"></div>
             </article>
 
-            <article class="scan-info-panel glass-dom-surface" data-liquidglass data-glass-id="scan-page-information" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.92">
+            <article class="scan-info-panel surface-card">
               <p class="section-eyebrow">TARAMA KURALLARI</p>
               <ul class="scan-rules">
                 <li><span>01</span> EICAR test imzası kontrol edilir.</li>
@@ -578,7 +465,7 @@
             </article>
           </div>
 
-          <article class="scan-result-panel glass-dom-surface" data-liquidglass data-glass-id="scan-page-result" data-glass-radius="28" data-glass-depth="0.92" data-glass-refraction="1.04" data-glass-dispersion="0.44" data-glass-frost="0.08" data-glass-specular="1.08">
+          <article class="scan-result-panel surface-card">
             <div class="scan-result-panel__icon"><svg aria-hidden="true"><use href="#icon-shield"></use></svg></div>
             <div>
               <p class="section-eyebrow">SONUÇ DURUMU</p>
@@ -587,7 +474,7 @@
             </div>
           </article>
 
-          <article class="finding-panel glass-dom-surface" data-liquidglass data-glass-id="scan-page-findings" data-glass-radius="28" data-glass-depth="0.9" data-glass-refraction="1.02" data-glass-dispersion="0.44" data-glass-frost="0.08" data-glass-specular="1.04">
+          <article class="finding-panel surface-card">
             <div class="finding-panel__header">
               <div><p class="section-eyebrow">BULGULAR</p><h2>Tarama sonuçları</h2></div>
               <span data-role="finding-count">Tarama bekleniyor</span>
@@ -616,11 +503,11 @@
             </button>
           </article>
           <div class="detail-module-grid">
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-file" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-file"></use></svg></span>
               <p class="section-eyebrow">DOSYA KORUMASI</p><h2 data-role="file-protection-state">Başlatılıyor</h2><p data-role="file-protection-detail">Yeni ve değişen dosyalar yerel olarak izlenecek.</p>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-behavior" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-pulse"></use></svg></span>
               <p class="section-eyebrow">DAVRANIŞ İZLEME</p><h2 data-role="behavior-protection-state">Başlatılıyor</h2><p data-role="behavior-protection-detail">Yeni süreçler ve Windows otomatik başlangıç noktaları salt-okunur izlenecek.</p>
               <div class="module-control-row">
@@ -631,14 +518,25 @@
                 </button>
               </div>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-web" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-globe"></use></svg></span>
               <p class="section-eyebrow">WEB KORUMASI</p><h2 data-role="web-protection-state">Başlatılıyor</h2><p data-role="web-protection-detail">İndirilen dosyalar ve bağlantı itibarı yerel Proton verisiyle denetlenir.</p>
               <form class="web-check-form" data-role="web-check-form"><input type="url" data-role="web-check-input" placeholder="https://ornek.com" aria-label="Denetlenecek bağlantı"><button type="submit">Denetle ve aç</button></form>
               <p class="web-check-result" data-role="web-check-result">Adres yalnızca yerel Proton veritabanında kontrol edilir.</p>
               <div class="module-control-row"><span>İndirme ve bağlantı koruması</span><button class="protection-toggle protection-toggle--compact" type="button" data-action="toggle-web-protection" aria-pressed="false" disabled><span class="protection-toggle__track" aria-hidden="true"><i></i></span><span data-role="web-toggle-label">Aç</span></button></div>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-amsi" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
+              <span class="module-icon"><svg aria-hidden="true"><use href="#icon-file-lock"></use></svg></span>
+              <p class="section-eyebrow">FİDYE YAZILIMI KORUMASI</p><h2 data-role="ransomware-protection-state">Kapalı</h2><p data-role="ransomware-protection-detail">Belgeler, Masaüstü, Resimler ve İndirilenler klasörlerine gizli tuzak dosyaları koyar. Bunlardan biri değişirse ya da kısa sürede çok sayıda dosya şifreli görünümlü içerikle yeniden yazılırsa hemen uyarır. Çekirdek sürücüsü olmadığı için şifrelemeyi <strong>engelleyemez</strong> ve hangi programın yazdığını tespit edemez; işi saniyeler içinde haber vermektir.</p>
+              <div class="module-control-row">
+                <span>Tuzak dosyası ve toplu şifreleme izleme</span>
+                <button class="protection-toggle protection-toggle--compact" type="button" data-setting-toggle="ransomware_protection_enabled" aria-pressed="false" disabled>
+                  <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
+                  <span data-toggle-label>Aç</span>
+                </button>
+              </div>
+            </article>
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-shield"></use></svg></span>
               <p class="section-eyebrow">ÇALIŞTIRMA ÖNCESİ KORUMA</p><h2 data-role="amsi-protection-state">Kapalı</h2><p data-role="amsi-protection-detail">PowerShell, VBScript ve Office makroları çalışmadan önce denetlenir. Etkinleştirmek yönetici izni gerektirir.</p>
               <div class="module-control-row">
@@ -649,7 +547,7 @@
                 </button>
               </div>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-watchdog" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-history"></use></svg></span>
               <p class="section-eyebrow">KURCALAMAYA KARŞI KORUMA</p><h2 data-role="watchdog-protection-state">Kapalı</h2><p data-role="watchdog-protection-detail">Neutron kapatılırsa otomatik olarak yeniden başlatılır. Etkinleştirmek yönetici izni gerektirir.</p>
               <div class="module-control-row">
@@ -660,7 +558,7 @@
                 </button>
               </div>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-wsc" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-bell"></use></svg></span>
               <p class="section-eyebrow">WINDOWS GÜVENLİK MERKEZİ</p><h2 data-role="wsc-protection-state">Windows tarafından yönetiliyor</h2><p data-role="wsc-protection-detail">Windows Güvenlik Merkezi ve Microsoft Defender normal durumda bırakılır. Neutron'un eski test kaydı kurulum sırasında temizlenir.</p>
               <div class="module-control-row">
@@ -671,7 +569,7 @@
                 </button>
               </div>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-service" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-chip"></use></svg></span>
               <p class="section-eyebrow">SİSTEM SERVİSİ MODU</p><h2 data-role="service-protection-state">Kapalı</h2><p data-role="service-protection-detail">Koruma motorunu LocalSystem yetkisiyle Windows servisi olarak çalıştırır: tekrar tekrar yönetici izni istemez, oturum açılmadan önce başlar, çökerse otomatik yeniden başlar. Etkinleştirmek tek seferlik yönetici izni gerektirir.</p>
               <div class="module-control-row">
@@ -682,11 +580,11 @@
                 </button>
               </div>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-engine" data-glass-radius="28" data-glass-depth="0.9" data-glass-refraction="1.02" data-glass-dispersion="0.46" data-glass-frost="0.08" data-glass-specular="1.04" data-glass-tint="rgba(133, 123, 255, 0.18)">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-chip"></use></svg></span>
               <p class="section-eyebrow">NEUTRON ENGINE</p><h2 data-role="engine-card-heading">Motor denetleniyor</h2><p data-role="engine-card-detail">Sürüm, YARA motoru ve koruma modülleri doğrulanıyor.</p>
             </article>
-            <article class="detail-module glass-dom-surface" data-liquidglass data-glass-id="detail-update" data-glass-radius="28" data-glass-depth="0.82" data-glass-refraction="0.94" data-glass-dispersion="0.38" data-glass-frost="0.1" data-glass-specular="0.9">
+            <article class="detail-module surface-card">
               <span class="module-icon"><svg aria-hidden="true"><use href="#icon-arrow"></use></svg></span>
               <p class="section-eyebrow">SÜRÜM VE GÜNCELLEMELER</p><h2 data-role="update-heading">Neutron</h2><p data-role="update-detail">Sürüm denetleniyor…</p>
               <div class="module-control-row">
@@ -698,7 +596,7 @@
 
         <section class="app-page" data-page="quarantine" hidden>
           <header class="page-header"><div><p class="section-eyebrow">KARANTİNA</p><h1>İnceleme alanı</h1><p>Dosyalar yalnız senin açık onayınla buraya taşınır; geri yükleme her zaman mümkündür.</p></div></header>
-          <article class="quarantine-panel glass-dom-surface" data-liquidglass data-glass-id="quarantine-items" data-glass-radius="32" data-glass-depth="0.9" data-glass-refraction="1.02" data-glass-dispersion="0.44" data-glass-frost="0.09" data-glass-specular="1.04">
+          <article class="quarantine-panel surface-card">
             <div class="quarantine-list" data-role="quarantine-list"></div>
             <div class="empty-page-panel" data-role="quarantine-empty">
             <span class="empty-page-icon"><svg aria-hidden="true"><use href="#icon-box"></use></svg></span>
@@ -717,7 +615,7 @@
             </div>
             <div class="firewall-recent-list" data-role="firewall-recent-apps-list"><p class="settings-empty">Ağa bağlı uygulama bulunamadı.</p></div>
           </article>
-          <article class="quarantine-panel glass-dom-surface" data-liquidglass data-glass-id="firewall-rules" data-glass-radius="32" data-glass-depth="0.9" data-glass-refraction="1.02" data-glass-dispersion="0.44" data-glass-frost="0.09" data-glass-specular="1.04">
+          <article class="quarantine-panel surface-card">
             <div class="quarantine-list" data-role="firewall-rule-list"></div>
             <div class="empty-page-panel" data-role="firewall-rule-empty">
             <span class="empty-page-icon"><svg aria-hidden="true"><use href="#icon-globe"></use></svg></span>
@@ -729,18 +627,32 @@
 
         <section class="app-page" data-page="system-audit" hidden>
           <header class="page-header"><div><p class="section-eyebrow">SİSTEM DENETİMİ</p><h1>Windows güvenlik duruşu</h1><p>Bu bilgisayarın kendi sertleştirme ayarları salt okunur denetlenir. Neutron hiçbir ayarı kendiliğinden değiştirmez; ne yapılması gerektiğini söyler, kararı sen verirsin.</p></div></header>
-          <article class="settings-card settings-card--wide audit-score-card">
-            <div class="settings-card-heading">
-              <div>
-                <p class="section-eyebrow">DURUŞ PUANI</p>
-                <h2 data-role="audit-score">Denetlenmedi</h2>
-                <p data-role="audit-summary">Makinenin güvenlik ayarlarını denetlemek için "Denetimi çalıştır"a bas.</p>
+          <article class="audit-hero audit-score-card">
+            <div class="audit-hero__dial">
+              <svg class="audit-ring" viewBox="0 0 120 120" aria-hidden="true">
+                <circle class="audit-ring__track" cx="60" cy="60" r="52" />
+                <circle class="audit-ring__value" cx="60" cy="60" r="52" data-role="audit-ring" />
+              </svg>
+              <div class="audit-hero__figure">
+                <strong data-role="audit-score">--</strong>
+                <span>/ 100</span>
+              </div>
+            </div>
+            <div class="audit-hero__body">
+              <p class="section-eyebrow">DURUŞ PUANI</p>
+              <h2 data-role="audit-verdict">Denetlenmedi</h2>
+              <p data-role="audit-summary">Makinenin güvenlik ayarlarını denetlemek için "Denetimi çalıştır"a bas.</p>
+              <div class="audit-stats">
+                <span class="audit-stat audit-stat--critical"><strong data-role="audit-count-critical">0</strong> kritik</span>
+                <span class="audit-stat audit-stat--warn"><strong data-role="audit-count-warn">0</strong> uyarı</span>
+                <span class="audit-stat audit-stat--pass"><strong data-role="audit-count-pass">0</strong> güvenli</span>
+                <span class="audit-stat audit-stat--unknown"><strong data-role="audit-count-unknown">0</strong> denetlenemedi</span>
               </div>
               <button class="settings-action" type="button" data-action="run-system-audit">Denetimi çalıştır</button>
             </div>
-            <div class="audit-grid" data-role="audit-check-list"><p class="settings-empty">Henüz denetim yapılmadı.</p></div>
-            <p class="settings-note" data-role="audit-checked-at">Denetim yalnızca kayıt defterini okur; hiçbir şey çalıştırmaz ve değiştirmez.</p>
           </article>
+          <div class="audit-grid" data-role="audit-check-list"><p class="settings-empty">Henüz denetim yapılmadı.</p></div>
+          <p class="settings-note" data-role="audit-checked-at">Denetim yalnızca kayıt defterini okur; hiçbir şey çalıştırmaz ve değiştirmez.</p>
 
           <header class="page-header page-header--section"><div><p class="section-eyebrow">PERFORMANS</p><h1>Bakım araçları</h1><p>Kasıtlı olarak dar tutuldu: kayıt defteri temizleyicisi veya "hızlandırıcı" yok. Aşağıdaki iki iş gerçek, ölçülebilir ve geri dönüşü belli.</p></div></header>
           <div class="performance-grid">
@@ -791,7 +703,7 @@
             <div class="protection-event-panel__header"><div><p class="section-eyebrow">DOSYA KORUMASI</p><h2>Son koruma olayları</h2></div><span data-role="protection-event-count">0 olay</span></div>
             <div class="protection-event-list" data-role="protection-event-list"><p class="history-empty">Henüz işaretlenmiş bir dosya yok.</p></div>
           </article>
-          <article class="history-panel glass-dom-surface" data-liquidglass data-glass-id="history-list" data-glass-radius="30" data-glass-depth="1.02" data-glass-refraction="1.16" data-glass-dispersion="0.52" data-glass-frost="0.07" data-glass-specular="1.16">
+          <article class="history-panel surface-card">
             <div class="history-panel__header"><span>Tarama</span><span>Dosya</span><span>Sonuç</span><span>Tarih</span></div>
             <div class="history-list" data-role="history-list"><p class="history-empty">Henüz kaydedilmiş tarama yok.</p></div>
           </article>
@@ -825,12 +737,13 @@
                 <div class="settings-preference"><div><strong>Gerçek zamanlı dosya korumasını aç</strong><p>Neutron başladığında dosya izleyicisini otomatik etkinleştirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Davranış izlemeyi aç</strong><p>Yeni süreçleri ve Windows otomatik başlangıç noktalarını dosya korumasından bağımsız izler.</p></div><button class="settings-switch" type="button" data-setting-toggle="behavior_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Web korumasını aç</strong><p>İndirilen dosyaları ve kaynak URL/domain itibarını yerel olarak denetler.</p></div><button class="settings-switch" type="button" data-setting-toggle="web_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Makine öğrenmesi destekli tespit</strong><p>Statik PE modeli, sezgisel denetimlerin zaten şüpheli bulduğu imzasız bir dosyayı güçlendirebilir. Model tek başına asla karar veremez, geçerli Windows imzası taşıyan bir dosyaya dokunamaz, ve sezgisel puanı düşük olan hiçbir dosyayı yükseltemez. Kapatırsan model yalnız gözlem kaydeder.</p></div><button class="settings-switch" type="button" data-setting-toggle="ml_assisted_detection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Makine öğrenmesi destekli tespit</strong><p>Statik PE modelleri imzasız bir dosyayı iki yoldan işaretleyebilir: sezgisel denetimlerin zaten şüpheli bulduğu bir dosyayı güçlendirerek, ya da yeterli sayıda model neredeyse kesin hemfikirse tek başına karantinaya alarak. Hiçbir durumda geçerli Windows imzası taşıyan, istisna listendeki, Windows sistem klasöründeki veya Neutron'un kendi dosyalarına dokunamaz; her karantina Karantina sayfasından geri alınabilir. Kapatırsan modeller yalnız gözlem kaydeder.</p></div><button class="settings-switch" type="button" data-setting-toggle="ml_assisted_detection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Güvenlik bildirimleri</strong><p>Bir dosya işaretlendiğinde Windows bildirimi gösterir.</p></div><button class="settings-switch" type="button" data-setting-toggle="notifications_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Bulut itibar sorgusu</strong><p>Yerel imza eşleşmesi olmayan dosyalar için, yalnızca manuel taramalarda, SHA-256 hash'i aşağıdaki servislere sorulur. Dosya içeriği asla gönderilmez; gerçek zamanlı korumayı yavaşlatmaz. En az bir API anahtarı girilmeden hiçbir sorgu yapılmaz.</p></div><button class="settings-switch" type="button" data-setting-toggle="cloud_lookup_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Ağ bağlantısı izleme</strong><p>Bilinen kötü amaçlı IP adreslerine (C2/botnet) giden bağlantıları periyodik olarak denetler ve bildirir. Paket incelemesi veya engelleme yapmaz, yalnızca tespit eder.</p></div><button class="settings-switch" type="button" data-setting-toggle="network_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Bellek/process injection taraması</strong><p>Yeni başlayan süreçlerin belleğini YARA kurallarıyla ve şüpheli RWX bellek bölgesi sezgisiyle tarar. Tam görünürlük için Sistem Servisi Modu önerilir.</p></div><button class="settings-switch" type="button" data-setting-toggle="memory_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Çıkarılabilir medya (USB) koruması</strong><p>Takılan USB/SD kartları otomatik olarak autorun.inf ve kötü amaçlı dosyalar için tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="usb_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Fidye yazılımı koruması</strong><p>Belgeler, Masaüstü, Resimler ve İndirilenler klasörlerine gizli tuzak dosyaları koyar; bunlardan biri değiştirilirse veya kısa sürede çok sayıda dosya yüksek entropili içerikle yeniden yazılırsa uyarır. <strong>Önemli:</strong> çekirdek sürücüsü olmadığı için şifrelemeyi engelleyemez, yalnız saniyeler içinde haber verir; hangi programın yazdığını da tespit edemez.</p></div><button class="settings-switch" type="button" data-setting-toggle="ransomware_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Zamanlanmış hızlı tarama</strong><p>Neutron arka planda açık kaldığı sürece, kullanıcı profilini ve Temp klasörlerini günde bir kez otomatik tarar. Bulgular yalnızca gösterilir; otomatik karantina uygulanmaz, karar sizde kalır.</p></div><button class="settings-switch" type="button" data-setting-toggle="scheduled_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Proton imzalarını otomatik güncelle</strong><p>İmzalı Proton/YARA paketlerini belirli aralıklarla denetler; doğrulanmayan veya bozuk paketleri etkinleştirmez.</p></div><button class="settings-switch" type="button" data-setting-toggle="signature_auto_update_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
               </div>

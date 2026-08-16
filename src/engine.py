@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from datetime import datetime, timedelta, timezone
@@ -103,7 +104,11 @@ MAX_PROTON_RULE_BYTES = 2 * 1024 * 1024
 MAX_PROTON_TOTAL_RULE_BYTES = 16 * 1024 * 1024
 MAX_ANALYSIS_CACHE_ENTRIES = 25_000
 ANALYSIS_CACHE_RETENTION_DAYS = 30
-ANALYSIS_CACHE_REVISION = "static-analysis-v2-archive"
+# Bump whenever the analysis pipeline can reach a different verdict on the same
+# bytes, or already-scanned files keep their old cached result and silently skip
+# the new logic. v3: model-led detection (ML_AUTONOMOUS_*) can now raise a file
+# to the auto-quarantine bar on its own.
+ANALYSIS_CACHE_REVISION = "static-analysis-v5-docs-lnk-motw"
 PROGRESS_INTERVAL = 25
 WATCH_INTERVAL_SECONDS = 5.0
 BEHAVIOR_INTERVAL_SECONDS = 3.0
@@ -111,7 +116,7 @@ NETWORK_INTERVAL_SECONDS = 10.0
 WATCH_DEBOUNCE_SECONDS = 0.9
 WATCH_SETTLE_SECONDS = 0.65
 SIGNATURE_DATABASE_NAME = "Proton"
-NEUTRON_ENGINE_VERSION = "0.1.0"
+NEUTRON_ENGINE_VERSION = "0.3.0"
 BUILTIN_SIGNATURE_VERSION = "1.00.001"
 PROTON_VERSION_PATTERN = re.compile(r"^\d+\.\d{2}\.\d{3}$")
 PROTON_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -129,6 +134,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "service_mode_enabled": False,
     "memory_scan_enabled": False,
     "usb_protection_enabled": True,
+    "ransomware_protection_enabled": True,
     "cloud_lookup_enabled": False,
     "ml_assisted_detection_enabled": True,
     "malwarebazaar_api_key": "",
@@ -152,8 +158,8 @@ EICAR_MARKER = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE
 # machines where another antivirus locks the industry-standard EICAR file first.
 NEUTRON_QUARANTINE_TEST_MARKER = b"NEUTRON_QUARANTINE_SAFE_TEST_V1"
 EXECUTABLE_EXTENSIONS = {
-    ".bat", ".cmd", ".com", ".dll", ".exe", ".jar", ".js", ".lnk",
-    ".msi", ".ps1", ".scr", ".vbe", ".vbs",
+    ".bat", ".cmd", ".com", ".dll", ".exe", ".hta", ".jar", ".js", ".jse",
+    ".lnk", ".msi", ".ps1", ".psm1", ".scr", ".vbe", ".vbs", ".wsf",
 }
 DOCUMENT_EXTENSIONS = {".doc", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".txt", ".xlsx", ".zip"}
 ARCHIVE_EXTENSIONS = {".zip", ".7z", ".rar"}
@@ -466,6 +472,19 @@ def open_database() -> Iterator[sqlite3.Connection]:
         CREATE INDEX IF NOT EXISTS ml_shadow_observations_seen_idx
           ON ml_shadow_observations(last_seen_at DESC);
 
+        -- Every automatic (no-human-in-the-loop) quarantine, with the kind of
+        -- evidence that drove it. Exists to answer one question quickly: is
+        -- Neutron removing files at a rate that a real infection explains?
+        CREATE TABLE IF NOT EXISTS auto_quarantine_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          occurred_at TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          driver TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS auto_quarantine_log_time_idx
+          ON auto_quarantine_log(occurred_at DESC);
+
         CREATE TABLE IF NOT EXISTS cloud_reputation_cache (
           sha256 TEXT PRIMARY KEY,
           verdict TEXT NOT NULL,
@@ -561,6 +580,14 @@ def open_database() -> Iterator[sqlite3.Connection]:
     }
     if "incident_id" not in quarantine_columns:
         connection.execute("ALTER TABLE quarantine_items ADD COLUMN incident_id INTEGER")
+    # Neutralised-at-rest quarantine (see quarantine_file). Rows written by
+    # older builds keep payload_version NULL and are restored as plain files.
+    if "payload_version" not in quarantine_columns:
+        connection.execute("ALTER TABLE quarantine_items ADD COLUMN payload_version INTEGER")
+    if "payload_key" not in quarantine_columns:
+        connection.execute("ALTER TABLE quarantine_items ADD COLUMN payload_key TEXT")
+    if "stored_sha256" not in quarantine_columns:
+        connection.execute("ALTER TABLE quarantine_items ADD COLUMN stored_sha256 TEXT")
     ml_observation_columns = {
         str(row[1]) for row in connection.execute("PRAGMA table_info(ml_shadow_observations)").fetchall()
     }
@@ -691,6 +718,7 @@ def normalize_app_setting(key: str, value: Any) -> Any:
         "start_with_windows", "protection_enabled", "behavior_protection_enabled", "web_protection_enabled",
         "amsi_protection_enabled", "watchdog_protection_enabled", "wsc_registration_enabled",
         "network_protection_enabled", "service_mode_enabled", "memory_scan_enabled", "usb_protection_enabled",
+        "ransomware_protection_enabled",
         "cloud_lookup_enabled", "notifications_enabled", "scheduled_scan_enabled",
         "signature_auto_update_enabled", "ml_assisted_detection_enabled",
     }:
@@ -837,6 +865,87 @@ def is_protected_system_path(path: Path) -> bool:
     except (OSError, RuntimeError):
         return False
     return any(path_is_within(normalized, root) for root in protected_system_quarantine_roots())
+
+
+@lru_cache(maxsize=1)
+def neutron_own_roots() -> tuple[str, ...]:
+    """Neutron's own installation and working directories.
+
+    An antivirus that quarantines its own engine disables itself, and the
+    result is not obvious to the user: protection silently stops. The models
+    make this a live risk rather than a theoretical one -- a packed, unsigned
+    PyInstaller bundle full of scanning code looks, structurally, a great deal
+    like the malware they were trained on, and this build is not signed.
+
+    Covered: the frozen engine binary's own folder, the Electron app folder
+    above it, the data directory (database, quarantine store) and the bundled
+    data directory. Development checkouts resolve to the repository root.
+    """
+    roots: list[str] = []
+
+    def add(candidate: Path | None) -> None:
+        if candidate is None:
+            return
+        try:
+            value = canonical_path(candidate)
+        except (OSError, RuntimeError):
+            return
+        if value and value not in roots:
+            roots.append(value)
+
+    try:
+        executable = Path(sys.executable).resolve()
+    except (OSError, RuntimeError):
+        executable = None
+    if executable is not None:
+        add(executable.parent)
+        # A packaged build lives in resources/engine under the app root; the
+        # app's own Neutron.exe and Electron runtime sit further up. Walking a
+        # bounded number of parents covers both layouts without ever reaching
+        # a drive root (guarded below).
+        for parent in list(executable.parents)[:6]:
+            if parent == parent.anchor or parent.parent == parent:
+                break
+            if (parent / "Neutron.exe").exists() or (parent / "resources").is_dir():
+                add(parent)
+
+    add(Path(__file__).resolve().parent)
+    add(Path(__file__).resolve().parent.parent)
+    add(data_directory())
+    add(bundled_data_directory())
+
+    # A root that resolved to a drive root or the user profile would silently
+    # exempt the whole machine from automatic action -- drop those.
+    try:
+        home = canonical_path(Path.home())
+    except (OSError, RuntimeError):
+        home = ""
+    safe: list[str] = []
+    for root in roots:
+        try:
+            anchor = canonical_path(Path(Path(root).anchor))
+        except (OSError, RuntimeError):
+            anchor = ""
+        if root and root != anchor and root != home:
+            safe.append(root)
+    return tuple(safe)
+
+
+def is_neutron_own_path(path: Path) -> bool:
+    try:
+        normalized = canonical_path(path)
+    except (OSError, RuntimeError):
+        return False
+    return any(path_is_within(normalized, root) for root in neutron_own_roots())
+
+
+def is_auto_quarantine_forbidden(path: Path) -> bool:
+    """Single gate for every automatic (no-human-in-the-loop) removal.
+
+    Manual, user-confirmed quarantine from the UI is deliberately NOT gated by
+    this: real malware does hide in system folders, and a manual action is
+    explicit and reversible."""
+    return is_protected_system_path(path) or is_neutron_own_path(path)
 
 
 def normalize_exclusion(kind: str, raw_value: str) -> tuple[str, str]:
@@ -1581,6 +1690,110 @@ def path_is_inside(candidate: Path, parent: Path) -> bool:
         return False
 
 
+# Quarantine store hardening (plan.md item 6).
+#
+# Until now a quarantined executable sat in the store byte-for-byte intact and
+# still runnable: one double-click, one script walking the folder, one backup
+# job restoring it, and the malware Neutron "removed" is live again. Another
+# scanner walking the profile would also flag the store and, in the worst
+# case, act on it -- deleting the only copy of a file the user may want back.
+#
+# Files are therefore transformed on the way in and back on the way out.
+#
+# Be precise about what this is: the key is stored in the same database as the
+# record, so this is NOT confidentiality against someone who already has the
+# machine. It is neutralisation -- the stored blob is not a runnable PE, does
+# not match malware signatures, and cannot be executed by accident. That is
+# what the store actually needs, and claiming more would be dishonest.
+QUARANTINE_PAYLOAD_VERSION = 1
+QUARANTINE_PAYLOAD_CHUNK = 1024 * 1024
+
+
+def quarantine_stream_transform(source: Path, destination: Path, key: bytes) -> tuple[str, str]:
+    """Streams source -> destination through the keystream, returning the
+    (plain, transformed) SHA-256 digests. Streamed rather than read whole so a
+    large quarantined file cannot exhaust memory."""
+    plain = hashlib.sha256()
+    stored = hashlib.sha256()
+    key_length = len(key)
+    offset = 0
+    with source.open("rb") as reader, destination.open("wb") as writer:
+        while True:
+            chunk = reader.read(QUARANTINE_PAYLOAD_CHUNK)
+            if not chunk:
+                break
+            plain.update(chunk)
+            transformed = bytes(
+                byte ^ key[(offset + index) % key_length]
+                for index, byte in enumerate(chunk)
+            )
+            offset += len(chunk)
+            stored.update(transformed)
+            writer.write(transformed)
+    return plain.hexdigest(), stored.hexdigest()
+
+
+def restore_quarantine_payload(
+    stored: Path,
+    original: Path,
+    key: bytes | None,
+    payload_version: int | None,
+    expected_sha256: str | None,
+) -> None:
+    """Rebuilds the original file from the store, atomically.
+
+    Writes to a temporary file beside the destination and os.replace()s it
+    into place, so a failure halfway through cannot leave a truncated file
+    where the user's data used to be. Raises ValueError if the rebuilt bytes
+    do not match the digest recorded at quarantine time -- a mismatch means
+    the store was tampered with or corrupted, and handing back a file that is
+    not what was taken away is worse than refusing.
+    """
+    original.parent.mkdir(parents=True, exist_ok=True)
+    staging = original.parent / f".neutron-restore-{secrets.token_hex(8)}.tmp"
+    plain = hashlib.sha256()
+    try:
+        if payload_version is None or not key:
+            # Legacy row: the store holds the file verbatim.
+            with stored.open("rb") as reader, staging.open("wb") as writer:
+                while True:
+                    chunk = reader.read(QUARANTINE_PAYLOAD_CHUNK)
+                    if not chunk:
+                        break
+                    plain.update(chunk)
+                    writer.write(chunk)
+        else:
+            key_length = len(key)
+            offset = 0
+            with stored.open("rb") as reader, staging.open("wb") as writer:
+                while True:
+                    chunk = reader.read(QUARANTINE_PAYLOAD_CHUNK)
+                    if not chunk:
+                        break
+                    decoded = bytes(
+                        byte ^ key[(offset + index) % key_length]
+                        for index, byte in enumerate(chunk)
+                    )
+                    offset += len(chunk)
+                    plain.update(decoded)
+                    writer.write(decoded)
+
+        if expected_sha256 and plain.hexdigest() != expected_sha256:
+            raise ValueError("karantina dosyasının bütünlüğü doğrulanamadı")
+
+        # O_EXCL so the "does the destination already exist" check and the
+        # write are one atomic step; a plain exists() test beforehand is a
+        # race another process can win.
+        handle = os.open(str(original), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(handle)
+        os.replace(str(staging), str(original))
+    finally:
+        try:
+            staging.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def quarantine_file(raw_path: str, reason: str) -> int:
     """Move a detected file to a recoverable local quarantine, retrying transient locks."""
     try:
@@ -1597,33 +1810,53 @@ def quarantine_file(raw_path: str, reason: str) -> int:
 
     destination_directory = quarantine_directory()
     safe_name = "".join(character if character.isalnum() or character in ".-_" else "_" for character in original.name)
-    destination = destination_directory / f"{int(time.time())}-{secrets.token_hex(6)}-{safe_name}"
-    digest = sha256_for(original, original.stat().st_size)
-    moved = False
+    # The stored blob is not the original file and must not carry its
+    # extension: a ".exe" in the store invites exactly the accidental
+    # execution the transform exists to prevent.
+    destination = destination_directory / f"{int(time.time())}-{secrets.token_hex(6)}-{safe_name}.qbin"
+    key = secrets.token_bytes(32)
     last_error: OSError | sqlite3.Error | None = None
     for attempt in range(5):
+        transformed = False
         try:
-            shutil.move(str(original), str(destination))
-            moved = True
+            # Copy-transform first, and only unlink the original once the
+            # store copy is complete and recorded. The previous version moved
+            # first and rolled back on failure, which left a window where the
+            # file existed in neither place.
+            digest, stored_digest = quarantine_stream_transform(original, destination, key)
+            transformed = True
+            original.unlink()
             with open_database() as connection:
                 cursor = connection.execute(
                 """
                 INSERT INTO quarantine_items (
-                  original_path, stored_path, file_name, sha256, reason, quarantined_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                  original_path, stored_path, file_name, sha256, reason, quarantined_at,
+                  payload_version, payload_key, stored_sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (str(original), str(destination), original.name, digest, reason[:500], datetime.now(timezone.utc).isoformat()),
+                (str(original), str(destination), original.name, digest, reason[:500],
+                 datetime.now(timezone.utc).isoformat(),
+                 QUARANTINE_PAYLOAD_VERSION, key.hex(), stored_digest),
                 )
             emit("quarantined", item_id=int(cursor.lastrowid), file_name=original.name)
             return 0
         except (OSError, sqlite3.Error) as error:
             last_error = error
-            if moved and destination.exists() and not original.exists():
+            if transformed and original.exists():
+                # The original survived, so the store copy is redundant.
                 try:
-                    shutil.move(str(destination), str(original))
+                    destination.unlink(missing_ok=True)
                 except OSError:
                     pass
-                moved = False
+            elif transformed:
+                # The original is already gone: the store copy is now the only
+                # copy. Put it back rather than deleting the user's file.
+                try:
+                    restore_quarantine_payload(destination, original, key,
+                                               QUARANTINE_PAYLOAD_VERSION, None)
+                    destination.unlink(missing_ok=True)
+                except (OSError, ValueError):
+                    pass
             if attempt < 4:
                 time.sleep(0.4 * (attempt + 1))
     locked_hint = " Dosya başka bir uygulamada açıksa kapatıp yeniden deneyin." if getattr(last_error, "winerror", None) in {5, 32} else ""
@@ -1653,22 +1886,42 @@ def update_quarantine_item(item_id: int, action: str) -> int:
     try:
         with open_database() as connection:
             row = connection.execute(
-                "SELECT original_path, stored_path, file_name FROM quarantine_items WHERE id = ? AND state = 'active'",
+                """SELECT original_path, stored_path, file_name, sha256,
+                          payload_version, payload_key, stored_sha256
+                   FROM quarantine_items WHERE id = ? AND state = 'active'""",
                 (item_id,),
             ).fetchone()
             if not row:
                 emit("error", code="QUARANTINE_ITEM_MISSING", message="Karantina kaydı bulunamadı.")
                 return 2
             original, stored, file_name = (Path(row[0]), Path(row[1]), row[2])
+            expected_sha256, payload_version, payload_key, stored_sha256 = row[3], row[4], row[5], row[6]
             if not path_is_inside(stored, quarantine_directory()) or not stored.is_file():
                 emit("error", code="QUARANTINE_FILE_MISSING", message="Karantina dosyası bulunamadı.")
                 return 2
             if action == "restore":
-                if original.exists():
+                # Verify the store blob itself before decoding it, so
+                # corruption is reported as corruption rather than surfacing
+                # as a confusing digest mismatch on the rebuilt file.
+                if stored_sha256:
+                    actual = sha256_for(stored, stored.stat().st_size)
+                    if actual != stored_sha256:
+                        emit("error", code="QUARANTINE_STORE_TAMPERED",
+                             message="Karantina dosyası değiştirilmiş veya bozulmuş; geri yükleme yapılmadı.")
+                        return 2
+                try:
+                    restore_quarantine_payload(
+                        stored, original,
+                        bytes.fromhex(payload_key) if payload_key else None,
+                        payload_version, expected_sha256,
+                    )
+                except FileExistsError:
                     emit("error", code="RESTORE_DESTINATION_EXISTS", message="Orijinal konumda aynı adlı bir dosya var; üzerine yazılmadı.")
                     return 2
-                original.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(stored), str(original))
+                except ValueError as error:
+                    emit("error", code="QUARANTINE_INTEGRITY_FAILED", message=f"Geri yükleme doğrulanamadı: {error}.")
+                    return 2
+                stored.unlink(missing_ok=True)
                 connection.execute("UPDATE quarantine_items SET state = 'restored', restored_at = ? WHERE id = ?", (datetime.now(timezone.utc).isoformat(), item_id))
                 emit("restored", item_id=item_id, file_name=file_name)
                 return 0
@@ -2448,10 +2701,116 @@ ML_CORROBORATION_BONUS = 15
 ML_CORROBORATION_MIN_MEMBERS = 2
 ML_CORROBORATION_MAX_SPREAD = 25
 
+# Model-led detection: the models may now reach the auto-quarantine bar on
+# their own, without the heuristics having built a case first. This is
+# strictly stronger than corroboration and therefore strictly harder to
+# trigger -- every bound below is tighter than its ML_CORROBORATION_
+# counterpart, because here there is no second, independent line of evidence
+# behind the decision.
+#
+# Honest statement of the risk: the false-positive rate of these thresholds
+# has NOT been measured on a real safe-software corpus (plan.md item 2). The
+# guards that make this acceptable are the exclusions, not the numbers --
+# nothing validly signed, nothing allowlisted, nothing under a Windows system
+# folder and nothing belonging to Neutron itself can be removed this way, and
+# every removal is reversible from Quarantine.
+ML_AUTONOMOUS_MIN_SCORE = 97
+ML_AUTONOMOUS_MIN_MEMBERS = 3
+ML_AUTONOMOUS_MAX_SPREAD = 10
+# Exactly the auto-quarantine bar, not above it: a model-led detection should
+# act, but it should never outrank a case the deterministic heuristics built.
+ML_AUTONOMOUS_RISK_SCORE = 90
+
 # Structural PE traits are useful supporting evidence, but common installers,
 # browsers and self-extracting archives legitimately share many of them.  A
 # weak, single heuristic must never be presented as a threat by itself.
 MINIMUM_PE_FINDING_RISK_SCORE = 40
+
+
+# Burst brake on automatic quarantine.
+#
+# Neutron moves files without a human in the loop, and since the models were
+# allowed to reach that decision on their own (ML_AUTONOMOUS_*) with no
+# measured false-positive rate behind them, a single bad model or a bad
+# signature batch could sweep a folder before anyone notices. Nothing in the
+# code counted how often this fired.
+#
+# The brake does not weaken detection: a blocked finding is still recorded and
+# still shown, it just stays 'pending' for the user to action instead of being
+# moved silently. That is the right failure mode -- a real infection that
+# genuinely drops 30 files is still fully visible, while a misfiring model
+# cannot empty a directory while the user is away from the screen.
+AUTO_QUARANTINE_BURST_WINDOW_SECONDS = 600
+AUTO_QUARANTINE_BURST_LIMIT = 12
+
+
+def record_auto_quarantine(path: str, driver: str) -> None:
+    try:
+        with open_database() as connection:
+            connection.execute(
+                "INSERT INTO auto_quarantine_log (occurred_at, file_path, driver) VALUES (?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), path, driver),
+            )
+            connection.execute(
+                """DELETE FROM auto_quarantine_log WHERE id NOT IN (
+                     SELECT id FROM auto_quarantine_log ORDER BY id DESC LIMIT 500)"""
+            )
+    except (OSError, sqlite3.Error):
+        # Bookkeeping must never block a real removal.
+        pass
+
+
+def recent_auto_quarantine_count() -> int:
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=AUTO_QUARANTINE_BURST_WINDOW_SECONDS)
+    ).isoformat()
+    try:
+        with open_database() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM auto_quarantine_log WHERE occurred_at >= ?", (cutoff,)
+            ).fetchone()
+        return int(row[0] or 0)
+    except (OSError, sqlite3.Error):
+        return 0
+
+
+def trip_auto_quarantine_brake(driver: str, count: int) -> None:
+    """Stops the bleeding and tells the user, once.
+
+    When the models drove the burst they are also switched off, because an
+    uncalibrated model firing this often is the likeliest explanation and
+    leaving it armed would just refill the window the moment it reopens. A
+    signature-driven burst does not disarm anything -- signatures are exact,
+    and the brake alone is enough to keep the damage bounded.
+    """
+    ml_disabled = False
+    if driver == "ml":
+        try:
+            write_app_setting("ml_assisted_detection_enabled", False)
+            ml_disabled = True
+        except (OSError, sqlite3.Error, ValueError):
+            ml_disabled = False
+    emit(
+        "auto-quarantine-brake",
+        driver=driver,
+        count=count,
+        window_seconds=AUTO_QUARANTINE_BURST_WINDOW_SECONDS,
+        ml_disabled=ml_disabled,
+        message=(
+            f"Son {AUTO_QUARANTINE_BURST_WINDOW_SECONDS // 60} dakikada {count} dosya "
+            "otomatik karantinaya alındı. Bu, normal bir tespit hızının çok üstünde. "
+            "Otomatik karantina geçici olarak durduruldu; yeni bulgular silinmeden "
+            "'beklemede' olarak listelenecek."
+            + (" Makine öğrenmesi destekli tespit de kapatıldı." if ml_disabled else "")
+        ),
+    )
+
+
+def auto_quarantine_driver(finding: Finding) -> str:
+    if finding.kind in {"test-signature", "signature"}:
+        return "signature"
+    reasons = finding.reason or ""
+    return "ml" if "modellerinin" in reasons else "heuristic"
 
 
 def auto_quarantine_confirmed_finding(event_id: int | None, finding: Finding) -> int | None:
@@ -2462,6 +2821,14 @@ def auto_quarantine_confirmed_finding(event_id: int | None, finding: Finding) ->
     heuristic threshold, always stays pending for manual review instead."""
     if event_id is None:
         return None
+    # Neutron never removes its own files automatically, not even on an exact
+    # signature match: an antivirus that quarantines its own engine disables
+    # itself silently, and a byte-identical hit inside our own install is far
+    # more likely to be a bad signature set than a real infection. System
+    # folders stay reachable by exact signatures (real malware does hide
+    # there) but not by inference -- see is_high_confidence_heuristic.
+    if is_neutron_own_path(Path(finding.path)):
+        return None
     is_confirmed_signature = finding.kind in {"test-signature", "signature"}
     is_high_confidence_heuristic = (
         finding.kind == "pe-analysis"
@@ -2471,9 +2838,24 @@ def auto_quarantine_confirmed_finding(event_id: int | None, finding: Finding) ->
     )
     if not is_confirmed_signature and not is_high_confidence_heuristic:
         return None
+
+    # Burst brake. Checked after the decision but before the move, so a
+    # blocked finding still reaches the user as a pending detection.
+    driver = auto_quarantine_driver(finding)
+    recent = recent_auto_quarantine_count()
+    if recent >= AUTO_QUARANTINE_BURST_LIMIT:
+        # Trip once per window, not once per file: the brake fires on the
+        # crossing, and every later blocked file in the same window is
+        # silently held back rather than emitting another alert.
+        if recent == AUTO_QUARANTINE_BURST_LIMIT:
+            trip_auto_quarantine_brake(driver, recent)
+            record_auto_quarantine(finding.path, f"{driver}-blocked")
+        return None
+
     result = quarantine_file(finding.path, finding.reason)
     if result != 0:
         return None
+    record_auto_quarantine(finding.path, driver)
     with open_database() as connection:
         row = connection.execute(
             """SELECT id FROM quarantine_items WHERE original_path = ? AND state = 'active'
@@ -2931,13 +3313,13 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
         risk_score = min(100, sum(points for points, _reason in reasons))
 
         # --- ML corroboration -------------------------------------------
-        # The models are allowed to strengthen a case the deterministic
-        # heuristics already built, and nothing else. They cannot create a
-        # detection, cannot act on a validly signed file, and cannot lift
-        # anything that the heuristics found unremarkable.
+        # The lower of the two model paths: here the models only strengthen a
+        # case the deterministic heuristics already built, and cannot act on a
+        # validly signed file. The model-led path that CAN raise a detection
+        # on its own follows immediately below, behind much tighter bounds.
         #
-        # Why this shape rather than "quarantine at ML score >= X": picking
-        # that X safely needs measured false-positive data this build does
+        # Why this weaker path still exists: picking a single "quarantine at
+        # ML score >= X" needs measured false-positive data this build does
         # not have yet (see --ml-shadow-report). Bounding the models to a
         # bonus keeps the existing heuristic gate as the floor, so the worst
         # case is a file that already looked suspicious on several
@@ -2969,6 +3351,40 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
                 f"zararlı buldu (ortak puan {ml_shadow_score}/100, modeller arası fark "
                 f"{ml_member_spread} puan, sezgisel bulgularla aynı yönde)",
             ))
+
+        # --- Model-led detection ----------------------------------------
+        # Unlike corroboration above, this needs no prior heuristic case: a
+        # near-unanimous, near-certain verdict from enough models is allowed
+        # to reach the auto-quarantine bar by itself, so malware whose
+        # structure gives the deterministic checks nothing to hold onto can
+        # still be caught.
+        #
+        # The path exclusions are applied here rather than left to the
+        # quarantine gate on purpose: this keeps a model-led score off the
+        # file's *risk* entirely, so an excluded file is not paraded through
+        # the UI as a 90-risk threat that Neutron then declines to act on.
+        if (
+            ml_shadow_score is not None
+            and ml_shadow_score >= ML_AUTONOMOUS_MIN_SCORE
+            and ml_member_count >= ML_AUTONOMOUS_MIN_MEMBERS
+            and ml_member_spread <= ML_AUTONOMOUS_MAX_SPREAD
+            and signature_status not in {"trusted"}
+            and risk_score < ML_AUTONOMOUS_RISK_SCORE
+            # Archive members are scored from memory and have no real path on
+            # disk, so neither the signature chain nor the path exclusions can
+            # be evaluated for them. Nothing is auto-removed from inside an
+            # archive anyway; leave those as review-only findings.
+            and payload is None
+            and not is_auto_quarantine_forbidden(path)
+            and ml_assisted_detection_enabled()
+        ):
+            reasons.append((
+                ML_AUTONOMOUS_RISK_SCORE - risk_score,
+                f"Statik PE modellerinin {ml_member_count} tanesi bu imzasız dosyayı neredeyse "
+                f"kesin zararlı buldu (ortak puan {ml_shadow_score}/100, modeller arası fark "
+                f"{ml_member_spread} puan); sezgisel kontroller tek başına bu sonuca varmamıştı",
+            ))
+            risk_score = ML_AUTONOMOUS_RISK_SCORE
 
         if signature_status == "trusted" and risk_score:
             risk_score = max(0, risk_score - 18)
@@ -3605,6 +4021,449 @@ def cloud_reputation_lookup(
     return result
 
 
+# --- Script content analysis ----------------------------------------------
+#
+# Until now a .ps1/.js/.vbs/.bat was judged by its *name* only: the double
+# extension and risk-word checks never opened the file. PE files got entropy,
+# imports, signature checks and the models; scripts got nothing. That is
+# backwards for how machines actually get infected today -- the mail
+# attachment and the pasted one-liner are scripts, and the .exe arrives later
+# because a script fetched it.
+#
+# Same shape as the PE analyser: weighted independent indicators, a floor
+# below which nothing is reported, and reasons the user can read.
+#
+# Calibration note: legitimate admin scripts do download files and do call
+# Invoke-WebRequest. So no single indicator can carry a file over the floor --
+# the weights are set so that a real detection needs a *chain* (fetch AND
+# execute, or obfuscation AND execution), which is what separates a dropper
+# from a deployment script.
+SCRIPT_EXTENSIONS = {
+    ".bat", ".cmd", ".hta", ".js", ".jse", ".ps1", ".psm1",
+    ".vbe", ".vbs", ".wsf",
+}
+MINIMUM_SCRIPT_FINDING_RISK_SCORE = 40
+MAX_SCRIPT_ANALYSIS_BYTES = 2 * 1024 * 1024
+
+# (weight, label, patterns). Weights are deliberately modest individually.
+SCRIPT_INDICATORS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (30, "uzaktan içerik indirme", (
+        r"downloadstring", r"downloadfile", r"invoke-webrequest", r"\bwget\b",
+        r"\bcurl\b", r"msxml2\.xmlhttp", r"winhttp\.winhttprequest",
+        r"certutil\s+.*-urlcache", r"bitsadmin\s+/transfer",
+        r"system\.net\.webclient",
+    )),
+    (30, "indirilen içeriği doğrudan çalıştırma", (
+        r"invoke-expression", r"\biex\b", r"\beval\s*\(", r"\bexecute\b",
+        r"wscript\.shell", r"shell\.application", r"cmd\s*/c",
+        r"start-process", r"\.run\s*\(",
+    )),
+    (25, "kodlanmış PowerShell komutu", (
+        r"-e(nc|ncodedcommand)?\s+[A-Za-z0-9+/]{40,}", r"frombase64string",
+        r"encodedcommand",
+    )),
+    (20, "gizlenmiş/karartılmış kod", (
+        r"\[char\]\s*\d+", r"chr\s*\(\s*\d+\s*\)", r"-join\s*\(",
+        r"\[convert\]::frombase64", r"\\x[0-9a-f]{2}\\x[0-9a-f]{2}\\x[0-9a-f]{2}",
+        r"unescape\s*\(", r"replace\s*\(.{0,20}\).{0,20}replace\s*\(",
+    )),
+    (20, "güvenlik denetimini atlatma", (
+        r"executionpolicy\s+bypass", r"-nop\b", r"-noprofile",
+        r"-w(indowstyle)?\s+hidden", r"amsiinitfailed", r"amsiutils",
+        r"set-mppreference\s+.*disable", r"add-mppreference\s+.*exclusion",
+    )),
+    (30, "kalıcılık kurma", (
+        r"currentversion\\run", r"schtasks\s+/create",
+        r"new-scheduledtask", r"\bsc\s+create\b", r"\\startup\\",
+    )),
+    (35, "kurtarma/yedek imhası", (
+        r"vssadmin\s+delete\s+shadows", r"wbadmin\s+delete",
+        r"bcdedit\s+.*recoveryenabled\s+no", r"win32_shadowcopy.*delete",
+    )),
+    (20, "LOLBin ile dolaylı çalıştırma", (
+        r"mshta\s+", r"regsvr32\s+.*/i:", r"rundll32\s+.*javascript:",
+        r"\bmsiexec\s+/i\s+http", r"installutil", r"regasm\s+/u",
+    )),
+)
+
+# Patterns are compiled individually rather than joined into one alternation
+# so the number of *distinct* techniques inside a group is known. A script that
+# runs vssadmin, wbadmin and bcdedit is far more certainly ransomware than one
+# that only runs vssadmin, and collapsing the group to a single boolean threw
+# that away.
+_SCRIPT_INDICATOR_PATTERNS = tuple(
+    (weight, label, tuple(re.compile(pattern, re.IGNORECASE) for pattern in patterns))
+    for weight, label, patterns in SCRIPT_INDICATORS
+)
+
+
+def decode_script_text(payload: bytes) -> str:
+    """PowerShell files are frequently UTF-16LE with a BOM; decoding those as
+    UTF-8 yields NUL-separated bytes that match nothing."""
+    if payload[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return payload.decode("utf-16", errors="ignore")
+        except (UnicodeDecodeError, LookupError):
+            pass
+    # No BOM but heavily NUL-padded: still very likely UTF-16LE.
+    if payload[:512].count(0) > len(payload[:512]) // 3:
+        try:
+            return payload.decode("utf-16-le", errors="ignore")
+        except (UnicodeDecodeError, LookupError):
+            pass
+    return payload.decode("utf-8", errors="ignore")
+
+
+def analyze_script(path: Path, size: int) -> tuple[int, tuple[str, ...]] | None:
+    """Returns (risk_score, reasons) or None when the file cannot be read."""
+    if size == 0 or size > MAX_SCRIPT_ANALYSIS_BYTES:
+        return None
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(MAX_SCRIPT_ANALYSIS_BYTES)
+    except (OSError, PermissionError):
+        return None
+
+    text = decode_script_text(payload)
+    if not text:
+        return None
+
+    scored: list[tuple[int, str]] = []
+    matched_labels: set[str] = set()
+    for weight, label, patterns in _SCRIPT_INDICATOR_PATTERNS:
+        hits = sum(1 for pattern in patterns if pattern.search(text))
+        if not hits:
+            continue
+        # Extra techniques in the same group add less than the first, so a
+        # group can at most double: breadth is evidence, not a multiplier.
+        bonus = min(weight, (hits - 1) * max(6, weight // 3))
+        scored.append((weight + bonus, label if hits == 1 else f"{label} ({hits} ayrı teknik)"))
+        matched_labels.add(label)
+
+    if not scored:
+        return None
+
+    score = sum(weight for weight, _label in scored)
+
+    # A fetch that is never executed, or an execution with nothing fetched, is
+    # ordinary scripting. The pair is the dropper pattern, so it is worth more
+    # than the sum of its parts.
+    if {"uzaktan içerik indirme", "indirilen içeriği doğrudan çalıştırma"} <= matched_labels:
+        score += 15
+        scored.append((15, "indirme ve çalıştırma aynı betikte zincirlenmiş"))
+
+    # Very long unbroken base64/hex runs are not something a person writes.
+    if re.search(r"[A-Za-z0-9+/]{600,}={0,2}", text):
+        score += 15
+        scored.append((15, "betik içinde çok uzun kodlanmış veri bloğu"))
+
+    # A script that already looks suspicious and arrived from the internet is
+    # the actual attack shape. Only applied on top of existing evidence, so a
+    # downloaded but unremarkable script is not penalised for its origin.
+    if scored and file_came_from_internet(path):
+        score += 15
+        scored.append((15, "betik internetten indirilmiş (Mark-of-the-Web)"))
+
+    score = min(100, score)
+    reasons = tuple(reason for _weight, reason in sorted(scored, reverse=True))
+    return score, reasons
+
+
+def script_finding(path: Path, size: int) -> Finding | None:
+    result = analyze_script(path, size)
+    if result is None:
+        return None
+    score, reasons = result
+    if score < MINIMUM_SCRIPT_FINDING_RISK_SCORE:
+        return None
+    return Finding(
+        path=str(path),
+        kind="script-analysis",
+        severity="high" if score >= 70 else "medium",
+        reason="Betik içeriği şüpheli: " + "; ".join(reasons[:4]),
+        risk_score=score,
+    )
+
+
+# --- Mark-of-the-Web -------------------------------------------------------
+#
+# Windows tags files written by browsers and mail clients with a
+# Zone.Identifier alternate data stream. It is the cheapest high-value signal
+# available: a script or executable that came from the internet is a different
+# proposition from the same file a developer just compiled, and nothing in the
+# engine was reading it.
+MOTW_INTERNET_ZONES = {"3", "4"}
+
+
+def file_came_from_internet(path: Path) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        with open(f"{path}:Zone.Identifier", "r", encoding="utf-8", errors="ignore") as stream:
+            content = stream.read(4096)
+    except (OSError, ValueError):
+        return False
+    match = re.search(r"ZoneId\s*=\s*(\d)", content)
+    return bool(match and match.group(1) in MOTW_INTERNET_ZONES)
+
+
+# --- Office macro analysis -------------------------------------------------
+#
+# Macro-bearing documents are the classic mail-attachment vector and the
+# engine could not see them at all: a .docm is a zip, so archive scanning
+# opened it, but the macro lives in vbaProject.bin, which is OLE rather than
+# PE, so every check inside skipped it.
+OFFICE_OOXML_EXTENSIONS = {".docm", ".xlsm", ".pptm", ".docx", ".xlsx", ".pptx", ".dotm", ".xltm"}
+OFFICE_OLE_EXTENSIONS = {".doc", ".xls", ".ppt", ".dot", ".xlt"}
+OLE_CFB_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+MAX_OFFICE_ANALYSIS_BYTES = 16 * 1024 * 1024
+
+# Auto-execution entry points: a macro that runs the moment the document opens,
+# with no further click, is the whole point of a maldoc.
+OFFICE_AUTOEXEC_PATTERNS = (
+    rb"auto_?open", rb"auto_?close", rb"auto_?exec", rb"document_open",
+    rb"workbook_open", rb"document_close", rb"workbook_activate",
+)
+# Things a macro has no business doing in a document.
+OFFICE_PAYLOAD_PATTERNS = (
+    rb"shell\s*\(", rb"wscript\.shell", rb"createobject", rb"powershell",
+    rb"urldownloadtofile", rb"xmlhttp", rb"winhttp", rb"\.run\s*\(",
+    rb"process\s*\.\s*create", rb"virtualalloc", rb"rundll32", rb"mshta",
+)
+
+
+def office_macro_evidence(path: Path, size: int) -> tuple[bool, int, int] | None:
+    """Returns (has_macro, autoexec_hits, payload_hits) or None if unreadable.
+
+    The VBA project stream is compressed, so this reads the raw container
+    bytes rather than decompressing: uncompressed fragments of the macro
+    source are reliably present, and a real VBA decompressor is a much larger
+    dependency than the signal justifies."""
+    if size == 0 or size > MAX_OFFICE_ANALYSIS_BYTES:
+        return None
+    suffix = path.suffix.casefold()
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(8)
+            handle.seek(0)
+            payload = handle.read(MAX_OFFICE_ANALYSIS_BYTES)
+    except (OSError, PermissionError):
+        return None
+
+    has_macro = False
+    scanned = payload
+    if header.startswith(b"PK\x03\x04") or suffix in OFFICE_OOXML_EXTENSIONS:
+        # OOXML: the macro project is a zip member with a fixed name.
+        try:
+            import io
+            import zipfile
+
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                names = archive.namelist()
+                macro_members = [
+                    name for name in names
+                    if name.casefold().endswith("vbaproject.bin")
+                    or name.casefold().endswith(".bin") and "vba" in name.casefold()
+                ]
+                has_macro = bool(macro_members)
+                if has_macro:
+                    chunks = []
+                    for name in macro_members[:4]:
+                        try:
+                            chunks.append(archive.read(name)[:2 * 1024 * 1024])
+                        except (KeyError, OSError, zipfile.BadZipFile, RuntimeError):
+                            continue
+                    scanned = b"".join(chunks) or payload
+        except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+            return None
+    elif header.startswith(OLE_CFB_MAGIC) or suffix in OFFICE_OLE_EXTENSIONS:
+        lowered = payload.lower()
+        has_macro = b"vba" in lowered and (b"_vba_project" in lowered or b"macros" in lowered)
+    else:
+        return None
+
+    if not has_macro:
+        return False, 0, 0
+
+    lowered = scanned.lower()
+    autoexec = sum(1 for pattern in OFFICE_AUTOEXEC_PATTERNS if re.search(pattern, lowered))
+    payload_hits = sum(1 for pattern in OFFICE_PAYLOAD_PATTERNS if re.search(pattern, lowered))
+    return True, autoexec, payload_hits
+
+
+def office_finding(path: Path, size: int) -> Finding | None:
+    evidence = office_macro_evidence(path, size)
+    if evidence is None:
+        return None
+    has_macro, autoexec, payload_hits = evidence
+    if not has_macro:
+        return None
+
+    reasons = ["belge gömülü VBA makrosu içeriyor"]
+    score = 30
+    if autoexec:
+        score += 30
+        reasons.append(f"makro belge açılır açılmaz çalışacak şekilde bağlanmış ({autoexec} giriş noktası)")
+    if payload_hits:
+        score += min(35, 12 * payload_hits)
+        reasons.append(f"makro içinde komut çalıştırma/indirme çağrıları ({payload_hits} ayrı gösterge)")
+    if file_came_from_internet(path):
+        score += 15
+        reasons.append("dosya internetten indirilmiş (Mark-of-the-Web)")
+
+    score = min(100, score)
+    # A macro on its own is common in real business documents; it is the
+    # auto-execution and the payload calls that make it a threat.
+    if score < 55:
+        return None
+    return Finding(
+        path=str(path),
+        kind="document-analysis",
+        severity="high" if score >= 75 else "medium",
+        reason="Makro içeren belge: " + "; ".join(reasons),
+        risk_score=score,
+    )
+
+
+# --- Windows shortcut (.lnk) analysis --------------------------------------
+#
+# A .lnk carries its own command line, so "double-click the shortcut" runs
+# whatever the attacker put in the arguments field -- typically a PowerShell
+# one-liner. The file was only ever checked by name.
+LNK_MAGIC = b"\x4c\x00\x00\x00"
+LNK_GUID = b"\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"
+
+
+def lnk_command_arguments(path: Path, size: int) -> str | None:
+    """Parses the ShellLinkHeader far enough to reach COMMAND_LINE_ARGUMENTS."""
+    if size < 76 or size > 4 * 1024 * 1024:
+        return None
+    try:
+        payload = path.read_bytes()
+    except (OSError, PermissionError):
+        return None
+    if not payload.startswith(LNK_MAGIC) or payload[4:20] != LNK_GUID:
+        return None
+
+    flags = int.from_bytes(payload[20:24], "little")
+    has_target_idlist = bool(flags & 0x01)
+    has_link_info = bool(flags & 0x02)
+    has_name = bool(flags & 0x04)
+    has_relative_path = bool(flags & 0x08)
+    has_working_dir = bool(flags & 0x10)
+    has_arguments = bool(flags & 0x20)
+    is_unicode = bool(flags & 0x80)
+    if not has_arguments:
+        return None
+
+    offset = 76
+    try:
+        if has_target_idlist:
+            offset += 2 + int.from_bytes(payload[offset:offset + 2], "little")
+        if has_link_info:
+            offset += max(4, int.from_bytes(payload[offset:offset + 4], "little"))
+
+        def read_string() -> str:
+            nonlocal offset
+            count = int.from_bytes(payload[offset:offset + 2], "little")
+            offset += 2
+            width = 2 if is_unicode else 1
+            raw = payload[offset:offset + count * width]
+            offset += count * width
+            return raw.decode("utf-16-le" if is_unicode else "mbcs", errors="ignore")
+
+        for present in (has_name, has_relative_path, has_working_dir):
+            if present:
+                read_string()
+        return read_string()
+    except (IndexError, ValueError, UnicodeDecodeError, LookupError):
+        return None
+
+
+def lnk_finding(path: Path, size: int) -> Finding | None:
+    arguments = lnk_command_arguments(path, size)
+    if not arguments or not arguments.strip():
+        return None
+
+    # Reuse the script indicator table: a malicious shortcut's argument string
+    # is a script one-liner, so the same evidence applies.
+    scored: list[tuple[int, str]] = []
+    for weight, label, patterns in _SCRIPT_INDICATOR_PATTERNS:
+        hits = sum(1 for pattern in patterns if pattern.search(arguments))
+        if hits:
+            scored.append((weight + min(weight, (hits - 1) * max(6, weight // 3)), label))
+    if not scored:
+        return None
+
+    score = min(100, sum(weight for weight, _ in scored))
+    # A shortcut invoking an interpreter at all is already unusual.
+    if re.search(r"powershell|cmd\.exe|wscript|cscript|mshta|rundll32|regsvr32", arguments, re.IGNORECASE):
+        score = min(100, score + 20)
+        scored.append((20, "kısayol doğrudan bir betik yorumlayıcısı çağırıyor"))
+    if score < MINIMUM_SCRIPT_FINDING_RISK_SCORE:
+        return None
+
+    reasons = [reason for _weight, reason in sorted(scored, reverse=True)]
+    return Finding(
+        path=str(path),
+        kind="script-analysis",
+        severity="high" if score >= 70 else "medium",
+        reason="Kısayol gizli komut çalıştırıyor: " + "; ".join(reasons[:3]),
+        risk_score=score,
+    )
+
+
+# --- PDF analysis ----------------------------------------------------------
+#
+# Scored conservatively: forms, embedded files and even JavaScript appear in
+# entirely legitimate PDFs, so a single marker is never enough.
+PDF_INDICATORS: tuple[tuple[int, str, bytes], ...] = (
+    (25, "açılışta otomatik eylem", rb"/OpenAction"),
+    (20, "ek otomatik eylem tetikleyicisi", rb"/AA"),
+    (25, "gömülü JavaScript", rb"/JavaScript"),
+    (15, "JavaScript kısa gösterimi", rb"/JS"),
+    (35, "harici program çalıştırma", rb"/Launch"),
+    (20, "gömülü dosya", rb"/EmbeddedFile"),
+    (20, "uzak kaynak çağrısı", rb"/SubmitForm"),
+)
+
+
+def pdf_finding(path: Path, size: int) -> Finding | None:
+    if size == 0 or size > MAX_OFFICE_ANALYSIS_BYTES:
+        return None
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(MAX_OFFICE_ANALYSIS_BYTES)
+    except (OSError, PermissionError):
+        return None
+    if not payload.startswith(b"%PDF"):
+        return None
+
+    scored = [(weight, label) for weight, label, marker in PDF_INDICATORS if marker in payload]
+    if not scored:
+        return None
+    score = sum(weight for weight, _ in scored)
+    labels = {label for _weight, label in scored}
+    if {"açılışta otomatik eylem"} & labels and {"gömülü JavaScript", "JavaScript kısa gösterimi"} & labels:
+        score += 20
+        scored.append((20, "JavaScript belge açılır açılmaz çalışacak"))
+    if file_came_from_internet(path):
+        score += 10
+        scored.append((10, "dosya internetten indirilmiş (Mark-of-the-Web)"))
+
+    score = min(100, score)
+    if score < 55:
+        return None
+    reasons = [reason for _weight, reason in sorted(scored, reverse=True)]
+    return Finding(
+        path=str(path),
+        kind="document-analysis",
+        severity="high" if score >= 75 else "medium",
+        reason="PDF etkin içerik taşıyor: " + "; ".join(reasons[:4]),
+        risk_score=score,
+    )
+
+
 def inspect_file(
     path: Path,
     signatures: dict[int, dict[str, dict[str, Any]]] | None = None,
@@ -3682,6 +4541,30 @@ def inspect_file(
         if structural_finding is not None:
             structural_finding.sha256 = file_digest()
             findings.append(structural_finding)
+
+    if suffix in SCRIPT_EXTENSIONS:
+        content_finding = script_finding(path, size)
+        if content_finding is not None:
+            content_finding.sha256 = file_digest()
+            findings.append(content_finding)
+
+    if suffix == ".lnk":
+        shortcut_finding = lnk_finding(path, size)
+        if shortcut_finding is not None:
+            shortcut_finding.sha256 = file_digest()
+            findings.append(shortcut_finding)
+
+    if suffix in OFFICE_OOXML_EXTENSIONS or suffix in OFFICE_OLE_EXTENSIONS:
+        macro_finding = office_finding(path, size)
+        if macro_finding is not None:
+            macro_finding.sha256 = file_digest()
+            findings.append(macro_finding)
+
+    if suffix == ".pdf":
+        document_finding = pdf_finding(path, size)
+        if document_finding is not None:
+            document_finding.sha256 = file_digest()
+            findings.append(document_finding)
 
     size_signatures = (signatures or {}).get(size, {})
     if size_signatures:
@@ -4549,10 +5432,15 @@ def registry_int(hive: int, key_path: str, value_name: str, default: int | None 
 
 def audit_check(
     check_id: str, title: str, status: str, detail: str, *, weight: int = 1, remedy: str = "",
+    fix: str = "",
 ) -> dict[str, Any]:
+    # `fix` names an entry in main.cjs's AUDIT_FIXES table. The engine never
+    # applies a fix itself: it only reads the registry, so a compromised or
+    # buggy engine process cannot change machine state. Empty means the
+    # finding has no safe one-click remedy and the text stays advisory.
     return {
         "id": check_id, "title": title, "status": status,
-        "detail": detail, "weight": weight, "remedy": remedy,
+        "detail": detail, "weight": weight, "remedy": remedy, "fix": fix,
     }
 
 
@@ -4566,13 +5454,15 @@ def audit_defender_realtime() -> dict[str, Any]:
         return audit_check(
             "defender", "Microsoft Defender", AUDIT_CRITICAL,
             "Defender bir grup ilkesiyle tamamen kapatılmış.", weight=3,
-            remedy="HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\DisableAntiSpyware ilkesini kaldır.")
+            remedy="HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\DisableAntiSpyware ilkesini kaldır.",
+            fix="defender_policy")
     if realtime_off == 1:
         return audit_check(
             "defender", "Microsoft Defender", AUDIT_WARN,
             "Defender'ın gerçek zamanlı koruması kapalı. Neutron'un dosya koruması bunun yerini "
             "tam olarak tutmaz; ikisi birlikte çalışacak biçimde tasarlandı.", weight=3,
-            remedy="Windows Güvenliği > Virüs ve tehdit koruması ayarlarından gerçek zamanlı korumayı aç.")
+            remedy="Windows Güvenliği > Virüs ve tehdit koruması ayarlarından gerçek zamanlı korumayı aç.",
+            fix="defender_realtime")
     return audit_check(
         "defender", "Microsoft Defender", AUDIT_PASS,
         "Gerçek zamanlı koruma kapatılmış görünmüyor. Kayıtlı başka bir antivirüs varsa Defender'ın "
@@ -4592,7 +5482,8 @@ def audit_firewall() -> dict[str, Any]:
         return audit_check(
             "firewall", "Windows Güvenlik Duvarı", AUDIT_CRITICAL,
             f"Kapalı profiller: {', '.join(disabled)}.", weight=3,
-            remedy="Windows Güvenliği > Güvenlik duvarı ve ağ koruması bölümünden ilgili profili aç.")
+            remedy="Windows Güvenliği > Güvenlik duvarı ve ağ koruması bölümünden ilgili profili aç.",
+            fix="firewall_enable")
     return audit_check(
         "firewall", "Windows Güvenlik Duvarı", AUDIT_PASS,
         "Etki alanı, özel ve genel profillerin üçü de açık.", weight=3)
@@ -4607,17 +5498,19 @@ def audit_uac() -> dict[str, Any]:
         return audit_check(
             "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_CRITICAL,
             "UAC tamamen kapalı. Her yönetici süreci sormadan tam yetkiyle çalışır.", weight=3,
-            remedy="Denetim Masası > Kullanıcı Hesapları > Kullanıcı Hesabı Denetimi ayarlarını varsayılana getir.")
+            remedy="Denetim Masası > Kullanıcı Hesapları > Kullanıcı Hesabı Denetimi ayarlarını varsayılana getir.",
+            fix="uac_enable_lua")
     if consent == 0:
         return audit_check(
             "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_WARN,
             "UAC açık ama yöneticiler için hiç onay istenmiyor (yükseltme sessizce veriliyor).", weight=2,
-            remedy="UAC bildirim seviyesini en az \"Yalnızca uygulamalar değişiklik yapmaya çalıştığında\" yap.")
+            remedy="UAC bildirim seviyesini en az \"Yalnızca uygulamalar değişiklik yapmaya çalıştığında\" yap.",
+            fix="uac_consent")
     if secure_desktop == 0:
         return audit_check(
             "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_WARN,
             "UAC istemi güvenli masaüstünde gösterilmiyor; istem taklit edilebilir.", weight=2,
-            remedy="PromptOnSecureDesktop değerini 1 yap.")
+            remedy="PromptOnSecureDesktop değerini 1 yap.", fix="uac_secure_desktop")
     return audit_check(
         "uac", "Kullanıcı Hesabı Denetimi (UAC)", AUDIT_PASS,
         "UAC açık ve yükseltme istemi güvenli masaüstünde gösteriliyor.", weight=3)
@@ -4635,7 +5528,8 @@ def audit_lsa_protection() -> dict[str, Any]:
         "lsa", "LSA korumalı süreç", AUDIT_WARN,
         "lsass.exe korumalı süreç olarak çalışmıyor. Yönetici yetkisi ele geçiren bir saldırgan "
         "oturum kimlik bilgilerini bellekten okuyabilir.", weight=2,
-        remedy="HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\RunAsPPL değerini 1 yapıp yeniden başlat.")
+        remedy="HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\RunAsPPL değerini 1 yapıp yeniden başlat.",
+        fix="lsa_runasppl")
 
 
 def audit_smb1() -> dict[str, Any]:
@@ -4655,7 +5549,8 @@ def audit_smb1() -> dict[str, Any]:
             "smb1", "SMBv1 protokolü", AUDIT_WARN,
             f"SMBv1 hâlâ etkin ({', '.join(sides)}). WannaCry sınıfı solucanların yayılma yolu budur.",
             weight=2,
-            remedy="Windows Özellikleri'nden \"SMB 1.0/CIFS Dosya Paylaşımı Desteği\"ni kaldır.")
+            remedy="Windows Özellikleri'nden \"SMB 1.0/CIFS Dosya Paylaşımı Desteği\"ni kaldır.",
+            fix="smb1_disable")
     return audit_check(
         "smb1", "SMBv1 protokolü", AUDIT_PASS, "SMBv1 devre dışı.", weight=2)
 
@@ -4676,11 +5571,12 @@ def audit_remote_desktop() -> dict[str, Any]:
             "rdp", "Uzak Masaüstü", AUDIT_CRITICAL,
             "Uzak Masaüstü açık ve Ağ Düzeyinde Kimlik Doğrulama (NLA) kapalı: oturum açmadan önce "
             "kimlik doğrulanmıyor.", weight=2,
-            remedy="Sistem > Uzak Masaüstü ayarlarında NLA'yı zorunlu kıl, ya da RDP'yi kapat.")
+            remedy="Sistem > Uzak Masaüstü ayarlarında NLA'yı zorunlu kıl, ya da RDP'yi kapat.",
+            fix="rdp_nla")
     return audit_check(
         "rdp", "Uzak Masaüstü", AUDIT_WARN,
         "Uzak Masaüstü açık (NLA etkin). Bu makineye dışarıdan bağlanmıyorsan kapatılması önerilir.",
-        weight=2, remedy="Kullanmıyorsan Sistem > Uzak Masaüstü'nü kapat.")
+        weight=2, remedy="Kullanmıyorsan Sistem > Uzak Masaüstü'nü kapat.", fix="rdp_disable")
 
 
 def audit_auto_logon() -> dict[str, Any]:
@@ -4693,11 +5589,12 @@ def audit_auto_logon() -> dict[str, Any]:
                 "autologon", "Otomatik oturum açma", AUDIT_CRITICAL,
                 "Otomatik oturum açma açık ve parola kayıt defterinde düz metin olarak duruyor.",
                 weight=3,
-                remedy="netplwiz ile otomatik oturum açmayı kapat ve Winlogon\\DefaultPassword değerini sil.")
+                remedy="netplwiz ile otomatik oturum açmayı kapat ve Winlogon\\DefaultPassword değerini sil.",
+                fix="autologon_disable")
         return audit_check(
             "autologon", "Otomatik oturum açma", AUDIT_WARN,
             "Otomatik oturum açma açık: bilgisayarı açan herkes parola girmeden oturuma düşer.",
-            weight=3, remedy="netplwiz ile otomatik oturum açmayı kapat.")
+            weight=3, remedy="netplwiz ile otomatik oturum açmayı kapat.", fix="autologon_disable")
     return audit_check(
         "autologon", "Otomatik oturum açma", AUDIT_PASS,
         "Oturum açmak için kimlik doğrulama gerekiyor.", weight=3)
@@ -4711,7 +5608,8 @@ def audit_windows_update() -> dict[str, Any]:
             "windows_update", "Windows Update", AUDIT_WARN,
             "Otomatik güncelleme bir ilkeyle kapatılmış. Yamalanmamış Windows açıkları en yaygın "
             "bulaşma yoludur.", weight=2,
-            remedy="WindowsUpdate\\AU\\NoAutoUpdate ilkesini kaldır ve bekleyen güncellemeleri kur.")
+            remedy="WindowsUpdate\\AU\\NoAutoUpdate ilkesini kaldır ve bekleyen güncellemeleri kur.",
+            fix="windows_update_enable")
     return audit_check(
         "windows_update", "Windows Update", AUDIT_PASS,
         "Otomatik güncelleme kapatılmış görünmüyor.", weight=2)
@@ -4731,7 +5629,7 @@ def audit_autorun() -> dict[str, Any]:
         "autorun", "Çıkarılabilir sürücü AutoRun", AUDIT_WARN,
         "AutoRun tamamen kapatılmamış. Takılan bir USB'nin içeriği kullanıcı onayı olmadan "
         "çalıştırılabilir.", weight=1,
-        remedy="Explorer ilkelerinde NoDriveTypeAutoRun değerini 255 yap.")
+        remedy="Explorer ilkelerinde NoDriveTypeAutoRun değerini 255 yap.", fix="autorun_disable")
 
 
 def audit_hidden_extensions() -> dict[str, Any]:
@@ -4745,7 +5643,8 @@ def audit_hidden_extensions() -> dict[str, Any]:
     return audit_check(
         "file_extensions", "Dosya uzantıları", AUDIT_WARN,
         "Bilinen uzantılar gizli. \"fatura.pdf.exe\" gibi dosyalar Gezgin'de \"fatura.pdf\" olarak görünür.",
-        weight=1, remedy="Dosya Gezgini > Görünüm > Dosya adı uzantıları seçeneğini işaretle.")
+        weight=1, remedy="Dosya Gezgini > Görünüm > Dosya adı uzantıları seçeneğini işaretle.",
+        fix="file_extensions_show")
 
 
 SYSTEM_AUDIT_CHECKS = (
@@ -5319,6 +6218,235 @@ def removable_drive_letters() -> set[str]:
     return drives
 
 
+# --- Ransomware protection v1 ---------------------------------------------
+#
+# Scope, stated honestly up front: without a kernel minifilter Neutron cannot
+# block a write. It can only notice one that already happened. So this is a
+# tripwire, not a shield -- it exists to cut the time between "encryption
+# started" and "the user knows" from hours to seconds.
+#
+# Two independent signals:
+#
+#   1. Canary files. Decoys planted in the folders ransomware goes for first.
+#      Nothing legitimate has any reason to rewrite them, so a change is very
+#      nearly proof rather than suspicion -- this is the high-confidence
+#      signal, and the one worth waking the user for.
+#
+#   2. Bulk-rewrite detection. Ransomware rewrites many files quickly and the
+#      result is high-entropy. Real work (a build, an export, an archive
+#      extraction) can look similar, which is why on its own this only warns.
+#
+# What is deliberately NOT here: killing the process. Without a driver we
+# cannot see which process wrote a file, so the "culprit" would be a guess
+# from process-listing heuristics, and killing the wrong one on a false
+# positive can lose the user's unsaved work. Reporting is honest; guessing and
+# killing is not. Attribution needs the minifilter (plan.md items 4-5).
+RANSOMWARE_POLL_INTERVAL_SECONDS = 5
+# The two signals have very different costs, so they get different cadences.
+# Checking four canaries is four small reads and is what actually needs to be
+# fast -- that is the signal worth waking the user for. The bulk sweep stats
+# thousands of files, so running it at the canary rate burned CPU continuously
+# in the background for a signal that only warns.
+RANSOMWARE_BULK_SWEEP_INTERVAL_SECONDS = 30
+RANSOMWARE_BULK_SWEEP_FILE_LIMIT = 4000
+RANSOMWARE_CANARY_PREFIX = "~$neutron-koruma"
+# Chosen to sort to the ends of a directory listing so the decoys stay out of
+# the user's way, while still sitting in the folders that get hit first.
+RANSOMWARE_CANARY_FOLDERS = ("Documents", "Desktop", "Pictures", "Downloads")
+RANSOMWARE_BULK_WINDOW_SECONDS = 60
+RANSOMWARE_BULK_FILE_COUNT = 40
+RANSOMWARE_BULK_MIN_ENTROPY = 7.2
+
+
+def shannon_entropy(data: bytes) -> float:
+    """Bits per byte, 0.0-8.0. Encrypted and compressed data sit near 8.0;
+    documents, source and most real user files sit well below it.
+
+    numpy is used when present because this runs inside a polling watcher: the
+    pure-Python byte loop costs ~2.3 ms per 64 KB, which is ~17x slower and
+    turns a directory of changed files into seconds of CPU. The fallback keeps
+    the watcher working if numpy fails to load, matching the engine's
+    fail-open handling of every other optional dependency."""
+    if not data:
+        return 0.0
+    length = len(data)
+    try:
+        import numpy as np
+
+        counts = np.bincount(np.frombuffer(data, dtype=np.uint8), minlength=256)
+        probabilities = counts[counts > 0].astype(np.float64) / length
+        return float(-(probabilities * np.log2(probabilities)).sum())
+    except (ImportError, ValueError):
+        counts_list = [0] * 256
+        for byte in data:
+            counts_list[byte] += 1
+        total = 0.0
+        for count in counts_list:
+            if count:
+                probability = count / length
+                total -= probability * math.log2(probability)
+        return total
+
+
+def ransomware_canary_paths() -> list[Path]:
+    home = Path.home()
+    paths: list[Path] = []
+    for folder in RANSOMWARE_CANARY_FOLDERS:
+        directory = home / folder
+        if directory.is_dir():
+            paths.append(directory / f"{RANSOMWARE_CANARY_PREFIX}.docx")
+    return paths
+
+
+def ransomware_canary_body(path: Path) -> bytes:
+    return (
+        b"Bu dosya Neutron Guvenlik tarafindan olusturuldu.\r\n"
+        b"Fidye yazilimi korumasi icin kullanilan bir tuzak dosyasidir.\r\n"
+        b"Silmeyin ve degistirmeyin; icerigi bilerek bostur.\r\n"
+        b"Konum: " + str(path).encode("utf-8", errors="replace") + b"\r\n"
+    )
+
+
+def ensure_ransomware_canaries() -> dict[str, str]:
+    """Creates any missing decoys and returns path -> expected digest.
+
+    Marked hidden so they do not clutter the user's folders. A canary that
+    cannot be created is skipped rather than failing the watcher: a read-only
+    or redirected folder is common and is not an error worth stopping for.
+    """
+    expected: dict[str, str] = {}
+    for path in ransomware_canary_paths():
+        body = ransomware_canary_body(path)
+        try:
+            if not path.is_file() or path.read_bytes() != body:
+                # Windows refuses an ordinary open-for-write on a file that
+                # already carries HIDDEN/SYSTEM, so re-arming a tripped canary
+                # fails unless the attributes are cleared and the file
+                # replaced. Found by the re-arm test, not by inspection.
+                if path.exists() and os.name == "nt":
+                    ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x80)  # NORMAL
+                path.unlink(missing_ok=True)
+                path.write_bytes(body)
+                if os.name == "nt":
+                    # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+                    ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x02 | 0x04)
+            expected[str(path)] = hashlib.sha256(body).hexdigest()
+        except (OSError, AttributeError):
+            continue
+    return expected
+
+
+def watch_ransomware() -> int:
+    """Canary tripwire plus bulk-rewrite heuristic. Detection only -- see the
+    block comment above for why nothing is killed here."""
+    settings = read_app_settings()
+    targets = configured_scan_targets(settings)
+    expected = ensure_ransomware_canaries()
+    emit("ransomware-ready", canaries=len(expected), targets=[str(t) for t in targets])
+    if not expected:
+        emit("ransomware-error", code="NO_CANARY",
+             message="Tuzak dosyaları oluşturulamadı; fidye yazılımı koruması sınırlı çalışıyor.")
+
+    # path -> (mtime, size) as last seen, for the bulk-rewrite signal.
+    seen: dict[str, tuple[float, int]] = {}
+    recent_rewrites: list[tuple[float, str]] = []
+    alerted_canaries: set[str] = set()
+    bulk_alerted_at = 0.0
+    last_bulk_sweep_at = 0.0
+
+    try:
+        while True:
+            time.sleep(RANSOMWARE_POLL_INTERVAL_SECONDS)
+            now = time.time()
+
+            # --- signal 1: canaries -----------------------------------
+            for raw_path, digest in list(expected.items()):
+                path = Path(raw_path)
+                try:
+                    changed = not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest
+                except OSError:
+                    changed = True
+                if not changed or raw_path in alerted_canaries:
+                    continue
+                alerted_canaries.add(raw_path)
+                finding = Finding(
+                    path=raw_path, kind="ransomware-canary", severity="high",
+                    reason="Fidye yazılımı tuzak dosyası değiştirildi veya silindi; "
+                           "bu klasörde dosyalar şifreleniyor olabilir",
+                )
+                try:
+                    event_id = save_protection_event("ransomware", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit("ransomware-finding", event_id=event_id, signal="canary",
+                     folder=str(path.parent), finding=asdict(finding))
+
+            # --- signal 2: bulk rewrite -------------------------------
+            cutoff = now - RANSOMWARE_BULK_WINDOW_SECONDS
+            recent_rewrites = [item for item in recent_rewrites if item[0] >= cutoff]
+            if now - last_bulk_sweep_at < RANSOMWARE_BULK_SWEEP_INTERVAL_SECONDS:
+                expected = ensure_ransomware_canaries()
+                alerted_canaries &= set(expected)
+                continue
+            last_bulk_sweep_at = now
+            # Each sweep is bounded, but successive sweeps see different files
+            # as directories change, so the baseline grows without a cap in a
+            # watcher that runs for weeks. Dropping it costs one sweep with no
+            # comparisons, not a missed detection window.
+            if len(seen) > 4 * RANSOMWARE_BULK_SWEEP_FILE_LIMIT:
+                seen.clear()
+            exclusions = load_exclusion_set()
+            for file_path in iter_files(targets, RANSOMWARE_BULK_SWEEP_FILE_LIMIT,
+                                        exclusions, maximum_depth=4):
+                try:
+                    stat = file_path.stat()
+                except OSError:
+                    continue
+                key = str(file_path)
+                previous = seen.get(key)
+                seen[key] = (stat.st_mtime, stat.st_size)
+                if previous is None or previous == (stat.st_mtime, stat.st_size):
+                    continue
+                if stat.st_size == 0 or stat.st_size > 32 * 1024 * 1024:
+                    continue
+                try:
+                    with file_path.open("rb") as handle:
+                        sample = handle.read(65536)
+                except OSError:
+                    continue
+                if not sample or shannon_entropy(sample) < RANSOMWARE_BULK_MIN_ENTROPY:
+                    continue
+                recent_rewrites.append((now, key))
+
+            if (
+                len(recent_rewrites) >= RANSOMWARE_BULK_FILE_COUNT
+                and now - bulk_alerted_at > RANSOMWARE_BULK_WINDOW_SECONDS
+            ):
+                bulk_alerted_at = now
+                sample_paths = [path for _seen_at, path in recent_rewrites[-5:]]
+                finding = Finding(
+                    path=sample_paths[-1] if sample_paths else str(targets[0]),
+                    kind="ransomware-bulk", severity="high",
+                    reason=f"Son {RANSOMWARE_BULK_WINDOW_SECONDS} saniyede {len(recent_rewrites)} dosya "
+                           "yüksek entropili içerikle yeniden yazıldı; toplu şifreleme olabilir",
+                )
+                try:
+                    event_id = save_protection_event("ransomware", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit("ransomware-finding", event_id=event_id, signal="bulk",
+                     file_count=len(recent_rewrites), samples=sample_paths,
+                     finding=asdict(finding))
+
+            # Rewriting a canary is a one-shot signal; re-arm it once the
+            # decoy is intact again so a restored folder resumes protection.
+            expected = ensure_ransomware_canaries()
+            alerted_canaries &= set(expected)
+    except KeyboardInterrupt:
+        emit("ransomware-stopped")
+        return 0
+
+
 def watch_usb() -> int:
     """Poll-based (no WM_DEVICECHANGE window needed) removable-media
     watcher: on each newly-attached drive, flags an autorun.inf (the
@@ -5594,11 +6722,32 @@ def service_host() -> int:
     watchers.append(("amsi-service", amsi_service, bool(settings.get("amsi_protection_enabled"))))
     watchers.append(("watch-memory", watch_memory, bool(settings.get("memory_scan_enabled"))))
     watchers.append(("watch-usb", watch_usb, bool(settings.get("usb_protection_enabled"))))
+    watchers.append(("watch-ransomware", watch_ransomware, bool(settings.get("ransomware_protection_enabled"))))
+
+    # A watcher thread that raised used to die silently: no event, nothing in
+    # the UI, and service-ready still listed it as active, so protection was
+    # off while the product said it was on. A transient OSError -- a removable
+    # drive pulled mid-scan, a denied handle, a network table read failing --
+    # must not permanently disable a module.
+    def supervise(name: str, target: Any) -> Any:
+        def run() -> None:
+            delay = 5
+            while True:
+                try:
+                    target()
+                    return  # clean, intentional stop
+                except KeyboardInterrupt:
+                    return
+                except Exception as error:  # noqa: BLE001 - deliberately broad
+                    emit("watcher-restarting", watcher=name, error=str(error), retry_in=delay)
+                    time.sleep(delay)
+                    delay = min(300, delay * 2)
+        return run
 
     for name, target, enabled in watchers:
         if not enabled:
             continue
-        thread = threading.Thread(target=target, name=name, daemon=True)
+        thread = threading.Thread(target=supervise(name, target), name=name, daemon=True)
         thread.start()
 
     threading.Thread(target=pipe_server, name="service-pipe", daemon=True).start()
@@ -6668,6 +7817,33 @@ def history(limit: int) -> int:
         return 2
 
 
+def start_parent_liveness_watch() -> None:
+    """Exit as soon as the parent process goes away.
+
+    The watchers are long-lived child processes with no window. If Electron is
+    terminated without running its shutdown path -- Task Manager, a crash, or
+    Windows tearing processes down at shutdown -- the children are orphaned and
+    keep running. Windows then blocks shutdown on a process it can only
+    describe as a nameless background task, and the data directory stays
+    locked, which is also what makes an uninstall fail on in-use files.
+
+    stdin is an anonymous pipe whose only writer is the parent, so read()
+    returning EOF means the parent is gone. This is only armed when
+    --exit-with-parent is passed, because with stdio 'ignore' stdin is the
+    null device and would report EOF instantly.
+    """
+    def wait_for_parent() -> None:
+        try:
+            sys.stdin.buffer.read(1)
+        except (OSError, ValueError):
+            pass
+        # os._exit, not sys.exit: this runs on a daemon thread and must take
+        # the process down without waiting for the watcher loops.
+        os._exit(0)
+
+    threading.Thread(target=wait_for_parent, name="parent-liveness", daemon=True).start()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Neutron salt-okunur hızlı tarama motoru")
     action = parser.add_mutually_exclusive_group(required=True)
@@ -6684,6 +7860,7 @@ def main() -> int:
     action.add_argument("--service-host", action="store_true", help="Tüm koruma bileşenlerini LocalSystem servisi olarak tek süreçte çalıştır")
     action.add_argument("--watch-memory", action="store_true", help="Yeni başlayan süreçlerin belleğini YARA ve RWX-özel-bölge sezgisiyle tara")
     action.add_argument("--watch-usb", action="store_true", help="Takılan çıkarılabilir medyayı autorun.inf ve dosyalar için tara")
+    action.add_argument("--watch-ransomware", action="store_true", help="Tuzak dosyalarını ve toplu şifreleme belirtilerini izle")
     action.add_argument("--amsi-service", action="store_true", help="AMSI ön-çalıştırma koruma servisini başlat")
     action.add_argument("--check-url", metavar="URL", help="URL veya domain itibarını yerel Proton verisinde denetle")
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
@@ -6737,7 +7914,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=5, help="Döndürülecek en fazla geçmiş kaydı")
     parser.add_argument("--value-json", default="null", help="Ayar için JSON değeri")
     parser.add_argument("--json-lines", action="store_true", help="Electron IPC için JSON Lines çıktısı")
+    parser.add_argument("--exit-with-parent", action="store_true",
+                        help="Ana süreç kapandığında bu süreci de sonlandır (stdin borusu gerektirir)")
     args = parser.parse_args()
+
+    if args.exit_with_parent:
+        start_parent_liveness_watch()
 
     if args.engine_version:
         emit("engine-version", version=NEUTRON_ENGINE_VERSION, frozen=bool(getattr(sys, "frozen", False)))
@@ -6802,6 +7984,8 @@ def main() -> int:
         return watch_memory()
     if args.watch_usb:
         return watch_usb()
+    if args.watch_ransomware:
+        return watch_ransomware()
     if args.watch_web:
         return watch_web()
     if args.amsi_service:

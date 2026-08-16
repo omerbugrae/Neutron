@@ -36,7 +36,15 @@ const hasSingleInstanceLock = isMaintenanceMode || app.requestSingleInstanceLock
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => showMainWindow());
+  // The watchdog relaunches Neutron.exe --hidden on a schedule to restart it
+  // if it was killed. When it is already running that relaunch loses the lock
+  // and exits -- but it still fires this event, so an unconditional
+  // showMainWindow() made the window pop open on its own every time the task
+  // ran. Only a launch the *user* performed should raise the window.
+  app.on('second-instance', (_event, argv) => {
+    if (Array.isArray(argv) && argv.includes('--hidden')) return;
+    showMainWindow();
+  });
 }
 
 let activeScan = null;
@@ -47,6 +55,7 @@ let amsiService = null;
 let networkWatcher = null;
 let memoryWatcher = null;
 let usbWatcher = null;
+let ransomwareWatcher = null;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -69,6 +78,7 @@ let appSettings = {
   service_mode_enabled: false,
   memory_scan_enabled: false,
   usb_protection_enabled: true,
+  ransomware_protection_enabled: true,
   notifications_enabled: true,
   watch_paths: [],
   scan_max_files: 1500,
@@ -212,7 +222,31 @@ function removeMachineLicenseFromRegistry() {
 
 let activeLicensePath = null;
 
+// licenseStatus() spawns reg.exe synchronously and reads files. requireLicense()
+// calls it on every scan start, every settings write and every watcher start --
+// 17 call sites -- so each one blocked the main process, and with it the whole
+// UI, for the length of a subprocess spawn. The result only changes when the
+// licence is saved or removed, both of which clear this.
+const LICENSE_STATUS_CACHE_MS = 5000;
+let licenseStatusCache = null;
+let licenseStatusCachedAt = 0;
+
+function invalidateLicenseStatusCache() {
+  licenseStatusCache = null;
+  licenseStatusCachedAt = 0;
+}
+
 function licenseStatus() {
+  if (licenseStatusCache && Date.now() - licenseStatusCachedAt < LICENSE_STATUS_CACHE_MS) {
+    return licenseStatusCache;
+  }
+  const status = computeLicenseStatus();
+  licenseStatusCache = status;
+  licenseStatusCachedAt = Date.now();
+  return status;
+}
+
+function computeLicenseStatus() {
   // Every failure is recorded with the path it came from. The installer
   // activates machine-wide into ProgramData, so when the app then claims to
   // be unlicensed the useful question is always "which file, and why did it
@@ -320,24 +354,44 @@ function saveLicense(key, options = {}) {
     if (options.machineWide) writeMachineLicenseToRegistry(key);
     activeLicense = license;
     activeLicensePath = target;
+    invalidateLicenseStatusCache();
     return { ok: true, active: true, license };
   } catch (error) {
+    invalidateLicenseStatusCache();
     return { ok: false, active: false, deviceHash: safeDeviceHash(), message: error.message };
   }
 }
 
 function removeStoredLicense() {
-  try {
-    for (const target of readableLicensePaths()) {
+  // Each copy is removed independently. Chained in one try block, an
+  // unelevated user hitting EPERM on the ProgramData copy aborted the rest:
+  // the registry entry survived, in-memory state was never cleared, and the
+  // app stayed licensed while reporting failure.
+  const failed = [];
+  for (const target of readableLicensePaths()) {
+    try {
       if (existsSync(target)) require('fs').rmSync(target, { force: true });
+    } catch (error) {
+      failed.push(`${target}: ${error.message}`);
     }
-    removeMachineLicenseFromRegistry();
-    activeLicense = null;
-    activeLicensePath = null;
-    return { ok: true, active: false, deviceHash: safeDeviceHash() };
-  } catch (error) {
-    return { ok: false, message: error.message };
   }
+  try {
+    removeMachineLicenseFromRegistry();
+  } catch (error) {
+    failed.push(`${LICENSE_REGISTRY_KEY}: ${error.message}`);
+  }
+  activeLicense = null;
+  activeLicensePath = null;
+  invalidateLicenseStatusCache();
+  if (failed.length) {
+    return {
+      ok: false,
+      active: licenseStatus().active,
+      deviceHash: safeDeviceHash(),
+      message: `Bazı lisans kopyaları kaldırılamadı (yönetici izni gerekebilir): ${failed.join(' | ')}`,
+    };
+  }
+  return { ok: true, active: false, deviceHash: safeDeviceHash() };
 }
 
 function revealStoredLicense() {
@@ -351,7 +405,14 @@ function revealStoredLicense() {
       ? { ok: true, key }
       : { ok: false, message: 'Kayıtlı lisans okunamadı.' };
   }
-  return { ok: true, key: readFileSync(activeLicensePath, 'utf8').trim() };
+  // The file was readable when licenseStatus() ran, but that may have been up
+  // to the cache lifetime ago; an unguarded read here throws through the IPC
+  // handler instead of returning a result the renderer can display.
+  try {
+    return { ok: true, key: readFileSync(activeLicensePath, 'utf8').trim() };
+  } catch (error) {
+    return { ok: false, message: `Lisans dosyası okunamadı: ${error.message}` };
+  }
 }
 
 function openProtectionEvent(eventId) {
@@ -384,6 +445,22 @@ function showFindingNotification(event, title) {
     silent: false,
   });
   notification.on('click', () => openProtectionEvent(event.event_id));
+  notification.show();
+}
+
+// The burst brake is the one event the user must not miss: protection has
+// partially stood itself down, and until they look at Quarantine they have no
+// way of knowing. It ignores the notification preference for that reason --
+// this is a state change in the product, not a detection.
+function showAutoQuarantineBrakeNotification(event) {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({
+    title: 'Neutron otomatik karantinayı durdurdu',
+    body: event.message || 'Anormal sayıda otomatik karantina algılandı.',
+    icon: neutronImage(64),
+    silent: false,
+  });
+  notification.on('click', () => showMainWindow());
   notification.show();
 }
 
@@ -660,6 +737,134 @@ function firewallSetEnabledCommand(ruleName, enabled) {
   return `Set-NetFirewallRule -Name '${psQuoteSingle(ruleName)}' -Enabled ${enabled ? 'True' : 'False'}`;
 }
 
+// System audit one-click fixes. The engine only ever reads the registry;
+// every state change lives here, behind a fixed table. The id arriving over
+// IPC selects a table entry -- it is never interpolated into the command --
+// so a renderer bug cannot turn this into arbitrary elevated execution.
+//
+// `restart` marks fixes Windows only honours after a reboot, so the UI can
+// say so instead of leaving the user staring at an unchanged audit result.
+const AUDIT_FIXES = {
+  defender_policy: {
+    label: 'Defender ilkesini kaldır',
+    confirm: 'Defender\'ı tamamen kapatan grup ilkesi kaldırılsın mı?',
+    command:
+      "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows Defender' " +
+      "-Name 'DisableAntiSpyware' -ErrorAction SilentlyContinue",
+  },
+  defender_realtime: {
+    label: 'Gerçek zamanlı korumayı aç',
+    confirm: 'Microsoft Defender gerçek zamanlı koruması açılsın mı?',
+    command: 'Set-MpPreference -DisableRealtimeMonitoring $false',
+  },
+  firewall_enable: {
+    label: 'Güvenlik duvarını aç',
+    confirm: 'Kapalı olan güvenlik duvarı profilleri açılsın mı?',
+    command: 'Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True',
+  },
+  uac_enable_lua: {
+    label: 'UAC\'yi aç',
+    confirm: 'Kullanıcı Hesabı Denetimi açılsın mı? Değişiklik yeniden başlatmadan sonra etkin olur.',
+    restart: true,
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' " +
+      "-Name 'EnableLUA' -Value 1 -Type DWord",
+  },
+  uac_consent: {
+    label: 'Yönetici onayını iste',
+    confirm: 'Yönetici yükseltmelerinde onay istemi geri getirilsin mi?',
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' " +
+      "-Name 'ConsentPromptBehaviorAdmin' -Value 5 -Type DWord",
+  },
+  uac_secure_desktop: {
+    label: 'Güvenli masaüstünü aç',
+    confirm: 'UAC istemi güvenli masaüstünde gösterilsin mi?',
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' " +
+      "-Name 'PromptOnSecureDesktop' -Value 1 -Type DWord",
+  },
+  autologon_disable: {
+    label: 'Otomatik oturum açmayı kapat',
+    confirm:
+      'Otomatik oturum açma kapatılsın ve kayıt defterinde duran düz metin parola silinsin mi? '
+      + 'Bilgisayar açılışında yeniden parola sorulacak.',
+    command:
+      "$winlogon = 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon'; " +
+      "Set-ItemProperty -Path $winlogon -Name 'AutoAdminLogon' -Value '0' -Type String; " +
+      "Remove-ItemProperty -Path $winlogon -Name 'DefaultPassword' -ErrorAction SilentlyContinue",
+  },
+  lsa_runasppl: {
+    label: 'LSA korumasını aç',
+    confirm: 'lsass.exe korumalı süreç olarak çalıştırılsın mı? Değişiklik yeniden başlatmadan sonra etkin olur.',
+    restart: true,
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa' " +
+      "-Name 'RunAsPPL' -Value 1 -Type DWord",
+  },
+  smb1_disable: {
+    label: 'SMBv1\'i kapat',
+    confirm: 'SMBv1 sunucu ve istemcisi kapatılsın mı? Değişiklik yeniden başlatmadan sonra tamamlanır.',
+    restart: true,
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\LanmanServer\\Parameters' " +
+      "-Name 'SMB1' -Value 0 -Type DWord; " +
+      "try { Disable-WindowsOptionalFeature -Online -FeatureName 'SMB1Protocol' -NoRestart -ErrorAction Stop | Out-Null } catch {}",
+  },
+  rdp_nla: {
+    label: 'NLA\'yı zorunlu kıl',
+    confirm: 'Uzak Masaüstü için Ağ Düzeyinde Kimlik Doğrulama zorunlu kılınsın mı?',
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' " +
+      "-Name 'UserAuthentication' -Value 1 -Type DWord",
+  },
+  rdp_disable: {
+    label: 'Uzak Masaüstü\'nü kapat',
+    confirm: 'Uzak Masaüstü kapatılsın mı? Bu makineye uzaktan bağlanıyorsan bağlantın kesilir.',
+    command:
+      "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server' " +
+      "-Name 'fDenyTSConnections' -Value 1 -Type DWord",
+  },
+  windows_update_enable: {
+    label: 'Otomatik güncellemeyi aç',
+    confirm: 'Otomatik güncellemeyi kapatan ilke kaldırılsın mı?',
+    command:
+      "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU' " +
+      "-Name 'NoAutoUpdate' -ErrorAction SilentlyContinue",
+  },
+  autorun_disable: {
+    label: 'AutoRun\'ı kapat',
+    confirm: 'Tüm sürücü türleri için AutoRun kapatılsın mı?',
+    command:
+      "$key = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer'; " +
+      "if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }; " +
+      "Set-ItemProperty -Path $key -Name 'NoDriveTypeAutoRun' -Value 255 -Type DWord",
+  },
+  // HKCU, so this one needs no elevation at all -- prompting for admin on a
+  // per-user Explorer preference would be asking for more rights than the
+  // change requires.
+  file_extensions_show: {
+    label: 'Uzantıları göster',
+    confirm: 'Bilinen dosya uzantıları Gezgin\'de gösterilsin mi?',
+    elevated: false,
+    note: 'Ayar yazıldı. Dosya Gezgini yeniden başlatıldığında (veya bir sonraki oturum açılışında) görünür olacak.',
+    command:
+      "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced' " +
+      "-Name 'HideFileExt' -Value 0 -Type DWord",
+  },
+};
+
+function applyAuditFix(fixId) {
+  if (!Object.prototype.hasOwnProperty.call(AUDIT_FIXES, fixId)) {
+    return Promise.resolve({ ok: false, message: 'Bilinmeyen düzeltme.' });
+  }
+  const fix = AUDIT_FIXES[fixId];
+  if (process.platform !== 'win32') {
+    return Promise.resolve({ ok: false, message: 'Bu düzeltme yalnızca Windows üzerinde çalışır.' });
+  }
+  return runPowerShell(fix.command, { elevated: fix.elevated !== false });
+}
+
 // Startup manager: only HKLM registry values and the all-users Startup
 // folder reach these (HKCU + per-user Startup folder are handled directly,
 // non-elevated, inside engine.py's startup_disable_entry/startup_restore_entry).
@@ -756,6 +961,11 @@ function handleServiceEvent(event) {
   if (!event || typeof event.type !== 'string') return;
   sendProtectionEvent(event);
   if (event.settings) appSettings = { ...appSettings, ...event.settings };
+  if (event.type === 'auto-quarantine-brake') {
+    if (event.ml_disabled) appSettings.ml_assisted_detection_enabled = false;
+    showAutoQuarantineBrakeNotification(event);
+    return;
+  }
   if (
     ['behavior-finding', 'network-finding', 'amsi-finding'].includes(event.type)
     || (event.type === 'watch-finding' && shouldNotifyWatchFinding(event))
@@ -1394,7 +1604,7 @@ function startScan(webContents, options = {}) {
     }
   );
 
-  activeScan = { id: scanId, child, webContents };
+  activeScan = { id: scanId, child, webContents, cancelledByUser: false };
   let pendingOutput = '';
   let standardError = '';
   let engineReportedError = false;
@@ -1436,7 +1646,9 @@ function startScan(webContents, options = {}) {
   });
 
   child.once('close', (code) => {
-    if (pendingOutput.trim()) {
+    const wasCancelled = activeScan?.id === scanId && activeScan.cancelledByUser;
+
+    if (!wasCancelled && pendingOutput.trim()) {
       try {
         sendScanEvent(webContents, JSON.parse(pendingOutput));
       } catch {
@@ -1444,7 +1656,9 @@ function startScan(webContents, options = {}) {
       }
     }
 
-    if (code !== 0 && !engineReportedError && activeScan?.id === scanId) {
+    if (wasCancelled) {
+      sendScanEvent(webContents, { type: 'cancelled' });
+    } else if (code !== 0 && !engineReportedError && activeScan?.id === scanId) {
       sendScanEvent(webContents, {
         type: 'error',
         message: standardError.trim() || 'Tarama motoru beklenmeyen şekilde durdu.',
@@ -1457,6 +1671,13 @@ function startScan(webContents, options = {}) {
   });
 
   return { ok: true, scanId };
+}
+
+function cancelScan() {
+  if (!activeScan) return { ok: false, message: 'Çalışan bir tarama yok.' };
+  activeScan.cancelledByUser = true;
+  activeScan.child.kill();
+  return { ok: true };
 }
 
 // Item 7 of plan.md, done as a scheduled *quick* scan rather than a full
@@ -1571,14 +1792,17 @@ function protectionStatus() {
     usbEnabled: moduleRunning(appSettings.usb_protection_enabled, usbWatcher),
     usbReady: moduleReady(appSettings.usb_protection_enabled, usbWatcher),
     usbConfigured: Boolean(appSettings.usb_protection_enabled),
+    ransomwareEnabled: moduleRunning(appSettings.ransomware_protection_enabled, ransomwareWatcher),
+    ransomwareReady: moduleReady(appSettings.ransomware_protection_enabled, ransomwareWatcher),
+    ransomwareConfigured: Boolean(appSettings.ransomware_protection_enabled),
   };
 }
 
 function startWebWatcher() {
   if (requireLicense()) return;
   if (webWatcher) return protectionStatus();
-  const engine = resolveEngine(['--watch-web']);
-  const child = spawn(engine.command, engine.arguments, { cwd: engine.cwd, windowsHide: true, shell: false, env: engineEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] });
+  const engine = resolveEngine(['--watch-web', '--exit-with-parent']);
+  const child = spawn(engine.command, engine.arguments, { cwd: engine.cwd, windowsHide: true, shell: false, env: engineEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   webWatcher = watcher;
   child.stdout.setEncoding('utf8');
@@ -1589,7 +1813,7 @@ function startWebWatcher() {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
-        if (event.type === 'web-ready') watcher.ready = true;
+        if (event.type === 'web-ready') watcher.ready = true; if (watcher.ready) noteWatcherHealthy('webWatcher');
         sendProtectionEvent(event);
         if (event.type === 'web-finding') showFindingNotification(event, 'Neutron zararlı indirme kaynağı algıladı');
       } catch { sendProtectionEvent({ type: 'web-error', message: 'Web korumasından geçersiz yanıt alındı.' }); }
@@ -1598,7 +1822,10 @@ function startWebWatcher() {
   child.stderr.setEncoding('utf8'); child.stderr.on('data', (chunk) => { watcher.stderr = `${watcher.stderr}${chunk}`.slice(-2000); });
   child.once('close', (code) => {
     const current = webWatcher === watcher; if (current) webWatcher = null;
-    if (current && !watcher.stopping && code !== 0) sendProtectionEvent({ type: 'web-error', message: watcher.stderr.trim() || 'Web koruması durdu.' });
+    if (current && !watcher.stopping && code !== 0) {
+      scheduleWatcherRestart('webWatcher', () => Boolean(appSettings.web_protection_enabled), startWebWatcher);
+      sendProtectionEvent({ type: 'web-error', message: watcher.stderr.trim() || 'Web koruması durdu.' });
+    }
     else if (current && !watcher.silent) sendProtectionEvent({ type: 'web-stopped' });
   });
   return protectionStatus();
@@ -1613,13 +1840,13 @@ function stopWebWatcher(options = {}) {
 function startBehaviorWatcher() {
   if (requireLicense()) return;
   if (behaviorWatcher) return protectionStatus();
-  const engine = resolveEngine(['--watch-behavior']);
+  const engine = resolveEngine(['--watch-behavior', '--exit-with-parent']);
   const child = spawn(engine.command, engine.arguments, {
     cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   behaviorWatcher = watcher;
@@ -1633,7 +1860,7 @@ function startBehaviorWatcher() {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
-        if (event.type === 'behavior-ready') watcher.ready = true;
+        if (event.type === 'behavior-ready') watcher.ready = true; if (watcher.ready) noteWatcherHealthy('behaviorWatcher');
         sendProtectionEvent(event);
         if (event.type === 'behavior-finding') {
           showFindingNotification(event, 'Neutron şüpheli davranış algıladı');
@@ -1655,6 +1882,7 @@ function startBehaviorWatcher() {
     if (isCurrentWatcher) behaviorWatcher = null;
     updateTrayMenu();
     if (isCurrentWatcher && !watcher.stopping && code !== 0) {
+      scheduleWatcherRestart('behaviorWatcher', () => Boolean(appSettings.behavior_protection_enabled), startBehaviorWatcher);
       sendProtectionEvent({
         type: 'behavior-error',
         message: watcher.stderr.trim() || 'Davranış izleme beklenmeyen şekilde durdu.',
@@ -1679,13 +1907,13 @@ function stopBehaviorWatcher(options = {}) {
 function startNetworkWatcher() {
   if (requireLicense()) return;
   if (networkWatcher) return protectionStatus();
-  const engine = resolveEngine(['--watch-network']);
+  const engine = resolveEngine(['--watch-network', '--exit-with-parent']);
   const child = spawn(engine.command, engine.arguments, {
     cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   networkWatcher = watcher;
@@ -1699,7 +1927,7 @@ function startNetworkWatcher() {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
-        if (event.type === 'network-ready') watcher.ready = true;
+        if (event.type === 'network-ready') watcher.ready = true; if (watcher.ready) noteWatcherHealthy('networkWatcher');
         sendProtectionEvent(event);
         if (event.type === 'network-finding') {
           showFindingNotification(event, 'Neutron bilinen kötü amaçlı bir IP adresine bağlantı algıladı');
@@ -1721,6 +1949,7 @@ function startNetworkWatcher() {
     if (isCurrentWatcher) networkWatcher = null;
     updateTrayMenu();
     if (isCurrentWatcher && !watcher.stopping && code !== 0) {
+      scheduleWatcherRestart('networkWatcher', () => Boolean(appSettings.network_protection_enabled), startNetworkWatcher);
       sendProtectionEvent({
         type: 'network-error',
         message: watcher.stderr.trim() || 'Ağ izleme beklenmeyen şekilde durdu.',
@@ -1748,13 +1977,13 @@ function stopNetworkWatcher(options = {}) {
 function startMemoryWatcher() {
   if (requireLicense()) return;
   if (memoryWatcher) return protectionStatus();
-  const engine = resolveEngine(['--watch-memory']);
+  const engine = resolveEngine(['--watch-memory', '--exit-with-parent']);
   const child = spawn(engine.command, engine.arguments, {
     cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   memoryWatcher = watcher;
@@ -1768,7 +1997,7 @@ function startMemoryWatcher() {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
-        if (event.type === 'memory-ready') watcher.ready = true;
+        if (event.type === 'memory-ready') watcher.ready = true; if (watcher.ready) noteWatcherHealthy('memoryWatcher');
         sendProtectionEvent(event);
         if (event.type === 'memory-finding') {
           showFindingNotification(event, 'Neutron şüpheli bellek/process injection etkinliği algıladı');
@@ -1790,6 +2019,7 @@ function startMemoryWatcher() {
     if (isCurrentWatcher) memoryWatcher = null;
     updateTrayMenu();
     if (isCurrentWatcher && !watcher.stopping && code !== 0) {
+      scheduleWatcherRestart('memoryWatcher', () => Boolean(appSettings.memory_scan_enabled), startMemoryWatcher);
       sendProtectionEvent({
         type: 'memory-error',
         message: watcher.stderr.trim() || 'Bellek taraması beklenmeyen şekilde durdu.',
@@ -1814,13 +2044,13 @@ function stopMemoryWatcher(options = {}) {
 function startUsbWatcher() {
   if (requireLicense()) return;
   if (usbWatcher) return protectionStatus();
-  const engine = resolveEngine(['--watch-usb']);
+  const engine = resolveEngine(['--watch-usb', '--exit-with-parent']);
   const child = spawn(engine.command, engine.arguments, {
     cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   usbWatcher = watcher;
@@ -1834,9 +2064,12 @@ function startUsbWatcher() {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
-        if (event.type === 'usb-ready') watcher.ready = true;
+        if (event.type === 'usb-ready') watcher.ready = true; if (watcher.ready) noteWatcherHealthy('usbWatcher');
         sendProtectionEvent(event);
-        if (event.type === 'usb-finding') {
+        if (event.type === 'auto-quarantine-brake') {
+          if (event.ml_disabled) appSettings.ml_assisted_detection_enabled = false;
+          showAutoQuarantineBrakeNotification(event);
+        } else if (event.type === 'usb-finding') {
           showFindingNotification(event, 'Neutron çıkarılabilir medyada tehdit algıladı');
         }
       } catch {
@@ -1856,6 +2089,7 @@ function startUsbWatcher() {
     if (isCurrentWatcher) usbWatcher = null;
     updateTrayMenu();
     if (isCurrentWatcher && !watcher.stopping && code !== 0) {
+      scheduleWatcherRestart('usbWatcher', () => Boolean(appSettings.usb_protection_enabled), startUsbWatcher);
       sendProtectionEvent({
         type: 'usb-error',
         message: watcher.stderr.trim() || 'USB izleme beklenmeyen şekilde durdu.',
@@ -1877,16 +2111,90 @@ function stopUsbWatcher(options = {}) {
   return protectionStatus();
 }
 
-function startAmsiService() {
+function startRansomwareWatcher() {
   if (requireLicense()) return;
-  if (amsiService) return protectionStatus();
-  const engine = resolveEngine(['--amsi-service']);
+  if (ransomwareWatcher) return protectionStatus();
+  const engine = resolveEngine(['--watch-ransomware', '--exit-with-parent']);
   const child = spawn(engine.command, engine.arguments, {
     cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
+  ransomwareWatcher = watcher;
+  updateTrayMenu();
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    watcher.pending += chunk;
+    const lines = watcher.pending.split(/\r?\n/);
+    watcher.pending = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'ransomware-ready') watcher.ready = true; if (watcher.ready) noteWatcherHealthy('ransomwareWatcher');
+        sendProtectionEvent(event);
+        if (event.type === 'ransomware-finding') {
+          // Ignores the notification preference: encryption in progress is
+          // the one thing where minutes of delay changes the outcome.
+          showFindingNotification(
+            event,
+            event.signal === 'canary'
+              ? 'Neutron fidye yazılımı belirtisi algıladı'
+              : 'Neutron toplu dosya şifreleme algıladı',
+          );
+        }
+      } catch {
+        sendProtectionEvent({ type: 'ransomware-error', message: 'Fidye yazılımı korumasından geçersiz yanıt alındı.' });
+      }
+    }
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { watcher.stderr = `${watcher.stderr}${chunk}`.slice(-2_000); });
+  child.once('error', () => {
+    if (ransomwareWatcher === watcher) ransomwareWatcher = null;
+    updateTrayMenu();
+    sendProtectionEvent({ type: 'ransomware-error', message: 'Fidye yazılımı koruması başlatılamadı.' });
+  });
+  child.once('close', (code) => {
+    const isCurrentWatcher = ransomwareWatcher === watcher;
+    if (isCurrentWatcher) ransomwareWatcher = null;
+    updateTrayMenu();
+    if (isCurrentWatcher && !watcher.stopping && code !== 0) {
+      scheduleWatcherRestart('ransomwareWatcher', () => Boolean(appSettings.ransomware_protection_enabled), startRansomwareWatcher);
+      sendProtectionEvent({
+        type: 'ransomware-error',
+        message: watcher.stderr.trim() || 'Fidye yazılımı koruması beklenmeyen şekilde durdu.',
+      });
+    } else if (isCurrentWatcher && !watcher.silent) {
+      sendProtectionEvent({ type: 'ransomware-stopped' });
+    }
+  });
+  return protectionStatus();
+}
+
+function stopRansomwareWatcher(options = {}) {
+  if (!ransomwareWatcher) return protectionStatus();
+  ransomwareWatcher.stopping = true;
+  ransomwareWatcher.silent = Boolean(options.silent);
+  ransomwareWatcher.child.kill();
+  ransomwareWatcher = null;
+  updateTrayMenu();
+  return protectionStatus();
+}
+
+function startAmsiService() {
+  if (requireLicense()) return;
+  if (amsiService) return protectionStatus();
+  const engine = resolveEngine(['--amsi-service', '--exit-with-parent']);
+  const child = spawn(engine.command, engine.arguments, {
+    cwd: engine.cwd,
+    windowsHide: true,
+    shell: false,
+    env: engineEnvironment(),
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const service = { child, ready: false, stopping: false, pending: '', stderr: '' };
   amsiService = service;
@@ -1950,13 +2258,13 @@ function startProtectionWatcher() {
   if (requireLicense()) return;
   if (protectionWatcher) return protectionStatus();
 
-  const engine = resolveEngine(['--watch']);
+  const engine = resolveEngine(['--watch', '--exit-with-parent']);
   const child = spawn(engine.command, engine.arguments, {
     cwd: engine.cwd,
     windowsHide: true,
     shell: false,
     env: engineEnvironment(),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   const watcher = { child, ready: false, stopping: false, pending: '', stderr: '' };
   protectionWatcher = watcher;
@@ -1976,7 +2284,10 @@ function startProtectionWatcher() {
           updateTrayMenu();
         }
         sendProtectionEvent(event);
-        if (event.type === 'watch-finding' && shouldNotifyWatchFinding(event)) {
+        if (event.type === 'auto-quarantine-brake') {
+          if (event.ml_disabled) appSettings.ml_assisted_detection_enabled = false;
+          showAutoQuarantineBrakeNotification(event);
+        } else if (event.type === 'watch-finding' && shouldNotifyWatchFinding(event)) {
           showFindingNotification(event);
         }
       } catch {
@@ -2038,6 +2349,7 @@ async function updateApplicationSetting(key, value) {
     'service_mode_enabled',
     'memory_scan_enabled',
     'usb_protection_enabled',
+    'ransomware_protection_enabled',
     'notifications_enabled',
     'watch_paths',
     'scan_max_files',
@@ -2071,6 +2383,8 @@ async function updateApplicationSetting(key, value) {
     appSettings.network_protection_enabled ? startNetworkWatcher() : stopNetworkWatcher();
   } else if (key === 'memory_scan_enabled') {
     appSettings.memory_scan_enabled ? startMemoryWatcher() : stopMemoryWatcher();
+  } else if (key === 'ransomware_protection_enabled') {
+    appSettings.ransomware_protection_enabled ? startRansomwareWatcher() : stopRansomwareWatcher();
   } else if (key === 'usb_protection_enabled') {
     appSettings.usb_protection_enabled ? startUsbWatcher() : stopUsbWatcher();
   } else if ((key === 'watch_paths' || key === 'scan_max_files') && protectionWatcher) {
@@ -2078,6 +2392,47 @@ async function updateApplicationSetting(key, value) {
     startProtectionWatcher();
   }
   return { ok: true, settings: appSettings };
+}
+
+// The enabled-watcher list was written out three times (startup, activation,
+// service-mode fallback). Adding a watcher meant remembering all three, and a
+// missed one silently left that protection off in whichever path was forgotten.
+// A watcher process that exits non-zero while it was supposed to be running
+// used to just report an error and stay dead: the module silently stopped
+// protecting until the user noticed and toggled it. Restart it, with backoff
+// and a cap so a permanently broken watcher cannot spin.
+const WATCHER_RESTART_LIMIT = 5;
+const watcherRestartCounts = new Map();
+
+function scheduleWatcherRestart(key, isEnabled, start) {
+  const attempts = (watcherRestartCounts.get(key) || 0) + 1;
+  if (!isEnabled() || attempts > WATCHER_RESTART_LIMIT) return false;
+  watcherRestartCounts.set(key, attempts);
+  const delay = Math.min(60_000, 2_000 * 2 ** (attempts - 1));
+  setTimeout(() => {
+    if (isEnabled()) start();
+  }, delay).unref?.();
+  return true;
+}
+
+function noteWatcherHealthy(key) {
+  watcherRestartCounts.delete(key);
+}
+
+function startEnabledWatchers() {
+  if (!licenseStatus().active) return;
+  if (appSettings.service_mode_enabled) {
+    connectServicePipe();
+    return;
+  }
+  if (appSettings.protection_enabled) startProtectionWatcher();
+  if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
+  if (appSettings.web_protection_enabled) startWebWatcher();
+  if (appSettings.amsi_protection_enabled) startAmsiService();
+  if (appSettings.network_protection_enabled) startNetworkWatcher();
+  if (appSettings.memory_scan_enabled) startMemoryWatcher();
+  if (appSettings.usb_protection_enabled) startUsbWatcher();
+  if (appSettings.ransomware_protection_enabled) startRansomwareWatcher();
 }
 
 async function createWindow() {
@@ -2124,27 +2479,26 @@ async function createWindow() {
       }).show();
     }
   });
-  await readAppSettings();
-  if (licenseStatus().active) {
-    if (appSettings.service_mode_enabled) {
-      connectServicePipe();
-    } else {
-      if (appSettings.protection_enabled) startProtectionWatcher();
-      if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
-      if (appSettings.web_protection_enabled) startWebWatcher();
-      if (appSettings.amsi_protection_enabled) startAmsiService();
-      if (appSettings.network_protection_enabled) startNetworkWatcher();
-      if (appSettings.memory_scan_enabled) startMemoryWatcher();
-      if (appSettings.usb_protection_enabled) startUsbWatcher();
-    }
-  }
-  startUpdateChecks();
-  startScheduledScanTimer();
-  startAutomaticSignatureUpdateTimer();
-  await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
+  // Registered before the await below: closing the window while the page is
+  // still loading used to skip this entirely, leaving mainWindow pointing at a
+  // destroyed BrowserWindow.
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });
+
+  await readAppSettings();
+
+  // Watchers must not start until the renderer is listening. They emit their
+  // readiness events immediately ('watch-ready', 'service-connected'), and
+  // anything sent before loadFile() resolves lands on a webContents with no
+  // listeners and is dropped -- leaving modules stuck on "Başlatılıyor" in the
+  // UI even though the process behind them was running fine.
+  await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
+
+  startEnabledWatchers();
+  startUpdateChecks();
+  startScheduledScanTimer();
+  startAutomaticSignatureUpdateTimer();
 }
 
 Menu.setApplicationMenu(null);
@@ -2167,17 +2521,8 @@ ipcMain.handle('license:status', () => licenseStatus());
 ipcMain.handle('license:activate', (_event, key) => {
   const result = saveLicense(key);
   if (result.ok) {
-    if (appSettings.service_mode_enabled) {
-      connectServicePipe();
-    } else {
-      if (appSettings.protection_enabled) startProtectionWatcher();
-      if (appSettings.behavior_protection_enabled) startBehaviorWatcher();
-      if (appSettings.web_protection_enabled) startWebWatcher();
-      if (appSettings.amsi_protection_enabled) startAmsiService();
-      if (appSettings.network_protection_enabled) startNetworkWatcher();
-      if (appSettings.memory_scan_enabled) startMemoryWatcher();
-      if (appSettings.usb_protection_enabled) startUsbWatcher();
-    }
+    startEnabledWatchers();
+    updateTrayMenu();
   }
   return result;
 });
@@ -2185,6 +2530,7 @@ ipcMain.handle('license:deactivate', () => removeStoredLicense());
 ipcMain.handle('license:reveal', () => revealStoredLicense());
 
 ipcMain.handle('scan:start', (event) => startScan(event.sender));
+ipcMain.handle('scan:cancel', () => cancelScan());
 ipcMain.handle('scan:drives', () => {
   const licenseError = requireLicense(); if (licenseError) return licenseError;
   const drives = [];
@@ -2583,6 +2929,15 @@ ipcMain.handle('startup:restore', async (_event, itemId) => {
 });
 ipcMain.handle('vulnerability:scan', () => runEngineAction(['--check-vulnerable-software'], 'vulnerable-software'));
 ipcMain.handle('system:audit', () => runEngineAction(['--system-audit'], 'system-audit'));
+ipcMain.handle('system:audit-fix-info', () => Object.fromEntries(
+  Object.entries(AUDIT_FIXES).map(([id, fix]) => [id, {
+    label: fix.label,
+    confirm: fix.confirm,
+    restart: Boolean(fix.restart),
+    note: fix.note || '',
+  }])
+));
+ipcMain.handle('system:audit-fix', (event, fixId) => applyAuditFix(String(fixId || '')));
 ipcMain.handle('ml:shadow-report', () => runEngineAction(['--ml-shadow-report'], 'ml-shadow-report'));
 ipcMain.handle('performance:temp-usage', () => runEngineAction(['--temp-usage'], 'temp-usage'));
 ipcMain.handle('performance:temp-clean', () => runEngineAction(['--temp-clean'], 'temp-cleaned'));
@@ -2671,25 +3026,63 @@ app.on('activate', () => {
   }
 });
 
+// Windows tells the app the session is ending before it starts killing
+// processes. Without this, shutdown reached the watchers as a hard terminate
+// and the window 'close' handler below still tried to keep the app alive,
+// which is what puts Windows on the "this app is preventing shutdown" screen.
+app.on('session-end', () => {
+  isQuitting = true;
+  app.quit();
+});
+
 app.on('before-quit', () => {
   isQuitting = true;
   activeScan?.child.kill();
   activeScan = null;
-  if (protectionWatcher) {
-    protectionWatcher.stopping = true;
-    protectionWatcher.child.kill();
-    protectionWatcher = null;
+
+  // This used to name only three watchers explicitly, so amsiService,
+  // networkWatcher, memoryWatcher, usbWatcher and ransomwareWatcher survived
+  // the app: five orphaned engine processes still holding the data directory,
+  // which is exactly what makes an uninstall fail with locked files. Reading
+  // the list from one place means a new watcher cannot be forgotten again.
+  const watchers = [
+    protectionWatcher, behaviorWatcher, webWatcher, amsiService,
+    networkWatcher, memoryWatcher, usbWatcher, ransomwareWatcher,
+  ];
+  for (const watcher of watchers) {
+    if (!watcher) continue;
+    watcher.stopping = true;
+    try {
+      watcher.child.kill();
+    } catch { /* already gone */ }
   }
-  if (behaviorWatcher) {
-    behaviorWatcher.stopping = true;
-    behaviorWatcher.child.kill();
-    behaviorWatcher = null;
+  protectionWatcher = null;
+  behaviorWatcher = null;
+  webWatcher = null;
+  amsiService = null;
+  networkWatcher = null;
+  memoryWatcher = null;
+  usbWatcher = null;
+  ransomwareWatcher = null;
+
+  for (const timer of [updateCheckTimer, scheduledScanTimer, signatureUpdateTimer]) {
+    if (timer) clearInterval(timer);
   }
-  if (webWatcher) {
-    webWatcher.stopping = true;
-    webWatcher.child.kill();
-    webWatcher = null;
+  updateCheckTimer = null;
+  scheduledScanTimer = null;
+  signatureUpdateTimer = null;
+
+  if (serviceSocket) {
+    try {
+      serviceSocket.destroy();
+    } catch { /* already closed */ }
+    serviceSocket = null;
   }
+  if (serviceReconnectTimer) {
+    clearTimeout(serviceReconnectTimer);
+    serviceReconnectTimer = null;
+  }
+
   tray?.destroy();
   tray = null;
 });

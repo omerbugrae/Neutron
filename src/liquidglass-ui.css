@@ -413,7 +413,7 @@ svg {
   pointer-events: none;
 }
 
-.glass-dom-surface {
+.surface-card {
   position: relative;
   isolation: isolate;
   overflow: hidden;
@@ -431,8 +431,8 @@ svg {
   transform: translateZ(0);
 }
 
-.glass-dom-surface::before,
-.glass-dom-surface::after {
+.surface-card::before,
+.surface-card::after {
   position: absolute;
   inset: 0;
   z-index: -1;
@@ -441,7 +441,7 @@ svg {
   content: "";
 }
 
-.glass-dom-surface::before {
+.surface-card::before {
   opacity: 0.58;
   background:
     radial-gradient(
@@ -458,7 +458,7 @@ svg {
     );
 }
 
-.glass-dom-surface::after {
+.surface-card::after {
   inset: 1px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: inset 0 0 20px rgba(229, 245, 255, 0.045);
@@ -1689,7 +1689,7 @@ a:focus-visible {
     --neutron-ink-muted: rgba(231, 241, 255, 0.78);
   }
 
-  .glass-dom-surface {
+  .surface-card {
     border-color: rgba(255, 255, 255, 0.52);
     background: rgba(7, 24, 47, 0.62);
   }
@@ -1710,7 +1710,7 @@ a:focus-visible {
     background: Canvas;
   }
 
-  .glass-dom-surface,
+  .surface-card,
   .native-titlebar {
     border: 1px solid CanvasText;
     background: Canvas;

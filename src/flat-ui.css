@@ -245,8 +245,7 @@ body.flat-ui.protection-pending {
   will-change: transform;
 }
 
-.flat-ui .glass-dom-surface,
-.flat-ui [data-liquidglass] {
+.flat-ui .surface-card {
   background: var(--flat-surface) !important;
   background-image: none !important;
   border: 1px solid var(--flat-border) !important;
@@ -257,10 +256,8 @@ body.flat-ui.protection-pending {
   transform: none;
 }
 
-.flat-ui .glass-dom-surface::before,
-.flat-ui .glass-dom-surface::after,
-.flat-ui [data-liquidglass]::before,
-.flat-ui [data-liquidglass]::after {
+.flat-ui .surface-card::before,
+.flat-ui .surface-card::after {
   content: none !important;
   display: none !important;
 }
@@ -959,11 +956,145 @@ body.flat-ui.protection-pending {
 /* Security posture audit. Each check is its own card: a flat column of text
    rows made ten unrelated findings read as one wall of prose. The badge
    carries the verdict in words, so the grid never depends on colour alone. */
+/* The score used to be a line of text ("98/100") inside a settings card, which
+   buried the one number the page exists to produce. It is now a dial: the
+   reading is legible at a glance and the ring colour repeats the verdict, so
+   the page has an obvious focal point instead of reading as another list. */
+.flat-ui .audit-hero {
+  align-items: center;
+  background: var(--flat-surface-raised);
+  border: 1px solid var(--flat-border);
+  border-radius: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  padding: 24px 26px;
+}
+
+.flat-ui .audit-hero__dial {
+  flex: 0 0 auto;
+  height: 132px;
+  position: relative;
+  width: 132px;
+}
+
+.flat-ui .audit-ring {
+  height: 100%;
+  transform: rotate(-90deg);
+  width: 100%;
+}
+
+.flat-ui .audit-ring circle {
+  fill: none;
+  stroke-width: 9;
+}
+
+.flat-ui .audit-ring__track {
+  stroke: var(--flat-border);
+}
+
+.flat-ui .audit-ring__value {
+  stroke: var(--flat-border-strong);
+  stroke-dasharray: 327;
+  stroke-dashoffset: 327;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 600ms ease, stroke 300ms ease;
+}
+
+.flat-ui .audit-hero__figure {
+  align-items: baseline;
+  display: flex;
+  gap: 3px;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+}
+
+.flat-ui .audit-hero__figure strong {
+  color: var(--flat-text);
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.flat-ui .audit-hero__figure span {
+  color: var(--flat-muted);
+  font-size: 12px;
+}
+
+.flat-ui .audit-hero__body {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flat-ui .audit-hero__body h2 {
+  color: var(--flat-text);
+  font-size: 18px;
+  margin: 0;
+}
+
+.flat-ui .audit-hero__body p {
+  color: var(--flat-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.flat-ui .audit-hero__body .settings-action {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* Counts as chips rather than a sentence: four numbers the eye can compare
+   without reading, and they stay meaningful when the score is unchanged. */
+.flat-ui .audit-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.flat-ui .audit-stat {
+  align-items: center;
+  border: 1px solid var(--flat-border);
+  border-radius: 999px;
+  color: var(--flat-muted);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  padding: 5px 11px;
+}
+
+.flat-ui .audit-stat strong {
+  color: var(--flat-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.flat-ui .audit-stat--critical { border-color: rgba(219, 84, 84, 0.5); }
+.flat-ui .audit-stat--critical strong { color: rgba(219, 84, 84, 0.95); }
+.flat-ui .audit-stat--warn { border-color: rgba(224, 168, 68, 0.5); }
+.flat-ui .audit-stat--warn strong { color: rgba(224, 168, 68, 0.95); }
+.flat-ui .audit-stat--pass { border-color: rgba(76, 175, 122, 0.5); }
+.flat-ui .audit-stat--pass strong { color: rgba(76, 175, 122, 0.95); }
+
+.flat-ui .audit-score-card--critical .audit-ring__value { stroke: rgba(219, 84, 84, 0.9); }
+.flat-ui .audit-score-card--warn .audit-ring__value { stroke: rgba(224, 168, 68, 0.9); }
+.flat-ui .audit-score-card--pass .audit-ring__value { stroke: rgba(76, 175, 122, 0.9); }
+
 .flat-ui .audit-grid {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   margin-top: 18px;
+}
+
+/* A critical finding is the reason to open this page, so it spans the grid
+   instead of sitting in a column next to a passing check of equal size. */
+.flat-ui .audit-check--critical {
+  grid-column: 1 / -1;
 }
 
 .flat-ui .audit-grid > .settings-empty {

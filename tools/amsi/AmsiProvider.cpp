@@ -1,6 +1,7 @@
 #include "AmsiProvider.h"
 #include "PipeClient.h"
 #include <cstring>
+#include <string>
 
 namespace {
 
@@ -12,7 +13,24 @@ constexpr ULONGLONG kMaxBufferBytes = 8ULL * 1024 * 1024;
 // Microsoft's published AMSI conformance test string. Any provider that
 // does not flag this exact string is considered non-functional by tools
 // like Test-AmsiProvider, so this check must never go through the pipe.
-const char kAmsiTestStringUtf8[] = "AMSI Test Sample: 7e72c3ce-861b-4339-8740-0ac1484c1386";
+// Assembled at runtime, never written out contiguously.
+//
+// Any file containing this string verbatim is flagged by Defender (and
+// most other engines) as Virus:Win32/MpTest!amsi -- that is what the
+// string is for. When that happened to this source file, Defender denied
+// the compiler read access and the build failed with a misleading
+// "C1083: cannot open source file ... Invalid argument". Splitting it
+// keeps the provider conformant without making the repository itself
+// look infected on every machine that clones it.
+const char kAmsiTestPrefix[] = "AMSI Test Sample: ";
+const char kAmsiTestIdHead[] = "7e72c3ce-861b-4339";
+const char kAmsiTestIdTail[] = "-8740-0ac1484c1386";
+
+const std::string& AmsiTestString() {
+    static const std::string value =
+        std::string(kAmsiTestPrefix) + kAmsiTestIdHead + kAmsiTestIdTail;
+    return value;
+}
 
 bool ContainsAscii(const unsigned char* data, size_t size, const char* needle) {
     size_t needleLen = strlen(needle);
@@ -96,8 +114,9 @@ std::wstring ReadStreamName(IAmsiStream* stream, AMSI_ATTRIBUTE attribute) {
 }
 
 bool LocalFastVerdictIsDetection(const unsigned char* data, size_t size) {
-    return ContainsAscii(data, size, kAmsiTestStringUtf8) ||
-           ContainsUtf16(data, size, kAmsiTestStringUtf8);
+    const char* needle = AmsiTestString().c_str();
+    return ContainsAscii(data, size, needle) ||
+           ContainsUtf16(data, size, needle);
 }
 
 // The real scanning logic, kept in its own function so the SEH __try/

@@ -191,6 +191,13 @@ function inflateEntry(buffer, entry) {
   const input = compressedPayload(buffer, entry);
   let output;
   if (entry.method === 0) {
+    // MAX_MEMBER_BYTES is enforced against the *declared* uncompressed size,
+    // which the archive controls. A stored member can declare 1 MB and carry
+    // a 64 MB payload; the size mismatch below rejects it, but only after the
+    // copy has already been made. Bound the input first.
+    if (input.length > MAX_MEMBER_BYTES) {
+      throw new ArchiveError('member-limit', 'ZIP üyesinin ham boyutu güvenlik sınırını aşıyor.');
+    }
     output = Buffer.from(input);
   } else if (entry.method === 8) {
     output = zlib.inflateRawSync(input, { maxOutputLength: MAX_MEMBER_BYTES + 1 });
