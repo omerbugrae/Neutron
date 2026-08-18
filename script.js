@@ -17,6 +17,14 @@
         navToggle.setAttribute('aria-expanded', 'false');
       });
     });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && mobileNav.classList.contains('is-open')) {
+        mobileNav.classList.remove('is-open');
+        navToggle.setAttribute('aria-expanded', 'false');
+        navToggle.focus();
+      }
+    });
   }
 
   // Başa dön düğmesi
