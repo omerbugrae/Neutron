@@ -40,9 +40,16 @@
     });
   }
 
+  // Detay atlası: sayaç her zaman gerçek içerik adedini gösterir.
+  const detailItems = document.querySelectorAll('.atlas-item');
+  const detailCount = document.getElementById('detailCount');
+  if (detailCount) {
+    detailCount.textContent = String(detailItems.length);
+  }
+
   // Kaydırıldıkça beliren bölümler
   const revealTargets = document.querySelectorAll(
-    '.feature-card, .step, .requirement, .faq-item, .flow-diagram, .risk-panel, .license-panel'
+    '.feature-card, .atlas-group, .step, .requirement, .faq-item, .flow-diagram, .risk-panel, .license-panel'
   );
 
   if ('IntersectionObserver' in window && revealTargets.length) {
