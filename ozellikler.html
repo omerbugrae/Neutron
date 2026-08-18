@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Özellikler — Neutron</title>
+  <meta name="description" content="Neutron koruma katmanları ve 120 maddelik detay atlası: tarama yüzeyleri, tespit motorları, davranış sinyalleri, müdahale seçenekleri ve gizlilik sınırları." />
+  <link rel="icon" href="assets/neutron.ico" />
+  <link rel="stylesheet" href="./style.css?v=20260818.6" />
+</head>
+<body>
+
+  <div class="noise-overlay" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </a>
+      <nav class="nav" aria-label="Ana gezinme">
+        <a href="ozellikler.html" aria-current="page">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a class="nav-cta" href="indir.html">İndir</a>
+      </nav>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="mobileNav" aria-label="Menüyü aç/kapat">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobil gezinme">
+      <a href="ozellikler.html" aria-current="page">Özellikler</a>
+      <a href="nasil-calisir.html">Nasıl çalışır</a>
+      <a href="guvenlik.html">Güvenlik</a>
+      <a href="sss.html">SSS</a>
+      <a href="indir.html">İndir</a>
+      <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <section class="page-hero page-hero--compact">
+      <div class="container">
+        <nav class="crumb" aria-label="Konum"><a href="index.html">Ana sayfa</a><span aria-hidden="true">/</span><span>Özellikler</span></nav>
+        <p class="eyebrow">12 katman · 120 detay</p>
+        <h1>Neutron'un <span class="text-accent">tam kapsamı.</span></h1>
+        <p class="page-hero-lede">
+          Üstte on iki koruma katmanının ne yaptığı, altta bu katmanların hangi somut kontrol
+          noktalarından oluştuğu. Hiçbiri kara kutu değil — her madde tek bir davranışı anlatır.
+        </p>
+      </div>
+    </section>
+
+    <section id="katmanlar" class="section">
+      <div class="container">
+        <p class="section-eyebrow">KORUMA KATMANLARI</p>
+        <h2 class="section-title">Tek uygulama, çok katmanlı görünürlük.</h2>
+        <p class="section-lede">
+          Neutron; imza eşleştirmeden davranış izlemeye, sürücü kaydından WMI kalıcılığına kadar
+          Windows'un farklı katmanlarını aynı anda izler.
+        </p>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🔎</div>
+            <h3>Dosya tarama</h3>
+            <p>Hızlı, tam ve seçili klasör taramaları. Zamanlanmış taramalar Neutron kapalıyken bile servis üzerinden çalışabilir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧬</div>
+            <h3>YARA tabanlı tespit</h3>
+            <p>Kural ve imza tabanlı analiz; topluluk ve imzalı Proton kanalından gelen güncel tehdit tanımlarıyla beslenir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧠</div>
+            <h3>Statik analiz + ML</h3>
+            <p>PE yapısal analizi ve EMBER tabanlı makine öğrenmesi puanlaması; imzasız dosyalarda sezgisel tespiti güçlendirir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🛡️</div>
+            <h3>Gerçek zamanlı koruma</h3>
+            <p>İsteğe bağlı dosya, bellek, ağ ve fidye yazılımı izleme; şüpheli süreç zincirlerini anlık olarak yakalar.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">📦</div>
+            <h3>Karantina</h3>
+            <p>Şüpheli dosyalar için şifreli karantina ve geri yükleme akışı. Her otomatik müdahale kayıtlı ve geri alınabilir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🪟</div>
+            <h3>AMSI entegrasyonu</h3>
+            <p>PowerShell, WScript ve diğer desteklenen Windows betik ortamları için ön çalıştırma denetimi.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🔄</div>
+            <h3>Proton güncellemeleri</h3>
+            <p>İmzalı tehdit istihbaratı ve kural güncellemeleri; doğrulanmayan paketler asla etkinleştirilmez, geri alma desteklenir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧷</div>
+            <h3>Sürücü ve servis izleme</h3>
+            <p>Yeni kaydedilen ya da hedefi değiştirilen çekirdek sürücülerini ve Windows servislerini bildirir — BYOVD görünürlüğü.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">📜</div>
+            <h3>Olay günlüğü izleme</h3>
+            <p>Temizlenen denetim günlükleri, yeni yerel yöneticiler, servis kurulumları ve Defender'ın kapatılması gibi olayları yakalar.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧱</div>
+            <h3>Windows güvenlik duruşu</h3>
+            <p>Defender, güvenlik duvarı, UAC, RDP, Güvenli Önyükleme ve sürücü imzalama durumunu sürekli denetler.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🔑</div>
+            <h3>Kimlik bilgisi koruması</h3>
+            <p>LSASS belleğine okuma erişimi açan süreçleri bildirir; imzasız/güvenilmeyen olanları otomatik sonlandırır.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🛑</div>
+            <h3>Otomatik müdahale</h3>
+            <p>Görevleri ve servisleri devre dışı bırakır, sertifika kaldırır, Windows ayarlarını geri alır — kayıtlı, hız sınırlı, geri alınabilir.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- 120 maddelik detay atlası -->
+    <section id="atlas" class="section atlas-section">
+      <div class="container">
+        <div class="atlas-heading">
+          <div>
+            <p class="section-eyebrow">DETAY ATLASI</p>
+            <h2 class="section-title">Neutron'un içine yakından bakın.</h2>
+            <p class="section-lede">Koruma yüzeylerinden müdahale kayıtlarına kadar uygulamanın kapsamını on başlık altında inceleyin. Her madde tek bir davranışı veya kontrol noktasını açıklar.</p>
+          </div>
+          <div class="atlas-counter" aria-label="120 teknik detay"><strong id="detailCount">120</strong><span>teknik<br />detay</span></div>
+        </div>
+
+        <div class="atlas-groups">
+          <details class="atlas-group" open>
+            <summary><span class="atlas-code">A01</span><span><b>Tarama yüzeyleri</b><small>Neutron'un inceleyebildiği konumlar</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Tek dosya</b><span>Bağlam menüsünden veya uygulama içinden seçilen dosyayı tarar.</span></li>
+              <li class="atlas-item"><b>Seçili klasör</b><span>Belirlediğiniz dizini alt klasörleriyle birlikte inceler.</span></li>
+              <li class="atlas-item"><b>Hızlı tarama</b><span>Sık kullanılan ve yüksek riskli Windows konumlarına odaklanır.</span></li>
+              <li class="atlas-item"><b>Tam sistem</b><span>Erişilebilir yerel disklerde daha geniş kapsamlı tarama yürütür.</span></li>
+              <li class="atlas-item"><b>Çalışan süreçler</b><span>Etkin süreçlerin kimliğini ve davranış bağlamını değerlendirir.</span></li>
+              <li class="atlas-item"><b>Süreç belleği</b><span>Şüpheli süreçlerde bellek odaklı göstergeleri izler.</span></li>
+              <li class="atlas-item"><b>USB aygıtları</b><span>Takılan çıkarılabilir depolama birimlerini izleme kapsamına alır.</span></li>
+              <li class="atlas-item"><b>Başlangıç girdileri</b><span>Oturum açılışında çalışan kalıcılık noktalarını denetler.</span></li>
+              <li class="atlas-item"><b>Windows servisleri</b><span>Yeni veya hedefi değiştirilmiş servis kayıtlarını görünür kılar.</span></li>
+              <li class="atlas-item"><b>Çekirdek sürücüleri</b><span>Yeni kaydedilen sürücüleri ve dosya hedeflerini denetler.</span></li>
+              <li class="atlas-item"><b>WMI kalıcılığı</b><span>Şüpheli olay filtresi ve tüketici bağlarını izler.</span></li>
+              <li class="atlas-item"><b>Zamanlanmış görevler</b><span>Yeni ya da değiştirilen görevlerde kalıcılık sinyali arar.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A02</span><span><b>Tespit motorları</b><small>Bir bulgunun nasıl değerlendirildiği</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>YARA eşleşmesi</b><span>Dosya içeriğini okunabilir topluluk ve proje kurallarıyla karşılaştırır.</span></li>
+              <li class="atlas-item"><b>PE başlık analizi</b><span>Windows yürütülebilir dosya yapısındaki tutarsızlıkları değerlendirir.</span></li>
+              <li class="atlas-item"><b>EMBER puanı</b><span>Statik özellikleri makine öğrenmesi modeliyle puanlayabilir.</span></li>
+              <li class="atlas-item"><b>Hash karşılaştırması</b><span>Bilinen dosya özetlerini yerel tanımlarla eşleştirir.</span></li>
+              <li class="atlas-item"><b>Dijital imza</b><span>İmzalayan kimliğini ve güven durumunu karar bağlamına ekler.</span></li>
+              <li class="atlas-item"><b>Entropi ölçümü</b><span>Paketlenmiş veya yoğun biçimde gizlenmiş içerik sinyallerini arar.</span></li>
+              <li class="atlas-item"><b>İçe aktarımlar</b><span>Bir PE dosyasının kullandığı işlevleri davranış göstergesi olarak inceler.</span></li>
+              <li class="atlas-item"><b>Bölüm yapısı</b><span>Olağandışı PE bölümlerini ve izin kombinasyonlarını işaretler.</span></li>
+              <li class="atlas-item"><b>Dosya itibarı</b><span>İsteğe bağlı sorguda yalnız dosya özetini kullanır.</span></li>
+              <li class="atlas-item"><b>AMSI sinyali</b><span>Desteklenen betik ortamlarında yürütme öncesi içeriği denetler.</span></li>
+              <li class="atlas-item"><b>Davranış skoru</b><span>Tek olaya değil, ilişkili eylem zincirine bakar.</span></li>
+              <li class="atlas-item"><b>Birleşik karar</b><span>Birden fazla zayıf sinyali aynı bulgu bağlamında birleştirir.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A03</span><span><b>Davranış sinyalleri</b><small>Arka planda izlenen değişiklikler</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Şüpheli süreç zinciri</b><span>Bir üst süreç ile başlattığı alt süreçler arasındaki ilişkiyi izler.</span></li>
+              <li class="atlas-item"><b>LSASS erişimi</b><span>Kimlik bilgisi belleğine okuma erişimi açan süreçleri bildirir.</span></li>
+              <li class="atlas-item"><b>Günlük temizleme</b><span>Windows denetim günlüklerinin temizlenmesini kritik olay sayar.</span></li>
+              <li class="atlas-item"><b>Yeni yerel yönetici</b><span>Yönetici grubuna eklenen hesapları görünür kılar.</span></li>
+              <li class="atlas-item"><b>Defender değişikliği</b><span>Koruma bileşenlerinin kapatılmasına yönelik değişiklikleri izler.</span></li>
+              <li class="atlas-item"><b>Güvenlik duvarı</b><span>Yeni kural ve koruma durumundaki önemli değişimleri yakalar.</span></li>
+              <li class="atlas-item"><b>RDP durumu</b><span>Uzak Masaüstü erişiminin açılması gibi duruş değişikliklerini bildirir.</span></li>
+              <li class="atlas-item"><b>UAC değişikliği</b><span>Kullanıcı Hesabı Denetimi seviyesindeki zayıflatmaları izler.</span></li>
+              <li class="atlas-item"><b>Sertifika ekleme</b><span>Güven depolarındaki yeni ve şüpheli sertifikaları değerlendirir.</span></li>
+              <li class="atlas-item"><b>Toplu dosya değişimi</b><span>Fidye yazılımıyla ilişkili hızlı yeniden yazma davranışını izler.</span></li>
+              <li class="atlas-item"><b>Servis hedefi</b><span>Mevcut bir servisin çalıştırdığı dosyanın değiştirilmesini yakalar.</span></li>
+              <li class="atlas-item"><b>Sürücü kaydı</b><span>Çekirdek düzeyinde yeni sürücü yükleme girişimini görünür kılar.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A04</span><span><b>Gerçek zamanlı koruma</b><small>Sürekli çalışan koruma katmanları</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Dosya izleyici</b><span>Yeni ve değiştirilen dosyaları tarama kuyruğuna alabilir.</span></li>
+              <li class="atlas-item"><b>Bellek izleyici</b><span>Şüpheli süreç davranışlarını çalışma anında takip eder.</span></li>
+              <li class="atlas-item"><b>Ağ izleyici</b><span>Süreçlerin bağlantı davranışlarını yerel bağlamda gösterir.</span></li>
+              <li class="atlas-item"><b>Fidye kalkanı</b><span>Hızlı ve olağandışı dosya değişikliklerine karşı sinyal üretir.</span></li>
+              <li class="atlas-item"><b>USB izleyici</b><span>Yeni bağlanan depolama aygıtlarında tarama akışı başlatabilir.</span></li>
+              <li class="atlas-item"><b>Betik denetimi</b><span>AMSI üzerinden desteklenen betik içeriğini incelemeye alır.</span></li>
+              <li class="atlas-item"><b>Servis modu</b><span>Uygulama penceresi kapalıyken korumayı sürdürebilir.</span></li>
+              <li class="atlas-item"><b>Oturum dışı çalışma</b><span>Kimse oturum açmamışken zamanlanmış görevleri yürütebilir.</span></li>
+              <li class="atlas-item"><b>Kural yenileme</b><span>İmzalı Proton paketleriyle tespit tanımlarını günceller.</span></li>
+              <li class="atlas-item"><b>İstisna denetimi</b><span>Kullanıcının seçtiği güvenilir hedefleri kapsam dışında bırakır.</span></li>
+              <li class="atlas-item"><b>Hız sınırlama</b><span>Olağandışı müdahale artışında otomasyonu sınırlar.</span></li>
+              <li class="atlas-item"><b>Koruma geçmişi</b><span>Gerçek zamanlı katmanların bulgularını tek akışta toplar.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A05</span><span><b>Müdahale seçenekleri</b><small>Bir bulgudan sonra yapılabilecekler</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Karantinaya al</b><span>Şüpheli dosyayı normal konumundan güvenli depoya taşır.</span></li>
+              <li class="atlas-item"><b>Geri yükle</b><span>Yanlış pozitif görülen karantina öğesini eski konumuna döndürür.</span></li>
+              <li class="atlas-item"><b>Süreci sonlandır</b><span>Güvenilmeyen şüpheli sürecin çalışmasını durdurabilir.</span></li>
+              <li class="atlas-item"><b>Servisi durdur</b><span>Şüpheli hizmeti durdurup başlangıcını devre dışı bırakabilir.</span></li>
+              <li class="atlas-item"><b>Görevi kapat</b><span>Kalıcılık için kullanılan zamanlanmış görevi devre dışı bırakabilir.</span></li>
+              <li class="atlas-item"><b>Sertifikayı kaldır</b><span>Şüpheli güven sertifikasını ilgili depodan kaldırabilir.</span></li>
+              <li class="atlas-item"><b>Ayarı geri al</b><span>Zayıflatılmış Windows güvenlik ayarını önceki duruma çevirebilir.</span></li>
+              <li class="atlas-item"><b>Yalnız bildir</b><span>Otomatik işlem yapmadan bulguyu inceleme için kaydedebilir.</span></li>
+              <li class="atlas-item"><b>İstisna oluştur</b><span>Doğrulanan hedefi gelecekteki taramalarda hariç tutabilir.</span></li>
+              <li class="atlas-item"><b>Dosya konumunu aç</b><span>Bulguyu Windows Gezgini içinde doğrudan bulmayı kolaylaştırır.</span></li>
+              <li class="atlas-item"><b>Ayrıntıyı incele</b><span>Tespit kaynağını, yolu ve ilgili karar sinyallerini gösterir.</span></li>
+              <li class="atlas-item"><b>İşlemi geri al</b><span>Desteklenen otomatik müdahaleleri geçmiş üzerinden tersine çevirir.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A06</span><span><b>Gizlilik sınırları</b><small>Yerel-öncelikli tasarımın pratik karşılığı</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Yerel tarama</b><span>Temel dosya ve davranış analizi cihazınızda yürütülür.</span></li>
+              <li class="atlas-item"><b>Sunucusuz tasarım</b><span>Neutron'un kullanıcı dosyalarını toplayan bir proje sunucusu yoktur.</span></li>
+              <li class="atlas-item"><b>Dosya yüklemez</b><span>İsteğe bağlı itibar sorgusu dosya içeriğini karşı tarafa göndermez.</span></li>
+              <li class="atlas-item"><b>Hash ile sorgu</b><span>Harici itibar denetiminde yalnız dosya özeti kullanılabilir.</span></li>
+              <li class="atlas-item"><b>Kendi API anahtarınız</b><span>İsteğe bağlı servis bağlantısı kullanıcının sağladığı anahtara dayanır.</span></li>
+              <li class="atlas-item"><b>Kapalı bulut sorgusu</b><span>İtibar sorgusu kullanılmadan temel tarama katmanları çalışabilir.</span></li>
+              <li class="atlas-item"><b>Yerel karantina</b><span>Karantina içeriği cihazın güvenli yerel depolamasında tutulur.</span></li>
+              <li class="atlas-item"><b>Yerel geçmiş</b><span>Koruma olayları kullanıcı incelemesi için cihazda kaydedilir.</span></li>
+              <li class="atlas-item"><b>Açıklanabilir kural</b><span>YARA tabanlı tespitler okunabilir kurallara dayanabilir.</span></li>
+              <li class="atlas-item"><b>Görünür kaynak</b><span>Uygulama davranışı GitHub üzerindeki koddan incelenebilir.</span></li>
+              <li class="atlas-item"><b>Kontrollü istisna</b><span>Hariç tutulan konumlar kullanıcının yerel ayarıdır.</span></li>
+              <li class="atlas-item"><b>Silmeden önce inceleme</b><span>Bulgu detayını göstererek kullanıcı kararını destekler.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A07</span><span><b>Proton güncellemeleri</b><small>Tehdit tanımlarının güvenli dağıtımı</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>İmzalı paket</b><span>Güncelleme içeriği etkinleştirilmeden önce imzası doğrulanır.</span></li>
+              <li class="atlas-item"><b>Sürüm bilgisi</b><span>Her paket izlenebilir bir sürüm kimliği taşır.</span></li>
+              <li class="atlas-item"><b>Bütünlük kontrolü</b><span>İndirilen verinin değiştirilip değiştirilmediği denetlenir.</span></li>
+              <li class="atlas-item"><b>Doğrulama zorunluluğu</b><span>Geçersiz veya doğrulanamayan paket etkinleştirilmez.</span></li>
+              <li class="atlas-item"><b>Geri alma</b><span>Sorunlu güncellemeden önceki tanım sürümüne dönülebilir.</span></li>
+              <li class="atlas-item"><b>Atomik geçiş</b><span>Yeni kurallar hazır olmadan etkin kural kümesi değiştirilmez.</span></li>
+              <li class="atlas-item"><b>Kural kanalı</b><span>YARA ve ilgili tehdit tanımları aynı kontrollü akıştan gelebilir.</span></li>
+              <li class="atlas-item"><b>Yayın geçmişi</b><span>Dağıtılan sürümler GitHub sürüm kayıtlarıyla izlenebilir.</span></li>
+              <li class="atlas-item"><b>Kaynak birikimi</b><span>Yeni yayınlar önceki üretim tabanını koruyacak biçimde hazırlanır.</span></li>
+              <li class="atlas-item"><b>Elle güncelleme</b><span>Kullanıcı uygun zamanda güncelleme kontrolü başlatabilir.</span></li>
+              <li class="atlas-item"><b>Hata görünürlüğü</b><span>Güncelleme başarısız olduğunda eski çalışan tanımlar korunur.</span></li>
+              <li class="atlas-item"><b>Yerel etkinleştirme</b><span>Doğrulanan paket cihaz üzerinde tarama motoruna uygulanır.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A08</span><span><b>Kullanıcı kontrolleri</b><small>Korumanın nasıl yapılandırıldığı</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Koruma anahtarları</b><span>Desteklenen gerçek zamanlı katmanlar ayrı ayrı yönetilebilir.</span></li>
+              <li class="atlas-item"><b>Tarama türü</b><span>Hızlı, tam veya özel hedefli tarama seçilebilir.</span></li>
+              <li class="atlas-item"><b>Klasör seçimi</b><span>Kullanıcı yalnız incelemek istediği dizini hedefleyebilir.</span></li>
+              <li class="atlas-item"><b>Zamanlama</b><span>Taramalar uygun gün ve saat için planlanabilir.</span></li>
+              <li class="atlas-item"><b>İstisna listesi</b><span>Güvenilir dosya ve konumlar kullanıcı tarafından yönetilir.</span></li>
+              <li class="atlas-item"><b>API anahtarı</b><span>İsteğe bağlı harici servis anahtarı yerel ayarlardan girilir.</span></li>
+              <li class="atlas-item"><b>Servis modu seçimi</b><span>Ek sistem izleyicileri bilinçli kullanıcı seçimiyle etkinleştirilir.</span></li>
+              <li class="atlas-item"><b>Geçmiş görünümü</b><span>Önceki bulgular ve müdahaleler tek listede incelenir.</span></li>
+              <li class="atlas-item"><b>Karantina yönetimi</b><span>Depodaki öğeler ayrı ekrandan gözden geçirilir.</span></li>
+              <li class="atlas-item"><b>Güncelleme kontrolü</b><span>Proton tanım sürümü ve güncelleme durumu görüntülenebilir.</span></li>
+              <li class="atlas-item"><b>Risk onayı</b><span>Kurulum, deneysel kullanım sınırlarını açıkça gösterir.</span></li>
+              <li class="atlas-item"><b>Yönetici izni</b><span>Sistem düzeyi işlem gerektiğinde Windows izni istenir.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A09</span><span><b>Kayıt ve açıklanabilirlik</b><small>Bir kararın geride bıraktığı izler</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Olay zamanı</b><span>Bulgunun ne zaman oluştuğunu kaydeder.</span></li>
+              <li class="atlas-item"><b>Dosya yolu</b><span>İlgili dosya veya sistem hedefinin konumunu gösterir.</span></li>
+              <li class="atlas-item"><b>Tespit kaynağı</b><span>YARA, davranış veya başka bir motorun rolünü belirtir.</span></li>
+              <li class="atlas-item"><b>Risk bağlamı</b><span>Bulguyu oluşturan göstergelerin neden önemli olduğunu açıklar.</span></li>
+              <li class="atlas-item"><b>İmza durumu</b><span>Hedefin dijital imza ve güven bilgisini gösterir.</span></li>
+              <li class="atlas-item"><b>Süreç kimliği</b><span>Davranış olaylarında ilgili çalışan süreci belirtir.</span></li>
+              <li class="atlas-item"><b>Üst süreç</b><span>Süreci başlatan kaynağı zincir bağlamında gösterir.</span></li>
+              <li class="atlas-item"><b>Uygulanan işlem</b><span>Karantina veya durdurma gibi müdahaleyi kaydeder.</span></li>
+              <li class="atlas-item"><b>İşlem sonucu</b><span>Müdahalenin başarılı, atlanmış veya başarısız olduğunu belirtir.</span></li>
+              <li class="atlas-item"><b>Geri alma durumu</b><span>Desteklenen işlemin geri çevrilip çevrilmediğini gösterir.</span></li>
+              <li class="atlas-item"><b>Kural sürümü</b><span>Bulgu sırasında etkin tanımların sürümünü ilişkilendirir.</span></li>
+              <li class="atlas-item"><b>Kullanıcı kararı</b><span>İstisna veya geri yükleme gibi sonradan verilen kararı korur.</span></li>
+            </ul>
+          </details>
+
+          <details class="atlas-group">
+            <summary><span class="atlas-code">A10</span><span><b>Güvenli deneme rehberi</b><small>Deneysel yazılımı daha kontrollü kullanmak</small></span><em>12 detay</em></summary>
+            <ul class="atlas-grid">
+              <li class="atlas-item"><b>Önce yedek alın</b><span>Önemli dosyaların güncel ve doğrulanmış kopyasını hazırlayın.</span></li>
+              <li class="atlas-item"><b>Sanal makine kullanın</b><span>İlk kurulumu üretim cihazı yerine yalıtılmış ortamda deneyin.</span></li>
+              <li class="atlas-item"><b>Defender'ı koruyun</b><span>Sonuçlarını anlamadan mevcut korumayı devre dışı bırakmayın.</span></li>
+              <li class="atlas-item"><b>Tespitleri okuyun</b><span>Dosyayı kaldırmadan önce yolunu ve tespit kaynağını inceleyin.</span></li>
+              <li class="atlas-item"><b>Yanlış pozitif bekleyin</b><span>Deneysel motorların güvenilir dosyaları işaretleyebileceğini unutmayın.</span></li>
+              <li class="atlas-item"><b>Yanlış negatif bekleyin</b><span>Temiz sonuç, dosyanın kesin güvenli olduğu anlamına gelmez.</span></li>
+              <li class="atlas-item"><b>İmzayı doğrulayın</b><span>Kurulum dosyasını yalnız güvendiğiniz yayın kaynağından alın.</span></li>
+              <li class="atlas-item"><b>Sürümü kaydedin</b><span>Test sırasında kullandığınız uygulama ve kural sürümünü not edin.</span></li>
+              <li class="atlas-item"><b>Küçük kapsamla başlayın</b><span>İlk taramada tek klasör veya test dosyası kullanın.</span></li>
+              <li class="atlas-item"><b>Geçmişi gözleyin</b><span>Otomatik müdahalelerden sonra Koruma geçmişini kontrol edin.</span></li>
+              <li class="atlas-item"><b>Geri almayı deneyin</b><span>Test öğesiyle karantina geri yükleme akışını önceden öğrenin.</span></li>
+              <li class="atlas-item"><b>Sorun bildirin</b><span>Tekrarlanabilir hataları sürüm ve adımlarla GitHub'da paylaşın.</span></li>
+            </ul>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tight">
+      <div class="container">
+        <nav class="page-nav" aria-label="Sayfa gezinmesi">
+          <a class="page-nav-item" href="index.html">
+            <span>Geri</span>
+            <strong>Ana sayfa</strong>
+          </a>
+          <a class="page-nav-item page-nav-item--next" href="nasil-calisir.html">
+            <span>Sonraki</span>
+            <strong>Nasıl çalışır</strong>
+          </a>
+        </nav>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </div>
+      <nav class="footer-links" aria-label="Alt bilgi bağlantıları">
+        <a href="indir.html">İndir</a>
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <p class="footer-legal">
+        Neutron deneysel yazılımdır, olduğu gibi (as is) sunulur ve hiçbir garanti içermez.
+        Bağımsız bir güvenlik denetiminden geçmemiştir.
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" aria-label="Sayfa başına dön" type="button">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <script src="./script.js?v=20260818.6"></script>
+</body>
+</html>

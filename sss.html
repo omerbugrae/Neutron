@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sık sorulanlar — Neutron</title>
+  <meta name="description" content="Neutron hakkında sık sorulan sorular: gizlilik, lisans anahtarı, Defender ilişkisi, otomatik müdahale, yanlış pozitifler, kaldırma ve destek kapsamı." />
+  <link rel="icon" href="assets/neutron.ico" />
+  <link rel="stylesheet" href="./style.css?v=20260818.6" />
+</head>
+<body>
+
+  <div class="noise-overlay" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </a>
+      <nav class="nav" aria-label="Ana gezinme">
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html" aria-current="page">SSS</a>
+        <a class="nav-cta" href="indir.html">İndir</a>
+      </nav>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="mobileNav" aria-label="Menüyü aç/kapat">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobil gezinme">
+      <a href="ozellikler.html">Özellikler</a>
+      <a href="nasil-calisir.html">Nasıl çalışır</a>
+      <a href="guvenlik.html">Güvenlik</a>
+      <a href="sss.html" aria-current="page">SSS</a>
+      <a href="indir.html">İndir</a>
+      <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <section class="page-hero page-hero--compact">
+      <div class="container">
+        <nav class="crumb" aria-label="Konum"><a href="index.html">Ana sayfa</a><span aria-hidden="true">/</span><span>SSS</span></nav>
+        <p class="eyebrow">Sık sorulanlar</p>
+        <h1>Merak <span class="text-accent">edilenler.</span></h1>
+        <p class="page-hero-lede">
+          En çok sorulan sorular ve dürüst cevapları. Aradığınızı bulamazsanız GitHub Issues
+          üzerinden sorabilirsiniz — yanıt garantisi olmadığını baştan söyleyelim.
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container container-narrow">
+        <div class="faq-list">
+          <details class="faq-item" open>
+            <summary>Neutron, Microsoft Defender'ın yerini alır mı?</summary>
+            <p>Hayır. Neutron deneysel bir tamamlayıcıdır; Defender, uç nokta koruması, düzenli yedekleme veya profesyonel güvenlik danışmanlığının yerini almaz. Sonuçlarını tam olarak anlamadan Defender'ı devre dışı bırakmayın.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Verilerim bir sunucuya gönderiliyor mu?</summary>
+            <p>Hayır, tarama ve analiz cihazınızda çalışır. Bulut itibar sorgusu tamamen isteğe bağlıdır, kendi API anahtarınızı gerektirir ve yalnızca dosya hash'i gönderilir — dosya içeriği asla paylaşılmaz.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Neden lisans anahtarı istiyor?</summary>
+            <p>Kurulum, bu bilgisayara bağlı bir aktivasyon anahtarı ister. Kurulum sihirbazı size bir cihaz kodu gösterir; bu kodu program yazarına iletip <code>NTR1-</code> ile başlayan anahtarı alırsınız. Anahtar doğrulanmadan hiçbir güvenlik bileşeni kurulmaz. Ayrıntılar <a href="indir.html">İndirme sayfasında</a>.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Kaynak kodunu inceleyebilir miyim?</summary>
+            <p>Evet, proje kaynağı görünür şekilde <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>'da yayınlanır. Ticari kullanım dışındaki her amaçla inceleyebilir, çalıştırabilir ve değiştirebilirsiniz — ayrıntılar için lisansa bakın.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Otomatik müdahaleler ne kadar agresif?</summary>
+            <p>Kapatılamayan sistem servisi katmanı bazı bulgularda otomatik müdahale eder (servis devre dışı bırakma, süreç sonlandırma, sertifika kaldırma gibi) ama yalnızca imzasız veya güvenilmeyen hedeflerde. Geçerli imzalı dosyalar otomatik olarak sonlandırılmaz veya devre dışı bırakılmaz; yalnız bildirilir. Neredeyse her işlem Koruma geçmişinden geri alınabilir, ve olağandışı bir artışta otomatik müdahale kendini durdurur.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Yanlış pozitif alırsam ne yapmalıyım?</summary>
+            <p>Bulguyu silmeden önce dosya yolunu ve tespit kaynağını inceleyin. Karantinaya alınan bir öğe Karantina ekranından geri yüklenebilir; otomatik müdahaleler ise Koruma geçmişinden geri alınabilir. Doğruladığınız bir hedefi istisna listesine ekleyerek sonraki taramaların dışında bırakabilirsiniz.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Sistem Servisi Modu'nu kapatabilir miyim?</summary>
+            <p>Servis modunun kendisi isteğe bağlıdır ve açıp kapatabilirsiniz. Ancak açıkken çalışan altı sistem izleyicisinin ayrı anahtarı yoktur — bunlar tercih değil, korumanın temelidir. Kapatma düğmesi, bir saldırganın ilk basacağı düğmedir.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Destek veya SLA sunuluyor mu?</summary>
+            <p>Hayır. Neutron deneysel ve topluluk destekli bir projedir; teknik destek, bakım garantisi veya acil müdahale hizmeti sunulmaz. Güvenlik bildirimleri gönüllü olarak değerlendirilebilir. Ayrıntılar <a href="guvenlik.html">Güvenlik sayfasında</a>.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Hangi Windows sürümlerinde çalışır?</summary>
+            <p>Windows 10 (64-bit, 1809 ve üzeri) ve Windows 11, yalnızca x64 mimaride. ARM64 ve x86 derlemesi bulunmuyor.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Nasıl kaldırırım?</summary>
+            <p>Denetim Masası veya Ayarlar › Uygulamalar listesinden. Kaldırma sihirbazı kişisel verilerinizin ve lisans anahtarının silinip silinmeyeceğini ayrı ayrı sorar. Kaldırıcı çalışmazsa Başlat menüsündeki <b>Neutron Kaldırma Yardımcısı (yönetici)</b> kısayolu zorlayarak temizler.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Ticari olarak kullanabilir miyim?</summary>
+            <p>Hayır. Neutron, PolyForm Noncommercial License 1.0.0 altında dağıtılır. Ticari kullanım, yeniden satış, ücretli hizmet ya da ticari bir ürünün parçası olarak kullanım telif hakkı sahibinden önceden yazılı izin gerektirir.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Güncellemeler nasıl geliyor?</summary>
+            <p>Tehdit tanımları imzalı Proton paketleriyle dağıtılır; doğrulanmayan paket etkinleştirilmez ve sorunlu bir güncellemeden önceki sürüme dönülebilir. Uygulama sürümleri ise GitHub Releases üzerinden yayınlanır ve elle indirilir.</p>
+          </details>
+        </div>
+
+        <div class="faq-cta">
+          <p>Cevabını bulamadınız mı?</p>
+          <a class="btn btn-ghost" href="https://github.com/omerbugrae/Neutron/issues" target="_blank" rel="noopener">GitHub Issues'ta sorun</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tight">
+      <div class="container">
+        <nav class="page-nav" aria-label="Sayfa gezinmesi">
+          <a class="page-nav-item" href="guvenlik.html">
+            <span>Geri</span>
+            <strong>Güvenlik ve lisans</strong>
+          </a>
+          <a class="page-nav-item page-nav-item--next" href="indir.html">
+            <span>Hazırsanız</span>
+            <strong>İndirme sayfası</strong>
+          </a>
+        </nav>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </div>
+      <nav class="footer-links" aria-label="Alt bilgi bağlantıları">
+        <a href="indir.html">İndir</a>
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <p class="footer-legal">
+        Neutron deneysel yazılımdır, olduğu gibi (as is) sunulur ve hiçbir garanti içermez.
+        Bağımsız bir güvenlik denetiminden geçmemiştir.
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" aria-label="Sayfa başına dön" type="button">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <script src="./script.js?v=20260818.6"></script>
+</body>
+</html>

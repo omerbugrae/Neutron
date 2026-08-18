@@ -41,15 +41,58 @@
   }
 
   // Detay atlası: sayaç her zaman gerçek içerik adedini gösterir.
-  const detailItems = document.querySelectorAll('.atlas-item');
   const detailCount = document.getElementById('detailCount');
   if (detailCount) {
-    detailCount.textContent = String(detailItems.length);
+    detailCount.textContent = String(document.querySelectorAll('.atlas-item').length);
   }
+
+  // Doğrulama komutunu kopyala.
+  //
+  // Kopyalandığını söylemek yeterli değil: kopyalanmadığında da bunu söylemesi
+  // gerekiyor. Clipboard API güvenli olmayan bağlamlarda (file:// üzerinden
+  // açılan bir sayfa) sessizce reddediyor, ve sessizce başarısız olan bir
+  // kopyalama düğmesi kullanıcının yanlış komutu yapıştırmasıyla sonuçlanır.
+  document.querySelectorAll('[data-copy-target]').forEach((button) => {
+    const source = document.getElementById(button.dataset.copyTarget);
+    if (!source) return;
+
+    const label = button.textContent;
+    let resetTimer = null;
+
+    const report = (text, ok) => {
+      button.textContent = text;
+      button.classList.toggle('is-done', ok);
+      window.clearTimeout(resetTimer);
+      resetTimer = window.setTimeout(() => {
+        button.textContent = label;
+        button.classList.remove('is-done');
+      }, 2000);
+    };
+
+    button.addEventListener('click', async () => {
+      const text = source.textContent.trim();
+      try {
+        if (!navigator.clipboard) throw new Error('clipboard unavailable');
+        await navigator.clipboard.writeText(text);
+        report('Kopyalandı', true);
+      } catch {
+        // Panoya yazamıyorsak en azından komutu seçili bırak: kullanıcı
+        // Ctrl+C ile kendisi alabilir.
+        const range = document.createRange();
+        range.selectNodeContents(source);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        report('Seçildi, Ctrl+C', false);
+      }
+    });
+  });
 
   // Kaydırıldıkça beliren bölümler
   const revealTargets = document.querySelectorAll(
-    '.feature-card, .atlas-group, .step, .requirement, .faq-item, .flow-diagram, .risk-panel, .license-panel'
+    '.feature-card, .atlas-group, .step, .requirement, .faq-item, .flow-diagram, .risk-panel,'
+    + ' .license-panel, .explore-card, .install-ladder li, .verify-step, .uninstall-card,'
+    + ' .service-card, .limit-card, .support-card, .limit-list li, .notice-panel'
   );
 
   if ('IntersectionObserver' in window && revealTargets.length) {
@@ -72,17 +115,22 @@
     revealTargets.forEach((el) => el.classList.add('is-visible'));
   }
 
-  // Aktif gezinme bağlantısı
+  // Sayfa içi bağlantılar için kaydırma takibi.
+  //
+  // Sitenin çok sayfalı hale gelmesinden sonra menü artık sayfalar arasında
+  // geziniyor ve aktif sayfa aria-current ile HTML tarafında işaretleniyor.
+  // Bu blok yalnız aynı sayfada bölüm bağlantısı olan sayfalar için çalışır;
+  // olmadığında hiçbir gözlemci kurulmaz.
+  const inPageLinks = document.querySelectorAll('.nav a[href^="#"]');
   const sections = document.querySelectorAll('main section[id]');
-  const navLinks = document.querySelectorAll('.nav a[href^="#"]');
 
-  if ('IntersectionObserver' in window && sections.length && navLinks.length) {
+  if ('IntersectionObserver' in window && sections.length && inPageLinks.length) {
     const sectionObserver = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           if (!entry.isIntersecting) return;
           const id = entry.target.getAttribute('id');
-          navLinks.forEach((link) => {
+          inPageLinks.forEach((link) => {
             link.classList.toggle('is-active', link.getAttribute('href') === `#${id}`);
           });
         });

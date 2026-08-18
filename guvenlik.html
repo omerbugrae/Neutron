@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Güvenlik ve lisans — Neutron</title>
+  <meta name="description" content="Neutron risk bildirimi, deneysel yazılımın sınırlamaları, destek kapsamı, sorumlu kullanım ve PolyForm Noncommercial lisans koşulları." />
+  <link rel="icon" href="assets/neutron.ico" />
+  <link rel="stylesheet" href="./style.css?v=20260818.6" />
+</head>
+<body>
+
+  <div class="noise-overlay" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </a>
+      <nav class="nav" aria-label="Ana gezinme">
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html" aria-current="page">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a class="nav-cta" href="indir.html">İndir</a>
+      </nav>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="mobileNav" aria-label="Menüyü aç/kapat">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobil gezinme">
+      <a href="ozellikler.html">Özellikler</a>
+      <a href="nasil-calisir.html">Nasıl çalışır</a>
+      <a href="guvenlik.html" aria-current="page">Güvenlik</a>
+      <a href="sss.html">SSS</a>
+      <a href="indir.html">İndir</a>
+      <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <section class="page-hero page-hero--compact page-hero--warn">
+      <div class="container">
+        <nav class="crumb" aria-label="Konum"><a href="index.html">Ana sayfa</a><span aria-hidden="true">/</span><span>Güvenlik</span></nav>
+        <p class="eyebrow eyebrow--warn">Kurmadan önce okuyun</p>
+        <h1>Deneysel yazılımın <span class="text-warn">gerçek sınırları.</span></h1>
+        <p class="page-hero-lede">
+          Neutron dosyaları inceler, sistem etkinliğini izler, Windows güvenlik bileşenleri
+          kaydeder, güvenlik duvarı kuralları oluşturur ve şüpheli dosyaları karantinaya alır.
+          Bu sayfa, bunun ne anlama geldiğini olduğu gibi anlatır.
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <div class="risk-panel">
+          <div class="risk-panel-header">
+            <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A2 2 0 0 0 3.82 21h16.36a2 2 0 0 0 1.71-2.96L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <h2>Önemli güvenlik bildirimi</h2>
+          </div>
+          <p>
+            Neutron deneysel bir güvenlik yazılımıdır ve kendi sorumluluğunuzda kullanılır.
+            Microsoft Defender, uç nokta koruması, düzenli yedekleme veya profesyonel güvenlik
+            danışmanlığının yerini almaz. Dosyaları inceleyebilir, sistem etkinliğini izleyebilir,
+            isteğe bağlı Windows güvenlik bileşenleri kaydedebilir, güvenlik duvarı kuralları
+            oluşturabilir ve şüpheli dosyaları karantinaya alabilir.
+          </p>
+          <div class="risk-checklist">
+            <p class="risk-checklist-title">Kullanmadan önce:</p>
+            <ul>
+              <li>Önemli verilerinizi yedekleyin.</li>
+              <li>Önce bir sanal makinede veya test ortamında deneyin.</li>
+              <li>Karantinaya almadan, silmeden veya kalıcı olarak kaldırmadan önce tespitleri inceleyin.</li>
+              <li>Hem yanlış pozitif hem yanlış negatif bekleyin.</li>
+              <li>Sonuçlarını tam olarak anlamadan Defender'ı ya da başka bir güvenlik ürününü devre dışı bırakmayın.</li>
+              <li>Yalnızca güvendiğiniz sürüm ve güncellemeleri kullanın.</li>
+            </ul>
+          </div>
+          <p class="risk-footnote">
+            Bu proje bağımsız bir güvenlik denetiminden geçmemiştir. Ayrıntılı riskler ve
+            sınırlamalar için <a href="https://github.com/omerbugrae/Neutron#-important-security-notice" target="_blank" rel="noopener">README</a> dosyasına bakın.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">SINIRLAMALAR</p>
+        <h2 class="section-title">Neutron'un yapamadıkları.</h2>
+        <p class="section-lede">
+          Bir güvenlik ürününün en dürüst bölümü, neyi yapamadığını yazdığı bölümdür.
+        </p>
+
+        <ul class="limit-list">
+          <li><b>Tespit kusursuz değil.</b> İmza ve sezgisel analize dayanır; zararlı yazılım gözden kaçabilir.</li>
+          <li><b>Yanlış pozitif olur.</b> Meşru dosyalar işaretlenebilir, engellenebilir veya karantinaya alınabilir.</li>
+          <li><b>Performansı etkiler.</b> Gerçek zamanlı izleme işlemci, pil ve uygulama uyumluluğunu etkileyebilir.</li>
+          <li><b>Sistemi değiştirir.</b> Yönetici düzeyi özellikler Windows ayarlarını, servisleri, kayıt defterini, AMSI kaydını ve güvenlik duvarı kurallarını değiştirebilir.</li>
+          <li><b>Güncellemeler gerileme getirebilir.</b> Kurallar ve modeller beklenmedik tespitlere yol açabilir.</li>
+          <li><b>Bağımsız denetimden geçmedi.</b> Bu proje hiçbir dış güvenlik denetimine tabi tutulmamıştır.</li>
+          <li><b>Garanti yok.</b> Yazılım olduğu gibi (as is) sunulur.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <p class="section-eyebrow">DESTEK KAPSAMI</p>
+        <h2 class="section-title">Destek, SLA ve güvenlik taahhüdü yok.</h2>
+        <p class="section-lede">
+          Neutron deneysel ve topluluk temelli bir projedir. Beklentiyi baştan net tutmak,
+          sonradan hayal kırıklığı yaşatmaktan iyidir.
+        </p>
+
+        <div class="support-grid">
+          <article class="support-card">
+            <h3>Sunulmayanlar</h3>
+            <ul>
+              <li>Teknik, kurulum veya kullanım desteği</li>
+              <li>Bakım, güncelleme veya uyumluluk garantisi</li>
+              <li>SLA, yanıt süresi taahhüdü veya acil müdahale</li>
+              <li>Tespit oranı ya da veri bütünlüğü garantisi</li>
+            </ul>
+          </article>
+          <article class="support-card">
+            <h3>Sizin sorumluluğunuz</h3>
+            <ul>
+              <li>Yedekleme ve yedeklerin doğrulanması</li>
+              <li>Yalıtılmış ortamda test etme</li>
+              <li>Tespitleri silmeden önce inceleme</li>
+              <li>Ek güvenlik önlemlerini sürdürme</li>
+            </ul>
+          </article>
+          <article class="support-card">
+            <h3>Sorumlu kullanım</h3>
+            <ul>
+              <li>Yalnız sahibi olduğunuz sistemlerde kullanın</li>
+              <li>Yetkiniz olmayan makinelerde çalıştırmayın</li>
+              <li>Güvenlik kontrollerini aşmak için kullanmayın</li>
+              <li>Yürürlükteki hukuka ve politikalara uyun</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="container">
+        <div class="license-panel">
+          <div class="license-panel-text">
+            <p class="section-eyebrow">LİSANS</p>
+            <h2 class="section-title">Kaynağı görünür, ticari kullanım değil.</h2>
+            <p>
+              Neutron, <a href="https://github.com/omerbugrae/Neutron/blob/main/LICENSE.md" target="_blank" rel="noopener">PolyForm Noncommercial License 1.0.0</a>
+              altında kaynağı görünür şekilde dağıtılır. Ticari kullanım, yeniden satış, ticari
+              dağıtım, ücretli hizmet ya da ticari bir ürünün parçası olarak kullanım, telif hakkı
+              sahibinden önceden yazılı izin gerektirir. Bu, OSI onaylı bir açık kaynak lisansı
+              değildir.
+            </p>
+          </div>
+          <div class="license-panel-badges">
+            <span class="badge">PolyForm Noncommercial 1.0.0</span>
+            <span class="badge">Windows 10/11 · x64</span>
+            <span class="badge">Electron + Python</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tight">
+      <div class="container">
+        <nav class="page-nav" aria-label="Sayfa gezinmesi">
+          <a class="page-nav-item" href="nasil-calisir.html">
+            <span>Geri</span>
+            <strong>Nasıl çalışır</strong>
+          </a>
+          <a class="page-nav-item page-nav-item--next" href="sss.html">
+            <span>Sonraki</span>
+            <strong>Sık sorulanlar</strong>
+          </a>
+        </nav>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </div>
+      <nav class="footer-links" aria-label="Alt bilgi bağlantıları">
+        <a href="indir.html">İndir</a>
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <p class="footer-legal">
+        Neutron deneysel yazılımdır, olduğu gibi (as is) sunulur ve hiçbir garanti içermez.
+        Bağımsız bir güvenlik denetiminden geçmemiştir.
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" aria-label="Sayfa başına dön" type="button">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <script src="./script.js?v=20260818.6"></script>
+</body>
+</html>

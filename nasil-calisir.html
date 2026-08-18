@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nasıl çalışır — Neutron</title>
+  <meta name="description" content="Neutron mimarisi: tarama motoru, sistem servisi modu, altı LocalSystem izleyicisi ve otomatik müdahalenin sınırları." />
+  <link rel="icon" href="assets/neutron.ico" />
+  <link rel="stylesheet" href="./style.css?v=20260818.6" />
+</head>
+<body>
+
+  <div class="noise-overlay" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </a>
+      <nav class="nav" aria-label="Ana gezinme">
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html" aria-current="page">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a class="nav-cta" href="indir.html">İndir</a>
+      </nav>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="mobileNav" aria-label="Menüyü aç/kapat">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobil gezinme">
+      <a href="ozellikler.html">Özellikler</a>
+      <a href="nasil-calisir.html" aria-current="page">Nasıl çalışır</a>
+      <a href="guvenlik.html">Güvenlik</a>
+      <a href="sss.html">SSS</a>
+      <a href="indir.html">İndir</a>
+      <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <section class="page-hero page-hero--compact">
+      <div class="container">
+        <nav class="crumb" aria-label="Konum"><a href="index.html">Ana sayfa</a><span aria-hidden="true">/</span><span>Nasıl çalışır</span></nav>
+        <p class="eyebrow">Mimari · Servis modu · Bulgu akışı</p>
+        <h1>Bir bulgunun <span class="text-accent">izlediği yol.</span></h1>
+        <p class="page-hero-lede">
+          Masaüstü uygulaması ve isteğe bağlı Sistem Servisi Modu aynı motoru paylaşır. Servis
+          modu açıldığında koruma, Neutron penceresi kapalıyken ve hatta kimse oturum açmamışken
+          bile sürdürülür.
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <p class="section-eyebrow">MİMARİ</p>
+        <h2 class="section-title">Katmanlı, yerelde çalışan bir yapı.</h2>
+        <p class="section-lede">
+          Kullanıcı arayüzü kararları gösterir; motor taramayı yürütür; sistem servisi ise
+          arayüz kapalıyken de izlemeyi sürdürür. Üçü de aynı makinede kalır.
+        </p>
+        <div class="flow-diagram" role="img" aria-label="Kullanıcı, Neutron masaüstü uygulaması, tarama motoru ve alt bileşenler arasındaki akış şeması">
+          <div class="flow-row">
+            <div class="flow-node flow-node-accent">Kullanıcı</div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-node-accent">Neutron Masaüstü Uygulaması</div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-node-accent">Tarama Motoru</div>
+          </div>
+          <div class="flow-branches">
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">YARA Kuralları</div>
+            </div>
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">PE / ML Analizi</div>
+            </div>
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">Karantina</div>
+            </div>
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">Sistem Servisi İzleyicileri</div>
+            </div>
+          </div>
+          <div class="flow-row flow-row-secondary">
+            <div class="flow-node flow-node-muted">Proton Güncellemeleri</div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-node-muted">YARA Kuralları</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">KULLANIM AKIŞI</p>
+        <h2 class="section-title">Kurulumdan müdahaleye dört adım.</h2>
+        <p class="section-lede">
+          Bu bir sıralamadır: her adım bir öncekinin sonucuna dayanır, ve son adım her zaman
+          kararın sizde kaldığı adımdır.
+        </p>
+        <div class="steps">
+          <div class="step">
+            <span class="step-index">01</span>
+            <h3>Kur ve aktive et</h3>
+            <p>Kurulum sihirbazı risk bildirimini gösterir, cihaz koduna bağlı bir lisans anahtarı ister ve güvenlik bileşenlerini yönetici izniyle kurar.</p>
+          </div>
+          <div class="step">
+            <span class="step-index">02</span>
+            <h3>Katmanları seç</h3>
+            <p>Dosya, davranış, ağ, bellek, USB ve fidye yazılımı korumalarını ayrı ayrı açıp kapatabilirsiniz. İstisnalar ve API anahtarları sizin kontrolünüzde.</p>
+          </div>
+          <div class="step">
+            <span class="step-index">03</span>
+            <h3>İsteğe bağlı Sistem Servisi Modu</h3>
+            <p>Açıldığında sürücü/servis izleme, olay günlüğü, WMI kalıcılığı, süreç zinciri ve kimlik bilgisi koruması gibi ek katmanlar devreye girer — kapatılamaz, ayarsızdır.</p>
+          </div>
+          <div class="step">
+            <span class="step-index">04</span>
+            <h3>Bulguyu incele, gerekirse geri al</h3>
+            <p>Otomatik müdahaleler Koruma geçmişine kaydedilir. Karantina, servis devre dışı bırakma ve sertifika kaldırma gibi geri alınabilir işlemler tek tıkla geri alınabilir.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <p class="section-eyebrow">SİSTEM SERVİSİ MODU</p>
+        <h2 class="section-title">Pencere kapalıyken ne olur?</h2>
+        <p class="section-lede">
+          Servis modu açıldığında altı ek izleyici LocalSystem yetkisiyle çalışmaya başlar.
+          Bunların ayrı anahtarı yoktur: kapatma düğmesi, bir saldırganın ilk basacağı düğmedir.
+        </p>
+
+        <div class="service-grid">
+          <article class="service-card">
+            <span class="service-code">S1</span>
+            <h3>Sürücü ve servis izleme</h3>
+            <p>Yeni kaydedilen ya da hedefi değiştirilen çekirdek sürücülerini ve Windows servislerini bildirir. İmzalı bir sürücü bile bildirilir — BYOVD saldırıları tam olarak böyle görünür.</p>
+          </article>
+          <article class="service-card">
+            <span class="service-code">S2</span>
+            <h3>Zamanlanmış görev izleme</h3>
+            <p>Görev Zamanlayıcı'ya eklenen veya hedefi değiştirilen, imzasız komut çalıştıran görevleri yakalar.</p>
+          </article>
+          <article class="service-card">
+            <span class="service-code">S3</span>
+            <h3>WMI kalıcılık izleme</h3>
+            <p>Olay filtresi, tüketici ve bağlama üçlüsü SYSTEM olarak kod çalıştırabilir; kayıt defterinde de görev deposunda da görünmez.</p>
+          </article>
+          <article class="service-card">
+            <span class="service-code">S4</span>
+            <h3>Süreç başlatma izleme</h3>
+            <p>Her süreç başlatılmasını anlık olarak, soyağacıyla birlikte görür — milisaniyeler yaşayıp kapanan süreçler dahil.</p>
+          </article>
+          <article class="service-card">
+            <span class="service-code">S5</span>
+            <h3>Olay günlüğü izleme</h3>
+            <p>Güvenlik günlüğünün temizlenmesi, yerel yönetici eklenmesi, servis kurulumu ve Defender'ın kapatılması. Bu günlük SYSTEM olmadan okunamaz.</p>
+          </article>
+          <article class="service-card">
+            <span class="service-code">S6</span>
+            <h3>Kimlik bilgisi erişimi</h3>
+            <p>LSASS belleğini okuma erişimiyle açık tutan süreçleri bildirir; parola hırsızlığı böyle yapılır.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">OTOMATİK MÜDAHALE</p>
+        <h2 class="section-title">Ne engellenebilir, ne engellenemez.</h2>
+        <p class="section-lede">
+          Neutron'un çekirdek bileşeni yok. Bu, bazı şeyleri gerçekten durdurabildiği, bazılarını
+          ise yalnız sonradan sonlandırabildiği anlamına gelir. İkisini birbirine karıştırmamak
+          önemli.
+        </p>
+
+        <div class="limits-grid">
+          <article class="limit-card limit-card--can">
+            <h3>Gerçekten geri alınabilir</h3>
+            <ul>
+              <li>Zamanlanmış görev devre dışı bırakılır</li>
+              <li>WMI aboneliği silinir</li>
+              <li>Güven deposundan sertifika kaldırılır</li>
+              <li>Zayıflatılmış Windows ayarı eski haline döner</li>
+              <li>Servis kaydı devre dışı bırakılır</li>
+            </ul>
+          </article>
+          <article class="limit-card limit-card--cannot">
+            <h3>Yalnız sonradan durdurulabilir</h3>
+            <ul>
+              <li>Sürücü yüklenmesi reddedilemez — servis devre dışı bırakılır, bellekteki sürücü yeniden başlatmaya kadar kalır</li>
+              <li>LSASS handle'ı iptal edilemez — erişimi açan süreç sonlandırılır</li>
+              <li>Süreç çalışmadan durdurulamaz — başladıktan milisaniyeler sonra sonlandırılır</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="safety-note">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A2 2 0 0 0 3.82 21h16.36a2 2 0 0 0 1.71-2.96L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p>
+            Geçerli Windows imzası taşıyan dosyalar otomatik olarak sonlandırılmaz veya devre
+            dışı bırakılmaz; yalnız bildirilir. Önyükleme sürücüleri ve Windows'un kendi
+            zamanlanmış görevlerine hiç dokunulmaz. On dakikada on iki müdahaleyi aşan bir
+            artışta otomatik engelleme kendini durdurur.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-tight">
+      <div class="container">
+        <nav class="page-nav" aria-label="Sayfa gezinmesi">
+          <a class="page-nav-item" href="ozellikler.html">
+            <span>Geri</span>
+            <strong>Özellikler</strong>
+          </a>
+          <a class="page-nav-item page-nav-item--next" href="guvenlik.html">
+            <span>Sonraki</span>
+            <strong>Güvenlik ve lisans</strong>
+          </a>
+        </nav>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </div>
+      <nav class="footer-links" aria-label="Alt bilgi bağlantıları">
+        <a href="indir.html">İndir</a>
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <p class="footer-legal">
+        Neutron deneysel yazılımdır, olduğu gibi (as is) sunulur ve hiçbir garanti içermez.
+        Bağımsız bir güvenlik denetiminden geçmemiştir.
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" aria-label="Sayfa başına dön" type="button">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <script src="./script.js?v=20260818.6"></script>
+</body>
+</html>

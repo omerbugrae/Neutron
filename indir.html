@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>İndir — Neutron</title>
+  <meta name="description" content="Neutron kurulum dosyasını indirin: sürüm bilgisi, sistem gereksinimleri, lisans anahtarı adımı, dosya doğrulama ve kaldırma yönergeleri." />
+  <link rel="icon" href="assets/neutron.ico" />
+  <link rel="stylesheet" href="./style.css?v=20260818.6" />
+</head>
+<body>
+
+  <div class="noise-overlay" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </a>
+      <nav class="nav" aria-label="Ana gezinme">
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a class="nav-cta" href="indir.html" aria-current="page">İndir</a>
+      </nav>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="mobileNav" aria-label="Menüyü aç/kapat">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobil gezinme">
+      <a href="ozellikler.html">Özellikler</a>
+      <a href="nasil-calisir.html">Nasıl çalışır</a>
+      <a href="guvenlik.html">Güvenlik</a>
+      <a href="sss.html">SSS</a>
+      <a href="indir.html" aria-current="page">İndir</a>
+      <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <!-- Page hero + release card -->
+    <section class="page-hero">
+      <div class="container page-hero-inner">
+        <div class="page-hero-copy">
+          <nav class="crumb" aria-label="Konum"><a href="index.html">Ana sayfa</a><span aria-hidden="true">/</span><span>İndir</span></nav>
+          <p class="eyebrow">Windows 10 / 11 · x64</p>
+          <h1>Kurulum dosyasını<br /><span class="text-accent">doğrulayarak</span> alın.</h1>
+          <p class="page-hero-lede">
+            Neutron yalnızca GitHub sürüm sayfasından dağıtılır. Başka bir kaynaktan indirilen
+            kurulum dosyası bizim yayınladığımız dosya değildir — indirdikten sonra özetini
+            karşılaştırmanız için aşağıda tek satırlık bir komut var.
+          </p>
+        </div>
+
+        <!-- Signature: release artifact card -->
+        <article class="release-card">
+          <div class="release-bar">
+            <span>SÜRÜM KAYDI</span>
+            <span class="release-channel">KARARLI</span>
+          </div>
+          <div class="release-body">
+            <p class="release-version">v0.4.0</p>
+            <p class="release-file"><code>Neutron-0.4.0-x64-Setup.exe</code></p>
+            <dl class="release-meta">
+              <div><dt>Platform</dt><dd>Windows 10 (1809+) / 11</dd></div>
+              <div><dt>Mimari</dt><dd>x64 (AMD64)</dd></div>
+              <div><dt>Kurulum türü</dt><dd>NSIS sihirbazı, yönetici izni</dd></div>
+              <div><dt>Lisans</dt><dd>Cihaza bağlı anahtar gerekir</dd></div>
+            </dl>
+            <a class="btn btn-primary release-btn" href="https://github.com/omerbugrae/Neutron/releases/latest" target="_blank" rel="noopener">
+              <span>GitHub sürüm sayfasını aç</span>
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </a>
+            <p class="release-hint">Sürüm sayfasındaki dosya adı ve sürüm numarası burada yazandan yeniyse, oradaki geçerlidir.</p>
+          </div>
+          <div class="release-foot">
+            <span>ARM64 ve x86 derlemesi yok</span>
+            <span class="pulse-label">GITHUB RELEASES</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Gate: license key -->
+    <section class="section">
+      <div class="container">
+        <div class="notice-panel">
+          <div class="notice-head">
+            <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M15 7a4 4 0 11-3.8 5.2L7 16.4V19H4v-3l6.8-6.8A4 4 0 0115 7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <h2>Kurulumdan önce: lisans anahtarı gerekiyor</h2>
+          </div>
+          <p>
+            Kurulum sihirbazı, indirdiğiniz dosyayı çalıştırdığınızda bir <b>cihaz kodu</b> gösterir
+            ve buna karşılık gelen bir <b>aktivasyon anahtarı</b> ister. Anahtar bu bilgisayara
+            bağlıdır; girilmeden kurulum devam etmez ve hiçbir güvenlik bileşeni kurulmaz.
+          </p>
+          <ol class="key-steps">
+            <li><span>1</span><p>Kurulumu başlatın, <b>Lisans aktivasyonu</b> adımındaki cihaz kodunu kopyalayın.</p></li>
+            <li><span>2</span><p>Cihaz kodunu program yazarına iletip <code>NTR1-</code> ile başlayan anahtarı isteyin.</p></li>
+            <li><span>3</span><p>Anahtarı sihirbaza yapıştırın. İmza, cihaz bağlantısı ve son kullanma tarihi kurulumdan önce doğrulanır.</p></li>
+          </ol>
+          <a class="inline-link" href="https://github.com/omerbugrae/Neutron/issues" target="_blank" rel="noopener">Anahtar talebi için GitHub Issues<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 12h14m0 0l-6-6m6 6l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Verification -->
+    <section class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">DOĞRULAMA</p>
+        <h2 class="section-title">İndirdiğiniz dosyanın bizim dosyamız olduğunu kontrol edin.</h2>
+        <p class="section-lede">
+          Bir güvenlik yazılımını doğrulamadan kurmak, kilidi almak için kapıyı açık bırakmaya
+          benzer. PowerShell'de tek satır: çıkan özeti sürüm sayfasında yayınlanan değerle
+          karakter karakter karşılaştırın.
+        </p>
+
+        <div class="verify-panel">
+          <div class="verify-step">
+            <p class="verify-label">1 · Özeti hesaplayın</p>
+            <div class="code-line">
+              <code id="hashCommand">Get-FileHash -Algorithm SHA256 "$HOME\Downloads\Neutron-0.4.0-x64-Setup.exe"</code>
+              <button class="copy-btn" type="button" data-copy-target="hashCommand" aria-label="Komutu panoya kopyala">Kopyala</button>
+            </div>
+          </div>
+          <div class="verify-step">
+            <p class="verify-label">2 · Karşılaştırın</p>
+            <p class="verify-text">
+              Çıkan <code>Hash</code> değeri, GitHub sürüm notlarında yayınlanan SHA-256 ile
+              birebir aynı olmalı. Tek karakter farklıysa dosyayı kurmayın, silin ve yeniden indirin.
+            </p>
+          </div>
+          <div class="verify-step">
+            <p class="verify-label">3 · Kaynağı doğrulayın</p>
+            <p class="verify-text">
+              Adres çubuğunda <code>github.com/omerbugrae/Neutron</code> yazdığından emin olun.
+              Neutron başka hiçbir sitede, mağazada veya indirme portalında dağıtılmıyor.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Requirements -->
+    <section class="section">
+      <div class="container">
+        <p class="section-eyebrow">GEREKSİNİMLER</p>
+        <h2 class="section-title">Kurulum öncesi kontrol listesi.</h2>
+        <div class="requirements-grid">
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Windows 10 (64-bit, 1809+) ya da Windows 11 — yalnız x64 (AMD64), ARM64/x86 desteklenmiyor</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>2 GHz veya daha hızlı AMD64 mimarili işlemci</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>En az 4 GB RAM (8 GB önerilir)</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>~1 GB boş disk alanı; isteğe bağlı ML Özellik Güncellemesi için +250 MB</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Yönetici yetkisi — kurulum servis ve AMSI bileşenlerini kaydeder</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Güncel ve güvenilir bir Windows kurulumu, güncel yedekler</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- What the installer does -->
+    <section class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">KURULUM SIRASINDA</p>
+        <h2 class="section-title">Sihirbaz sırayla ne yapar?</h2>
+        <p class="section-lede">
+          Kurulum, makinenizde sistem düzeyinde değişiklik yapar. Hangi adımda ne olduğunu
+          önceden bilmeniz, bir adım beklenmedik göründüğünde durabilmeniz demektir.
+        </p>
+
+        <ol class="install-ladder">
+          <li>
+            <span class="rung-mark">01</span>
+            <div>
+              <h3>Risk bildirimini onaylarsınız</h3>
+              <p>Deneysel yazılım uyarısı ve sorumluluk reddi gösterilir. Kutucuğu işaretlemeden İleri düğmesi açılmaz.</p>
+            </div>
+          </li>
+          <li>
+            <span class="rung-mark">02</span>
+            <div>
+              <h3>Lisans doğrulanır</h3>
+              <p>Girdiğiniz <code>NTR1-</code> anahtarının imzası, cihaz bağlantısı ve süresi denetlenir. Doğrulanmazsa hiçbir bileşen kurulmaz ve kurulum durur.</p>
+            </div>
+          </li>
+          <li>
+            <span class="rung-mark">03</span>
+            <div>
+              <h3>Program dosyaları kopyalanır</h3>
+              <p>Varsayılan konum <code>C:\Program Files\Neutron</code>. Önceki bir kurulum varsa çalışan süreçler durdurulur ve AMSI sağlayıcısı kenara alınır.</p>
+            </div>
+          </li>
+          <li>
+            <span class="rung-mark">04</span>
+            <div>
+              <h3>Güvenlik bileşenleri etkinleştirilir</h3>
+              <p>AMSI sağlayıcısı kaydedilir ve <code>NeutronService</code> kurulur. Bu adım birkaç dakika sürebilir; başarısız olursa kurulum geri alınır.</p>
+            </div>
+          </li>
+          <li>
+            <span class="rung-mark">05</span>
+            <div>
+              <h3>Kısayollar ve kayıtlar oluşturulur</h3>
+              <p>Başlat menüsüne Neutron, kaldırma bağlantısı ve kaldırma yardımcısı eklenir. Uygulama Denetim Masası'nda görünür hale gelir.</p>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- Uninstall -->
+    <section class="section">
+      <div class="container">
+        <p class="section-eyebrow">KALDIRMA</p>
+        <h2 class="section-title">Kurduğunuz kadar kolay kaldırın.</h2>
+        <p class="section-lede">
+          Kaldırma sihirbazı iki ayrı soru sorar: kişisel verileriniz silinsin mi, lisans anahtarı
+          silinsin mi. İkisini de işaretlemezseniz yalnız program kaldırılır.
+        </p>
+
+        <div class="uninstall-grid">
+          <article class="uninstall-card">
+            <span class="uninstall-tag">OLAĞAN YOL</span>
+            <h3>Denetim Masası</h3>
+            <p><b>Ayarlar › Uygulamalar</b> ya da <b>Denetim Masası › Programlar ve Özellikler</b> listesinden Neutron'u kaldırın. Başlat menüsündeki <b>Neutron'u Kaldır</b> kısayolu da aynı sihirbazı açar.</p>
+          </article>
+          <article class="uninstall-card">
+            <span class="uninstall-tag">SORUN ÇIKARSA</span>
+            <h3>Kaldırma yardımcısı</h3>
+            <p>Kaldırıcı çalışmıyorsa Başlat menüsündeki <b>Neutron Kaldırma Yardımcısı (yönetici)</b> kısayolunu kullanın. Servisi, AMSI kaydını, güvenlik duvarı kurallarını ve program klasörünü zorlayarak temizler.</p>
+          </article>
+          <article class="uninstall-card">
+            <span class="uninstall-tag">VERİLERİNİZ</span>
+            <h3>Ne kalır, ne gider</h3>
+            <p>Karantinadaki dosyalar sizin dosyalarınızdır; silinirse geri gelmez. İşaretlemezseniz ayarlar, tarama geçmişi, ML modelleri ve lisans diskte kalır ve yeniden kurulumda kullanılır.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Page nav -->
+    <section class="section section-tight">
+      <div class="container">
+        <nav class="page-nav" aria-label="Sayfa gezinmesi">
+          <a class="page-nav-item" href="guvenlik.html">
+            <span>Önce bunu okuyun</span>
+            <strong>Risk bildirimi ve lisans</strong>
+          </a>
+          <a class="page-nav-item page-nav-item--next" href="nasil-calisir.html">
+            <span>Sonraki</span>
+            <strong>Nasıl çalışır</strong>
+          </a>
+        </nav>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </div>
+      <nav class="footer-links" aria-label="Alt bilgi bağlantıları">
+        <a href="indir.html">İndir</a>
+        <a href="ozellikler.html">Özellikler</a>
+        <a href="nasil-calisir.html">Nasıl çalışır</a>
+        <a href="guvenlik.html">Güvenlik</a>
+        <a href="sss.html">SSS</a>
+        <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <p class="footer-legal">
+        Neutron deneysel yazılımdır, olduğu gibi (as is) sunulur ve hiçbir garanti içermez.
+        Bağımsız bir güvenlik denetiminden geçmemiştir.
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" aria-label="Sayfa başına dön" type="button">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <script src="./script.js?v=20260818.6"></script>
+</body>
+</html>
