@@ -1,7 +1,7 @@
 {
   "name": "neutron",
   "productName": "Neutron",
-  "version": "0.4.0",
+  "version": "0.43",
   "private": true,
   "description": "Neutron desktop security application",
   "main": "src/main.cjs",
@@ -9,7 +9,7 @@
     "postinstall": "patch-package",
     "prestart": "npm run icon:build && npm run archive:check",
     "start": "electron .",
-    "start:safe": "set NEUTRON_DEV_SAFE=1 && electron .",
+    "start:safe": "set \"NEUTRON_DEV_SAFE=1\" && electron .",
     "prepackage": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
     "package": "electron-forge package",
     "premake": "npm run icon:build && npm run installer-images:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",

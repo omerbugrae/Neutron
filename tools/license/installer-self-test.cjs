@@ -2,10 +2,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { generateLicense } = require('../../src/license.cjs');
 
 const root = path.resolve(__dirname, '..', '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -18,20 +16,39 @@ const main = fs.readFileSync(path.join(root, 'src', 'main.cjs'), 'utf8');
 // numeric parts VIProductVersion requires -- toFileVersion() pads short
 // versions, so two and three part versions are both legitimate here.
 assert.match(packageJson.version, /^\d+(\.\d+){1,3}$/);
-assert.ok(installer.indexOf('Page custom LicensePageCreate LicensePageLeave') < installer.indexOf('MUI_PAGE_INSTFILES'));
-assert.ok(installer.indexOf('--activate-license-file') < installer.indexOf('--provision-security'));
+
+// --- No install-time licence page ------------------------------------------
+//
+// Licensing moved to a Supabase-backed account system that lives inside the
+// app (src/activation.html, src/supabase-client.cjs) and opens on first
+// launch, not inside the NSIS wizard. Asking for an NTR1 key, a device code
+// or a MachineGuid read during install would be dead UI for a feature the
+// app no longer has -- these assertions exist to catch that regressing back
+// in, not to describe what the installer should do.
+for (const dead of [
+  'LicensePageCreate', 'LicensePageLeave', '--activate-license-file',
+  'activation.key', 'previous-activation.key', 'HadPreviousLicense',
+  'LicenseDeviceHash', 'NTR1-', 'DeleteLicenseData',
+]) {
+  assert.doesNotMatch(installer, new RegExp(dead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    `kurulum sihirbazı artık "${dead}" içermemeli`);
+}
+for (const dead of ['isActivateLicenseFileMode', 'saveLicense(', 'parseLicense(', 'activeLicensePath']) {
+  assert.doesNotMatch(main, new RegExp(dead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    `main.cjs artık "${dead}" içermemeli`);
+}
+
+// Risk acceptance is the one thing installation still gates on: no key entry
+// to check afterwards, so the MUI license/risk page has to stand on its own
+// before file extraction starts.
+assert.match(installer, /MUI_LICENSEPAGE_CHECKBOX/);
+assert.ok(installer.indexOf('MUI_PAGE_LICENSE') < installer.indexOf('MUI_PAGE_INSTFILES'));
+
 assert.match(installer, /NeutronStage/);
 assert.match(installer, /robocopy\.exe/);
-assert.match(installer, /license_verification_failed/);
-assert.match(installer, /previous-activation\.key/);
 
-// Risk acceptance must come before the activation page, and must be gated on
-// the checkbox rather than being a page the user can page straight past.
-assert.match(installer, /MUI_LICENSEPAGE_CHECKBOX/);
-assert.ok(installer.indexOf('MUI_PAGE_LICENSE') < installer.indexOf('Page custom LicensePageCreate'));
-
-// Progress feedback during the three multi-minute external calls comes from
-// the status line above the bar, not from the file list: the list pane stays
+// Progress feedback during the multi-minute provisioning call comes from the
+// status line above the bar, not from the file list: the list pane stays
 // hidden, and DetailPrint runs in textonly mode so each message replaces the
 // previous one instead of scrolling a wall of paths past the user.
 assert.match(installer, /ShowInstDetails nevershow/);
@@ -46,19 +63,14 @@ assert.ok(installer.indexOf('SetDetailsPrint none') < installer.indexOf('File /r
 // every upgrade fails with robocopy exit code 9.
 assert.ok(installer.indexOf('NeutronAmsiProvider.dll') < installer.indexOf('robocopy.exe'));
 assert.match(installer, /regsvr32\.exe" \/s \/u/);
-assert.match(installer, /nsExec::ExecToStack.*--activate-license-file/);
 assert.match(installer, /nsExec::ExecToStack.*--provision-security/);
 assert.doesNotMatch(installer, /ExecWait|ExecToLog/);
 assert.doesNotMatch(installer, /MB_RETRYCANCEL/);
 assert.match(installer, /Goto cleanup_fallback/);
 assert.match(installer, /remove-stuck-neutron\.ps1/);
-assert.match(installer, /provision_rollback_done/);
+assert.match(installer, /provision_failed/);
 assert.match(installer, /Eksik kurulum geri alındı/);
-assert.match(installer, /ReadRegStr \$LicenseDeviceHash HKLM .*MachineGuid/);
-assert.doesNotMatch(installer, /license-device\.ps1/);
-assert.match(installer, /Program yazarıyla lisans kodu almak için iletişime geçin/);
-assert.match(main, /isActivateLicenseFileMode/);
-assert.match(main, /saveLicense\(key, \{ machineWide: true \}\)/);
+
 assert.match(main, /ProgramData/);
 assert.match(main, /windowsSecurityCenterRestoreCommand/);
 assert.match(main, /NEUTRON_INTERNAL_PATHS: internalPaths/);
@@ -82,16 +94,16 @@ assert.ok(installer.indexOf('UninstPage custom un.OptionsPageCreate') < installe
 assert.match(installer, /Function un\.OptionsPageLeave/);
 
 // Sessiz kaldırma (QuietUninstallString, /S) özel sayfaları göstermez. O
-// durumda un.onInit varsayılanları geçerli olur ve ikisi de "silme" olmalı --
-// otomatik bir kaldırma kullanıcı verisi ya da lisans silmemeli.
+// durumda un.onInit varsayılanı geçerli olur ve "silme" olmalı -- otomatik
+// bir kaldırma kullanıcı verisini asla sormadan silmemeli.
 assert.match(installer, /StrCpy \$DeleteUserData "0"/);
-assert.match(installer, /StrCpy \$DeleteLicenseData "0"/);
 // Karantina kalıcı olarak silineceği için tek bir onay kutusu yeterli değil;
 // ayrıca açık bir onay sorulmalı.
 assert.match(installer, /MB_YESNO\|MB_ICONEXCLAMATION/);
 
-// Lisans, kişisel veriden ayrı bir karar: kullanıcı verisini silip lisansı
-// koruyabilmek için ProgramData\Neutron tek parça halinde silinmemeli.
+// Hesap sistemine geçmeden önceki bir sürümden yükseltenlerde
+// $ProgramDataDir\Neutron\license bir kalıntı olarak kalabilir; ayrı bir
+// soru olmadan, kullanıcı verisiyle birlikte sessizce temizlenmeli.
 assert.match(installer, /RMDir \/r "\$ProgramDataDir\\\\Neutron\\\\data"/);
 assert.match(installer, /RMDir \/r "\$ProgramDataDir\\\\Neutron\\\\license"/);
 assert.doesNotMatch(installer, /RMDir \/r "\$ProgramDataDir\\\\Neutron"\s*$/m);
@@ -126,14 +138,19 @@ assert.match(removalHelper, /AppData\\Roaming\\Neutron/);
 // Kullanıcı verisi asla sorulmadan silinmemeli.
 assert.match(removalHelper, /set \/p "PURGE_DATA=/);
 
-const signingKeys = crypto.generateKeyPairSync('ed25519');
-const longestSupportedKey = generateLicense({
-  license_id: 'x'.repeat(80),
-  customer_name: 'y'.repeat(100),
-  edition: 'z'.repeat(40),
-  device_hash: 'a'.repeat(64),
-  expires_at: '2099-01-01T00:00:00.000Z',
-}, signingKeys.privateKey);
-assert.ok(longestSupportedKey.length < 1024, 'NSIS tek satırlık lisans alanı en uzun desteklenen anahtarı taşımalı');
+// --- Hesap sistemi (Supabase) ----------------------------------------------
+//
+// Bu üç dosya kurulum akışının yerini alan asıl doğrulama mekanizması:
+// hesap ilk açılışta doğrulanır, tam offline imzalı anahtar yerine.
+const activationHtml = fs.readFileSync(path.join(root, 'src', 'activation.html'), 'utf8');
+const activationJs = fs.readFileSync(path.join(root, 'src', 'activation.js'), 'utf8');
+const supabaseClient = fs.readFileSync(path.join(root, 'src', 'supabase-client.cjs'), 'utf8');
 
-console.log('Kurulum lisans akışı öz testi başarılı (sistem değişikliği uygulanmadı).');
+assert.match(activationHtml, /data-form="signin"/);
+assert.match(activationHtml, /data-form="signup"/);
+assert.doesNotMatch(activationHtml, /NTR1/);
+assert.match(supabaseClient, /rpc\/heartbeat/);
+assert.doesNotMatch(activationHtml, /Cihaz değişikliği iste/);
+assert.doesNotMatch(supabaseClient, /request_device_change/);
+
+console.log('Kurulum ve hesap sistemi öz testi başarılı (sistem değişikliği uygulanmadı).');

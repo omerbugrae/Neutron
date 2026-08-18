@@ -29,6 +29,12 @@
 >
 > Microsoft Defender’ın, kurumsal uç nokta korumasının, düzenli yedeklemenin veya profesyonel güvenlik desteğinin yerine geçmez.
 
+## Güncel sürüm
+
+- **Neutron uygulaması:** 0.43
+- **Neutron Engine:** 0.4.0
+- **Erişim:** Onaylı Neutron hesabınla giriş yaparsın. Aynı hesabı birden fazla cihazda kullanabilirsin; cihaz değişikliği talebi veya aktivasyon anahtarı akışı yoktur.
+
 ## ⚡ Özellikler
 
 | Özellik | Açıklama |
@@ -40,6 +46,7 @@
 | 📦 **Karantina** | Şüpheli dosyalar için karantina ve geri yükleme akışı |
 | 🪟 **AMSI entegrasyonu** | Desteklenen Windows betik ortamları için ek inceleme |
 | 🔄 **Proton güncellemeleri** | İmzalı tehdit istihbaratı/rule güncellemeleri ve geri alma desteği |
+| 👤 **Hesap erişimi** | Onaylı hesapla giriş; aynı hesap birden fazla cihazda kullanılabilir |
 | 📅 **Zamanlanmış tarama** | Otomatik hızlı tarama; servis modunda kimse oturum açmamışken de çalışır |
 | 🧷 **Sürücü ve servis izleme** | Yeni kaydedilen ya da hedefi değiştirilen çekirdek sürücülerini ve Windows servislerini bildirir (BYOVD görünürlüğü) |
 | ⏱️ **Zamanlanmış görev izleme** | Görev Zamanlayıcı'ya eklenen ya da hedefi değiştirilen, imzasız komut çalıştıran görevleri bildirir |
@@ -74,6 +81,7 @@ flowchart LR
 - Bazı sistem seviyesi koruma özellikleri için yönetici yetkisi
 - Güvenilir ve güncel bir Windows kurulumu
 - Önemli veriler için güncel yedek
+- İlk giriş için onaylı Neutron hesabı ve internet bağlantısı
 
 ## ⚠️ Önemli güvenlik uyarısı
 

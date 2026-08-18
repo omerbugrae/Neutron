@@ -6,9 +6,12 @@ const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const path = require('path');
 const { ProtonUpdater } = require('./proton-updater.cjs');
 const { FeatureUpdater } = require('./feature-updater.cjs');
+const { decryptStoredLicense, encryptStoredLicense } = require('./license.cjs');
 const {
-  decryptStoredLicense, deviceHash, encryptStoredLicense, parseLicense,
-} = require('./license.cjs');
+  signUp: supabaseSignUp, signInWithPassword: supabaseSignIn, refreshSession: supabaseRefreshSession,
+  createLicenseRequest, heartbeat: supabaseHeartbeat,
+  getOwnLicense: supabaseGetOwnLicense,
+} = require('./supabase-client.cjs');
 const {
   amsiRegistrationCommand,
   psQuoteSingle,
@@ -26,13 +29,22 @@ const NEUTRON_ICON_PATH = path.join(__dirname, '..', 'assets', 'neutron.ico');
 const isPrepareUninstallMode = process.argv.includes('--prepare-uninstall');
 const isProvisionSecurityMode = process.argv.includes('--provision-security');
 const isInstallProtonArchiveMode = process.argv.includes('--install-proton-archive');
-const isActivateLicenseFileMode = process.argv.includes('--activate-license-file');
-const isMaintenanceMode = isPrepareUninstallMode || isProvisionSecurityMode || isInstallProtonArchiveMode || isActivateLicenseFileMode;
+const isMaintenanceMode = isPrepareUninstallMode || isProvisionSecurityMode || isInstallProtonArchiveMode;
 
 // See startEnabledWatchers() for the rationale. Read through a function rather
 // than captured once so tools that spawn the app inherit it predictably.
 function isDevSafeMode() {
-  return process.env.NEUTRON_DEV_SAFE === '1';
+  return String(process.env.NEUTRON_DEV_SAFE || '').trim() === '1';
+}
+
+function devSafeBlock(action = 'Bu işlem') {
+  if (!isDevSafeMode()) return null;
+  return {
+    ok: false,
+    code: 'DEV_SAFE_MODE',
+    safeMode: true,
+    message: `Güvenli geliştirme modu: ${action.toLocaleLowerCase('tr-TR')} çalıştırılmadı.`,
+  };
 }
 
 app.setName('Neutron');
@@ -70,7 +82,6 @@ let isQuitting = false;
 let hasShownTrayHint = false;
 let protonUpdatePromise = null;
 let featureUpdatePromise = null;
-let activeLicense = null;
 let appSettings = {
   start_with_windows: false,
   protection_enabled: true,
@@ -98,6 +109,25 @@ let appSettings = {
   signature_update_last_success_at: 0,
   signature_update_last_error: '',
 };
+
+const DEV_SAFE_DISABLED_SETTINGS = new Set([
+  'start_with_windows',
+  'protection_enabled',
+  'behavior_protection_enabled',
+  'web_protection_enabled',
+  'amsi_protection_enabled',
+  'watchdog_protection_enabled',
+  'wsc_registration_enabled',
+  'cloud_lookup_enabled',
+  'ml_assisted_detection_enabled',
+  'network_protection_enabled',
+  'service_mode_enabled',
+  'memory_scan_enabled',
+  'usb_protection_enabled',
+  'ransomware_protection_enabled',
+  'scheduled_scan_enabled',
+  'signature_auto_update_enabled',
+]);
 
 function neutronImage(size) {
   const candidates = process.platform === 'win32'
@@ -141,310 +171,275 @@ function sendFeatureUpdateEvent(payload) {
 }
 
 function showMainWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+  if (activationWindow && !activationWindow.isDestroyed()) {
+    if (activationWindow.isMinimized()) activationWindow.restore();
+    activationWindow.show();
+    activationWindow.focus();
+    return;
+  }
+  if (licenseStatus().active) {
+    startLicensedRuntime({ forceShow: true }).catch((error) => {
+      console.error('Neutron arayüzü açılamadı:', error);
+    });
+  } else {
+    openActivationWindow(licenseStatus().status || 'none');
+  }
 }
 
-function userLicensePath() {
-  return path.join(app.getPath('userData'), 'license', 'activation.key');
-}
-
-function machineLicensePath() {
-  return path.join(process.env.ProgramData || 'C:\\ProgramData', 'Neutron', 'license', 'activation.key');
-}
-
-function readableLicensePaths() {
-  const userPath = userLicensePath();
-  const machinePath = machineLicensePath();
-  return app.isPackaged && machinePath !== userPath
-    ? [machinePath, userPath]
-    : [userPath];
-}
-
-// The licence is also kept in HKLM, and that is the copy the app trusts first.
+// --- Account / licensing (Supabase-backed) --------------------------------
 //
-// The installer activates while elevated and wrote only to
-// ProgramData\Neutron\license. Whether the desktop app -- a normal,
-// unelevated process, possibly a different account than the one that clicked
-// through UAC -- can then read that file depends on directory ACLs, on
-// ProgramData resolving the same way in both contexts, and on the folder
-// surviving. It did not, and the app asked for a licence that had already
-// been entered.
+// This replaced a fully offline, self-signed licence key: an ed25519
+// signature bound to a device hash, verifiable with no network at all. That
+// scheme had a real gap -- the verification algorithm is public (this is an
+// open-source repo), so binding is the only thing standing between "anyone"
+// and "a working key", and binding is just a hash a requester controls. A
+// Supabase row requires a human (you) to flip status to 'approved'; nothing
+// client-side can forge that.
 //
-// HKLM\SOFTWARE\Neutron has none of those failure modes: the elevated
-// installer can always write it, every user can always read it, and the
-// uninstaller already deletes the key. reg.exe is used rather than a native
-// module so no build dependency is added for four lines of registry access.
-const LICENSE_REGISTRY_KEY = 'HKLM\\SOFTWARE\\Neutron';
-const LICENSE_REGISTRY_VALUE = 'ActivationKey';
-
-function regExePath() {
-  return path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
+// The trade this makes explicit: a machine now needs to reach Supabase once
+// per LICENSE_CHECK_INTERVAL_MS and once at every cold start. See
+// refreshLicenseStatus() below for exactly what happens when it can't.
+function sessionFilePath() {
+  return path.join(app.getPath('userData'), 'license', 'session.json');
 }
 
-function readMachineLicenseFromRegistry() {
-  if (process.platform !== 'win32') return null;
+// In memory only, except for refreshToken, which is the one piece that has
+// to survive a restart -- accessToken is short-lived (about an hour) and
+// re-derived from refreshToken on every check, so persisting it would only
+// be a second copy of a secret that is about to expire anyway.
+let accountSession = null; // { userId, email, customerName, accessToken, refreshToken }
+
+function loadStoredSession() {
+  if (accountSession) return accountSession;
   try {
-    const output = execFileSync(
-      regExePath(),
-      ['query', LICENSE_REGISTRY_KEY, '/v', LICENSE_REGISTRY_VALUE, '/reg:64'],
-      { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
-    );
-    const match = new RegExp(`${LICENSE_REGISTRY_VALUE}\\s+REG_SZ\\s+([^\\r\\n]+)`, 'i').exec(output);
-    return match ? match[1].trim() : null;
+    const decrypted = decryptStoredLicense(readFileSync(sessionFilePath(), 'utf8').trim());
+    const parsed = JSON.parse(decrypted);
+    if (!parsed || typeof parsed.refreshToken !== 'string' || !parsed.refreshToken) return null;
+    accountSession = {
+      userId: parsed.userId || null,
+      email: parsed.email || null,
+      customerName: parsed.customerName || null,
+      accessToken: null,
+      refreshToken: parsed.refreshToken,
+    };
+    return accountSession;
   } catch {
-    // Absent value: reg.exe exits non-zero. Not an error, just no licence.
     return null;
   }
 }
 
-function writeMachineLicenseToRegistry(key) {
-  if (process.platform !== 'win32') return false;
-  // Dev-safe mode never touches HKLM. The file copy still works, so the app
-  // remains usable for development without leaving machine-wide state behind.
-  if (isDevSafeMode()) return false;
+function persistSession() {
+  if (!accountSession) return;
   try {
-    execFileSync(
-      regExePath(),
-      ['add', LICENSE_REGISTRY_KEY, '/v', LICENSE_REGISTRY_VALUE, '/t', 'REG_SZ',
-        '/d', String(key).trim(), '/f', '/reg:64'],
-      { windowsHide: true, stdio: 'ignore' },
-    );
-    return true;
-  } catch {
-    // Writing HKLM needs elevation. In-app activation by a normal user
-    // legitimately cannot do this, and falls back to the file copy.
-    return false;
-  }
+    const target = sessionFilePath();
+    mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    const payload = JSON.stringify({
+      userId: accountSession.userId,
+      email: accountSession.email,
+      customerName: accountSession.customerName || null,
+      refreshToken: accountSession.refreshToken,
+    });
+    // Reuses license.cjs's AES-256-GCM envelope (device-bound key derivation)
+    // unchanged -- it never encoded anything about the old key format, only
+    // "encrypt this string for this machine", which is exactly what a
+    // refresh token also needs.
+    writeFileSync(target, `${encryptStoredLicense(payload)}\n`, { encoding: 'utf8', mode: 0o600 });
+  } catch { /* best effort -- worst case, the next check has to sign in again */ }
 }
 
-function removeMachineLicenseFromRegistry() {
-  if (process.platform !== 'win32') return;
+function clearStoredSession() {
+  accountSession = null;
   try {
-    execFileSync(
-      regExePath(),
-      ['delete', LICENSE_REGISTRY_KEY, '/v', LICENSE_REGISTRY_VALUE, '/f', '/reg:64'],
-      { windowsHide: true, stdio: 'ignore' },
-    );
-  } catch { /* nothing stored, or not elevated */ }
+    const target = sessionFilePath();
+    if (existsSync(target)) require('fs').rmSync(target, { force: true });
+  } catch { /* not fatal: the in-memory session is already gone */ }
 }
 
-let activeLicensePath = null;
+let lastLicenseStatus = {
+  ok: true, active: false, status: 'checking', expired: false,
+  license: null, message: 'Hesap doğrulanıyor…',
+};
 
-// licenseStatus() spawns reg.exe synchronously and reads files. requireLicense()
-// calls it on every scan start, every settings write and every watcher start --
-// 17 call sites -- so each one blocked the main process, and with it the whole
-// UI, for the length of a subprocess spawn. The result only changes when the
-// licence is saved or removed, both of which clear this.
-const LICENSE_STATUS_CACHE_MS = 5000;
-let licenseStatusCache = null;
-let licenseStatusCachedAt = 0;
-
-function invalidateLicenseStatusCache() {
-  licenseStatusCache = null;
-  licenseStatusCachedAt = 0;
-}
-
+// Synchronous, O(1), and safe to call from all 18-odd requireLicense() sites:
+// it only ever reads the last result refreshLicenseStatus() computed. Nothing
+// here does I/O -- the whole point is that a settings write or a scan start
+// must never block the main process on a network round trip.
 function licenseStatus() {
-  if (licenseStatusCache && Date.now() - licenseStatusCachedAt < LICENSE_STATUS_CACHE_MS) {
-    return licenseStatusCache;
-  }
-  const status = computeLicenseStatus();
-  licenseStatusCache = status;
-  licenseStatusCachedAt = Date.now();
-  return status;
+  return lastLicenseStatus;
 }
 
-function computeLicenseStatus() {
-  // Every failure is recorded with the path it came from. The installer
-  // activates machine-wide into ProgramData, so when the app then claims to
-  // be unlicensed the useful question is always "which file, and why did it
-  // not parse" -- a bare "enter a licence" message hides whether the file is
-  // missing, unreadable, or bound to a different device hash.
-  const failures = [];
-
-  // Once a machine-wide copy has been read and accepted, keep a copy in this
-  // user's own profile. The machine-wide copies live in ProgramData and HKLM,
-  // both of which the app can only read, never repair; a profile copy is one
-  // this account always owns. Best effort -- failing to mirror must never
-  // turn a working licence into a blocked app.
-  // The mirror is written in the same envelope it was read in, never in the
-  // clear: this copy lands in the user's profile, which is the least
-  // protected of the three locations.
-  const mirrorToUserProfile = (key) => {
-    try {
-      const target = userLicensePath();
-      if (existsSync(target)) return;
-      mkdirSync(path.dirname(target), { recursive: true });
-      writeFileSync(target, `${encryptStoredLicense(key)}\n`, { encoding: 'utf8', mode: 0o600 });
-    } catch { /* the machine-wide copy still works */ }
-  };
-
-  const registryKey = readMachineLicenseFromRegistry();
-  if (registryKey) {
-    try {
-      const key = decryptStoredLicense(registryKey);
-      activeLicense = parseLicense(key);
-      activeLicensePath = LICENSE_REGISTRY_KEY;
-      mirrorToUserProfile(key);
-      return { ok: true, active: true, license: activeLicense };
-    } catch (error) {
-      failures.push({ path: LICENSE_REGISTRY_KEY, reason: error.message });
-    }
-  } else {
-    failures.push({ path: LICENSE_REGISTRY_KEY, reason: 'Kayıt bulunamadı.' });
+// The actual check. Called on startup (awaited, before watchers start) and
+// on the 15-minute watchdog timer -- see startLicenseWatchdog(). Never called
+// from inside an IPC handler that a renderer is synchronously waiting on.
+async function refreshLicenseStatus() {
+  const session = loadStoredSession();
+  if (!session) {
+    lastLicenseStatus = {
+      ok: true, active: false, status: 'none', expired: false, license: null,
+      message: 'Neutron kullanmak için bir hesap oluşturun veya giriş yapın.',
+    };
+    return lastLicenseStatus;
   }
 
-  for (const candidate of readableLicensePaths()) {
-    if (!existsSync(candidate)) {
-      failures.push({ path: candidate, reason: 'Dosya yok.' });
-      continue;
-    }
-    try {
-      const stored = decryptStoredLicense(readFileSync(candidate, 'utf8').trim());
-      activeLicense = parseLicense(stored);
-      activeLicensePath = candidate;
-      mirrorToUserProfile(stored);
-      return { ok: true, active: true, license: activeLicense };
-    } catch (error) {
-      const reason = error?.code === 'EACCES' || error?.code === 'EPERM'
-        ? `Dosya okunamadı (erişim reddedildi): ${error.message}`
-        : error.message;
-      failures.push({ path: candidate, reason });
-    }
-  }
-  activeLicense = null;
-  activeLicensePath = null;
-
-  let currentDeviceHash = null;
-  let deviceHashError = null;
   try {
-    currentDeviceHash = deviceHash();
+    const refreshed = await supabaseRefreshSession(session.refreshToken);
+    accountSession = {
+      userId: refreshed.user?.id || session.userId,
+      email: refreshed.user?.email || session.email,
+      customerName: refreshed.user?.user_metadata?.full_name || session.customerName || null,
+      accessToken: refreshed.access_token,
+      refreshToken: refreshed.refresh_token,
+    };
+    persistSession();
   } catch (error) {
-    deviceHashError = error.message;
+    if (error.status === 400 || error.status === 401) {
+      // The refresh token itself was rejected -- revoked, or already
+      // consumed by a rotation that happened elsewhere. Either way there is
+      // nothing left to retry; only a fresh sign-in recovers.
+      clearStoredSession();
+      lastLicenseStatus = {
+        ok: true, active: false, status: 'none', expired: false, license: null, message: 'Oturum süresi doldu. Yeniden giriş yapın.',
+      };
+      return lastLicenseStatus;
+    }
+    // Network failure or Supabase unreachable: the refresh token is still
+    // good, only this attempt failed. Deliberately not treated the same as
+    // 'none' -- a machine that has been offline for an hour is not the same
+    // situation as one that was never signed in, and the UI needs to be able
+    // to say so instead of asking the user to sign in again for no reason.
+    lastLicenseStatus = {
+      ok: true, active: false, status: 'offline', expired: false, license: { email: session.email },
+      message: error.message || 'Neutron hesap hizmetine ulaşılamadı.',
+    };
+    return lastLicenseStatus;
   }
 
-  // A licence file that exists but did not parse is a different situation
-  // from no licence at all, and the user needs to be told which one it is.
-  const presentButRejected = failures.find((failure) => failure.reason !== 'Dosya yok.');
-  // Expiry is singled out because it is the only failure the user can fix by
-  // renewing rather than by re-entering something. parseLicense reports it as
-  // a message, so it is matched here rather than being re-derived -- there is
-  // exactly one place that decides a licence has expired (license.cjs) and it
-  // should stay that way.
-  const expired = failures.some((failure) => /suresi dolmus/i.test(failure.reason || ''));
-  return {
-    ok: true,
-    active: false,
-    expired,
-    deviceHash: currentDeviceHash,
-    failures,
-    message: deviceHashError
-      || (expired
-        ? 'Neutron lisansınızın süresi doldu. Korumaların yeniden başlaması için lisansı yenileyin.'
-        : presentButRejected
-          ? `Lisans dosyası bulundu ama kabul edilmedi (${presentButRejected.path}): ${presentButRejected.reason}`
-          : 'Kurulum sırasında geçerli bir lisans girilmesi gerekiyor.'),
-  };
+  try {
+    const result = await supabaseHeartbeat(accountSession.accessToken, app.getVersion());
+    if (!result || result.status === 'none') {
+      lastLicenseStatus = {
+        ok: true, active: false, status: 'no-request', expired: false, license: { email: accountSession.email },
+        message: 'Hesabınıza bağlı bir lisans talebi bulunamadı.',
+      };
+      return lastLicenseStatus;
+    }
+    const expired = Boolean(result.expires_at) && Date.parse(result.expires_at) < Date.now();
+    const active = result.status === 'approved' && !expired;
+
+    // Display-only: customer_name/edition are not part of the security
+    // decision above (that is heartbeat()'s job alone), so a failure here
+    // must never turn an otherwise-active licence inactive.
+    let row = null;
+    try { row = await supabaseGetOwnLicense(accountSession.accessToken); } catch { /* cosmetic only */ }
+
+    lastLicenseStatus = {
+      ok: true,
+      active,
+      status: expired ? 'expired' : result.status,
+      expired,
+      license: {
+        email: accountSession.email,
+        customerName: (row && row.customer_name) || accountSession.customerName || null,
+        edition: (row && row.edition) || 'Standard',
+        expiresAt: result.expires_at || null,
+      },
+      message: expired
+          ? 'Lisansınızın süresi doldu.'
+          : result.status === 'pending'
+            ? 'Hesabınız onay bekliyor.'
+            : result.status === 'revoked'
+              ? 'Bu lisans iptal edildi.'
+              : result.status === 'rejected'
+                ? 'Lisans talebiniz reddedildi.'
+                : null,
+    };
+  } catch (error) {
+    lastLicenseStatus = {
+      ok: true, active: false, status: 'offline', expired: false, license: { email: accountSession.email },
+      message: error.message || 'Neutron hesap hizmetine ulaşılamadı.',
+    };
+  }
+  return lastLicenseStatus;
 }
 
 function requireLicense() {
   const status = licenseStatus();
-  return status.active ? null : { ok: false, code: 'LICENSE_REQUIRED', message: 'Neutron etkinleştirilmedi.' };
+  return status.active ? null : { ok: false, code: 'LICENSE_REQUIRED', message: status.message || 'Neutron etkinleştirilmedi.' };
 }
 
-// deviceHash() now throws on Windows rather than silently substituting a
-// per-user identity (see license.cjs). Callers that only want it for display
-// must not turn that into an unhandled failure of their own operation.
-function safeDeviceHash() {
+// Inserts this account's licenses row, tolerating the case where it already
+// exists (23505 = Postgres unique_violation on the user_id primary key).
+// That happens legitimately: sign-up with email confirmation enabled cannot
+// create the row at sign-up time (there is no access token yet), so it is
+// deferred to the first successful sign-in -- which may run this more than
+// once if the user signs in, closes the app, and signs in again before ever
+// getting approved.
+async function ensureLicenseRequest(displayName) {
   try {
-    return deviceHash();
-  } catch {
-    return null;
-  }
-}
-
-function saveLicense(key, options = {}) {
-  try {
-    const license = parseLicense(String(key || ''));
-    const target = options.machineWide ? machineLicensePath() : userLicensePath();
-    mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-    // Both copies go down in the same envelope. The registry one especially:
-    // HKLM\Software\Neutron is world-readable by design (every account has to
-    // be able to see the activation), so a plaintext key there was readable by
-    // any process on the machine.
-    const stored = encryptStoredLicense(key);
-    writeFileSync(target, `${stored}\n`, { encoding: 'utf8', mode: 0o600 });
-    // Machine-wide activation is the installer's path, and it runs elevated,
-    // so this is where the registry copy every account can read gets written.
-    // The file above stays as the fallback and for unelevated in-app activation.
-    if (options.machineWide) writeMachineLicenseToRegistry(stored);
-    activeLicense = license;
-    activeLicensePath = target;
-    invalidateLicenseStatusCache();
-    return { ok: true, active: true, license };
+    await createLicenseRequest(accountSession.accessToken, displayName || accountSession.email);
   } catch (error) {
-    invalidateLicenseStatusCache();
-    return { ok: false, active: false, deviceHash: safeDeviceHash(), message: error.message };
+    if (error.code !== '23505') throw error;
   }
 }
 
-function removeStoredLicense() {
-  // Each copy is removed independently. Chained in one try block, an
-  // unelevated user hitting EPERM on the ProgramData copy aborted the rest:
-  // the registry entry survived, in-memory state was never cleared, and the
-  // app stayed licensed while reporting failure.
-  const failed = [];
-  for (const target of readableLicensePaths()) {
-    try {
-      if (existsSync(target)) require('fs').rmSync(target, { force: true });
-    } catch (error) {
-      failed.push(`${target}: ${error.message}`);
+async function accountSignUp(email, password, customerName) {
+  const cleanEmail = String(email || '').trim();
+  const cleanName = String(customerName || '').trim();
+  try {
+    const result = await supabaseSignUp(cleanEmail, String(password || ''), { full_name: cleanName || undefined });
+    if (!result?.session) {
+      // Email confirmation is required: Supabase returns a user but no
+      // session. The licenses row is created on first sign-in instead (see
+      // ensureLicenseRequest), once there is an access token to create it
+      // with.
+      return {
+        ok: true, needsEmailConfirmation: true,
+        message: 'Hesap oluşturuldu. Giriş yapmadan önce e-postanıza gelen bağlantıyı onaylayın.',
+      };
     }
-  }
-  try {
-    removeMachineLicenseFromRegistry();
-  } catch (error) {
-    failed.push(`${LICENSE_REGISTRY_KEY}: ${error.message}`);
-  }
-  activeLicense = null;
-  activeLicensePath = null;
-  invalidateLicenseStatusCache();
-  if (failed.length) {
-    return {
-      ok: false,
-      active: licenseStatus().active,
-      deviceHash: safeDeviceHash(),
-      message: `Bazı lisans kopyaları kaldırılamadı (yönetici izni gerekebilir): ${failed.join(' | ')}`,
+    accountSession = {
+      userId: result.user.id, email: result.user.email,
+      customerName: cleanName || result.user.user_metadata?.full_name || null,
+      accessToken: result.session.access_token, refreshToken: result.session.refresh_token,
     };
+    persistSession();
+    await ensureLicenseRequest(cleanName);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: error.message };
   }
-  return { ok: true, active: false, deviceHash: safeDeviceHash() };
 }
 
-function revealStoredLicense() {
-  const status = licenseStatus();
-  if (!status.active) return { ok: false, message: 'Gösterilecek etkin lisans yok.' };
-  // activeLicensePath is a registry key, not a file path, when the licence
-  // came from HKLM -- reading it as a file would throw.
-  if (activeLicensePath === LICENSE_REGISTRY_KEY) {
-    const stored = readMachineLicenseFromRegistry();
-    if (!stored) return { ok: false, message: 'Kayıtlı lisans okunamadı.' };
-    try {
-      return { ok: true, key: decryptStoredLicense(stored) };
-    } catch (error) {
-      return { ok: false, message: `Kayıtlı lisans okunamadı: ${error.message}` };
-    }
-  }
-  // The file was readable when licenseStatus() ran, but that may have been up
-  // to the cache lifetime ago; an unguarded read here throws through the IPC
-  // handler instead of returning a result the renderer can display.
+async function accountSignIn(email, password) {
   try {
-    return { ok: true, key: decryptStoredLicense(readFileSync(activeLicensePath, 'utf8').trim()) };
+    const result = await supabaseSignIn(String(email || '').trim(), String(password || ''));
+    accountSession = {
+      userId: result.user.id, email: result.user.email,
+      customerName: result.user.user_metadata?.full_name || null,
+      accessToken: result.access_token, refreshToken: result.refresh_token,
+    };
+    persistSession();
+    // Covers the deferred sign-up case above; a no-op (23505, swallowed) for
+    // every sign-in after the first.
+    await ensureLicenseRequest(result.user.user_metadata?.full_name);
+    return { ok: true };
   } catch (error) {
-    return { ok: false, message: `Lisans dosyası okunamadı: ${error.message}` };
+    return { ok: false, message: error.message };
   }
+}
+
+function accountSignOut() {
+  clearStoredSession();
+  lastLicenseStatus = {
+    ok: true, active: false, status: 'none', expired: false, license: null, message: null,
+  };
+  return { ok: true };
 }
 
 function openProtectionEvent(eventId) {
@@ -653,6 +648,8 @@ function amsiDllPath() {
 // (0xC0000374) before it can report anything, and the failure looks like
 // "registration failed" when registration in fact succeeded.
 function runRegsvr32Directly(dllPath, unregister) {
+  const safeModeError = devSafeBlock('AMSI kayıt işlemi');
+  if (safeModeError) return Promise.resolve(safeModeError);
   const regsvr32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'regsvr32.exe');
   const args = unregister ? ['/s', '/u', dllPath] : ['/s', dllPath];
   return new Promise((resolve) => {
@@ -1007,6 +1004,8 @@ const AUDIT_FIXES = {
 };
 
 function applyAuditFix(fixId) {
+  const safeModeError = devSafeBlock('Sistem denetimi düzeltmesi');
+  if (safeModeError) return Promise.resolve(safeModeError);
   if (!Object.prototype.hasOwnProperty.call(AUDIT_FIXES, fixId)) {
     return Promise.resolve({ ok: false, message: 'Bilinmeyen düzeltme.' });
   }
@@ -1014,7 +1013,7 @@ function applyAuditFix(fixId) {
   if (process.platform !== 'win32') {
     return Promise.resolve({ ok: false, message: 'Bu düzeltme yalnızca Windows üzerinde çalışır.' });
   }
-  return runPowerShell(fix.command, { elevated: fix.elevated !== false });
+  return runElevatedPowerShell(fix.command, { elevated: fix.elevated !== false });
 }
 
 // Startup manager: only HKLM registry values and the all-users Startup
@@ -1210,6 +1209,7 @@ function handleServiceEvent(event) {
 }
 
 function connectServicePipe() {
+  if (isDevSafeMode()) return;
   if (serviceSocket) return;
   const socket = net.createConnection(SERVICE_PIPE_NAME);
   serviceSocket = socket;
@@ -1265,6 +1265,8 @@ function disconnectServicePipe() {
 // existing event-driven style rather than adding request/response
 // correlation for a pipe that only ever has one client (the UI itself).
 function sendServiceCommand(command) {
+  const safeModeError = devSafeBlock('Koruma servisi komutu');
+  if (safeModeError) return safeModeError;
   if (!serviceSocket || !serviceConnected) {
     return { ok: false, message: 'Koruma servisine bağlı değil.' };
   }
@@ -1297,6 +1299,8 @@ function compareVersions(a, b) {
 }
 
 function checkForAppUpdate() {
+  if (isDevSafeMode()) return;
+  if (!licenseStatus().active) return;
   if (!app.isPackaged || process.platform !== 'win32') return;
   const request = https.get(
     UPDATE_CHECK_API_URL,
@@ -1338,7 +1342,9 @@ function checkForAppUpdate() {
 }
 
 function startUpdateChecks() {
+  if (isDevSafeMode()) return;
   if (!app.isPackaged || process.platform !== 'win32') return;
+  if (updateCheckTimer) return;
   setTimeout(checkForAppUpdate, 30_000);
   updateCheckTimer = setInterval(checkForAppUpdate, UPDATE_CHECK_INTERVAL_MS);
 }
@@ -1592,7 +1598,42 @@ function readScanHistory() {
   });
 }
 
+const DEV_SAFE_ENGINE_MUTATIONS = new Set([
+  '--setting-set',
+  '--cache-clear',
+  '--install-proton-stdin',
+  '--rollback-proton',
+  '--exclusion-add-folder',
+  '--exclusion-add-extension',
+  '--exclusion-add-hash',
+  '--exclusion-remove',
+  '--quarantine',
+  '--restore',
+  '--delete-quarantine',
+  '--firewall-add-rule',
+  '--firewall-remove-rule',
+  '--firewall-toggle-rule',
+  '--startup-disable',
+  '--startup-cancel-disable',
+  '--startup-finalize-disable',
+  '--startup-restore',
+  '--startup-finalize-restore',
+  '--incident-remediate',
+  '--incident-record-firewall',
+  '--incident-finalize-external-rollback',
+  '--incident-rollback',
+  '--protection-action',
+  '--temp-clean',
+  '--memory-trim',
+]);
+
 function runEngineAction(argumentsList, expectedType, options = {}) {
+  const mutation = Array.isArray(argumentsList)
+    && argumentsList.find((argument) => DEV_SAFE_ENGINE_MUTATIONS.has(String(argument)));
+  if (mutation) {
+    const safeModeError = devSafeBlock(`Motor değişikliği (${mutation})`);
+    if (safeModeError) return Promise.resolve(safeModeError);
+  }
   const engine = resolveEngine(argumentsList);
   return new Promise((resolve) => {
     const hasInput = typeof options.stdin === 'string' || Buffer.isBuffer(options.stdin);
@@ -1621,6 +1662,8 @@ function runEngineAction(argumentsList, expectedType, options = {}) {
 }
 
 async function runExclusionMutation(argumentsList) {
+  const safeModeError = devSafeBlock('İstisna değişikliği');
+  if (safeModeError) return safeModeError;
   const restartProtection = Boolean(protectionWatcher);
   if (restartProtection) stopProtectionWatcher({ silent: true });
   try {
@@ -1668,6 +1711,8 @@ function featureUpdateMessage(error) {
 }
 
 async function performFeatureUpdate() {
+  const safeModeError = devSafeBlock('Feature Update kurulumu');
+  if (safeModeError) return safeModeError;
   if (featureUpdatePromise) return featureUpdatePromise;
   featureUpdatePromise = (async () => {
     try {
@@ -1757,6 +1802,8 @@ async function rollBackRevokedProton(status, check) {
 }
 
 async function performProtonUpdate(options = {}) {
+  const safeModeError = devSafeBlock('Proton güncellemesi');
+  if (safeModeError) return safeModeError;
   if (protonUpdatePromise) return protonUpdatePromise;
   protonUpdatePromise = (async () => {
     let restartProtection = false;
@@ -1831,6 +1878,8 @@ async function performProtonUpdate(options = {}) {
 }
 
 async function rollbackProtonUpdate(version = '') {
+  const safeModeError = devSafeBlock('Proton geri alma işlemi');
+  if (safeModeError) return safeModeError;
   const restartProtection = Boolean(protectionWatcher);
   try {
     if (restartProtection) stopProtectionWatcher({ silent: true });
@@ -1851,10 +1900,18 @@ async function rollbackProtonUpdate(version = '') {
 async function readAppSettings() {
   const result = await runEngineAction(['--settings'], 'settings');
   if (result.ok && result.settings) appSettings = { ...appSettings, ...result.settings };
+  if (isDevSafeMode()) {
+    // Safe mode presents an inert in-memory view without rewriting the user's
+    // real preferences. A later normal launch therefore gets the exact
+    // settings it had before development mode was entered.
+    for (const key of DEV_SAFE_DISABLED_SETTINGS) appSettings[key] = false;
+  }
   return { ok: result.ok, settings: appSettings, message: result.message };
 }
 
 async function writeAppSetting(key, value) {
+  const safeModeError = devSafeBlock('Uygulama ayarı değişikliği');
+  if (safeModeError) return safeModeError;
   const result = await runEngineAction(
     ['--setting-set', key, '--value-json', JSON.stringify(value)],
     'settings-updated'
@@ -1864,6 +1921,8 @@ async function writeAppSetting(key, value) {
 }
 
 function startScan(webContents, options = {}) {
+  const safeModeError = devSafeBlock('Tarama motoru');
+  if (safeModeError) return safeModeError;
   const licenseError = requireLicense();
   if (licenseError) return licenseError;
   if (activeScan) {
@@ -1980,6 +2039,7 @@ const SCHEDULED_SCAN_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let scheduledScanTimer = null;
 
 function runScheduledScanIfDue() {
+  if (isDevSafeMode()) return;
   if (!appSettings.scheduled_scan_enabled) return;
   // In service mode the service owns the schedule (watch_scheduler in
   // engine.py). Letting both run would mean two quick scans a day writing
@@ -2030,6 +2090,8 @@ const SIGNATURE_UPDATE_TIMER_INTERVAL_MS = 60 * 60 * 1000;
 let signatureUpdateTimer = null;
 
 function runAutomaticSignatureUpdateIfDue() {
+  if (isDevSafeMode()) return;
+  if (!licenseStatus().active) return;
   if (!appSettings.signature_auto_update_enabled || protonUpdatePromise) return;
   const intervalHours = Math.max(1, Math.min(Number(appSettings.signature_update_interval_hours) || 6, 24));
   const lastCheckAt = Number(appSettings.signature_update_last_check_at) || 0;
@@ -2049,6 +2111,7 @@ const FEATURE_KILLSWITCH_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let lastFeatureKillSwitchCheckAt = 0;
 
 async function runAutomaticFeatureKillSwitchCheckIfDue() {
+  if (isDevSafeMode()) return;
   if (featureUpdatePromise) return;
   if (Date.now() - lastFeatureKillSwitchCheckAt < FEATURE_KILLSWITCH_CHECK_INTERVAL_MS) return;
   const updater = createFeatureUpdater();
@@ -2070,6 +2133,7 @@ function startAutomaticSignatureUpdateTimer() {
   // Feature Update kill switch check which can quarantine the model
   // directory. Both write state; neither belongs on a development machine.
   if (isDevSafeMode()) return;
+  if (!licenseStatus().active) return;
   if (signatureUpdateTimer) return;
   const tick = () => {
     runAutomaticSignatureUpdateIfDue();
@@ -2086,7 +2150,8 @@ function protectionStatus() {
   // null by design -- and has to follow the service connection instead.
   // Reading them anyway is what left AMSI and web protection reporting
   // "Başlatılıyor" forever while the service was in fact running them.
-  const viaService = Boolean(appSettings.service_mode_enabled);
+  const safeMode = isDevSafeMode();
+  const viaService = Boolean(!safeMode && appSettings.service_mode_enabled);
   const moduleReady = (configured, localWatcher) => (viaService
     ? Boolean(configured && serviceConnected)
     : Boolean(localWatcher?.ready));
@@ -2096,39 +2161,42 @@ function protectionStatus() {
 
   return {
     ok: true,
+    safeMode,
     enabled: moduleRunning(appSettings.protection_enabled, protectionWatcher),
     ready: moduleReady(appSettings.protection_enabled, protectionWatcher),
     behaviorEnabled: moduleRunning(appSettings.behavior_protection_enabled, behaviorWatcher),
     behaviorReady: moduleReady(appSettings.behavior_protection_enabled, behaviorWatcher),
-    behaviorConfigured: Boolean(appSettings.behavior_protection_enabled),
+    behaviorConfigured: Boolean(!safeMode && appSettings.behavior_protection_enabled),
     webEnabled: moduleRunning(appSettings.web_protection_enabled, webWatcher),
     webReady: moduleReady(appSettings.web_protection_enabled, webWatcher),
-    webConfigured: Boolean(appSettings.web_protection_enabled),
+    webConfigured: Boolean(!safeMode && appSettings.web_protection_enabled),
     amsiEnabled: moduleRunning(appSettings.amsi_protection_enabled, amsiService),
     amsiReady: moduleReady(appSettings.amsi_protection_enabled, amsiService),
-    amsiConfigured: Boolean(appSettings.amsi_protection_enabled),
-    watchdogConfigured: Boolean(appSettings.watchdog_protection_enabled),
-    wscConfigured: Boolean(appSettings.wsc_registration_enabled),
+    amsiConfigured: Boolean(!safeMode && appSettings.amsi_protection_enabled),
+    watchdogConfigured: Boolean(!safeMode && appSettings.watchdog_protection_enabled),
+    wscConfigured: Boolean(!safeMode && appSettings.wsc_registration_enabled),
     wscAvailable: false,
     wscMessage: 'Windows Güvenlik Merkezi ve Microsoft Defender normal durumda bırakılır; eski Neutron test kaydı kurulumda temizlenir.',
     networkEnabled: moduleRunning(appSettings.network_protection_enabled, networkWatcher),
     networkReady: moduleReady(appSettings.network_protection_enabled, networkWatcher),
-    networkConfigured: Boolean(appSettings.network_protection_enabled),
-    serviceConfigured: Boolean(appSettings.service_mode_enabled),
+    networkConfigured: Boolean(!safeMode && appSettings.network_protection_enabled),
+    serviceConfigured: Boolean(!safeMode && appSettings.service_mode_enabled),
     serviceConnected: Boolean(serviceConnected),
     memoryEnabled: moduleRunning(appSettings.memory_scan_enabled, memoryWatcher),
     memoryReady: moduleReady(appSettings.memory_scan_enabled, memoryWatcher),
-    memoryConfigured: Boolean(appSettings.memory_scan_enabled),
+    memoryConfigured: Boolean(!safeMode && appSettings.memory_scan_enabled),
     usbEnabled: moduleRunning(appSettings.usb_protection_enabled, usbWatcher),
     usbReady: moduleReady(appSettings.usb_protection_enabled, usbWatcher),
-    usbConfigured: Boolean(appSettings.usb_protection_enabled),
+    usbConfigured: Boolean(!safeMode && appSettings.usb_protection_enabled),
     ransomwareEnabled: moduleRunning(appSettings.ransomware_protection_enabled, ransomwareWatcher),
     ransomwareReady: moduleReady(appSettings.ransomware_protection_enabled, ransomwareWatcher),
-    ransomwareConfigured: Boolean(appSettings.ransomware_protection_enabled),
+    ransomwareConfigured: Boolean(!safeMode && appSettings.ransomware_protection_enabled),
   };
 }
 
 function startWebWatcher() {
+  const safeModeError = devSafeBlock('Web koruması');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (webWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-web', '--exit-with-parent']);
@@ -2168,6 +2236,8 @@ function stopWebWatcher(options = {}) {
 }
 
 function startBehaviorWatcher() {
+  const safeModeError = devSafeBlock('Davranış izleme');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (behaviorWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-behavior', '--exit-with-parent']);
@@ -2235,6 +2305,8 @@ function stopBehaviorWatcher(options = {}) {
 }
 
 function startNetworkWatcher() {
+  const safeModeError = devSafeBlock('Ağ izleme');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (networkWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-network', '--exit-with-parent']);
@@ -2305,6 +2377,8 @@ function stopNetworkWatcher(options = {}) {
 // (needed to read other users'/higher-integrity processes' memory) is
 // only reliably available when this runs inside the LocalSystem service.
 function startMemoryWatcher() {
+  const safeModeError = devSafeBlock('Bellek izleme');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (memoryWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-memory', '--exit-with-parent']);
@@ -2372,6 +2446,8 @@ function stopMemoryWatcher(options = {}) {
 }
 
 function startUsbWatcher() {
+  const safeModeError = devSafeBlock('USB koruması');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (usbWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-usb', '--exit-with-parent']);
@@ -2442,6 +2518,8 @@ function stopUsbWatcher(options = {}) {
 }
 
 function startRansomwareWatcher() {
+  const safeModeError = devSafeBlock('Fidye yazılımı koruması');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (ransomwareWatcher) return protectionStatus();
   const engine = resolveEngine(['--watch-ransomware', '--exit-with-parent']);
@@ -2516,6 +2594,8 @@ function stopRansomwareWatcher(options = {}) {
 }
 
 function startAmsiService() {
+  const safeModeError = devSafeBlock('AMSI çalışma zamanı');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (amsiService) return protectionStatus();
   const engine = resolveEngine(['--amsi-service', '--exit-with-parent']);
@@ -2585,6 +2665,8 @@ function stopAmsiService(options = {}) {
 }
 
 function startProtectionWatcher() {
+  const safeModeError = devSafeBlock('Gerçek zamanlı dosya koruması');
+  if (safeModeError) return safeModeError;
   if (requireLicense()) return;
   if (protectionWatcher) return protectionStatus();
 
@@ -2746,6 +2828,7 @@ const WATCHER_RESTART_LIMIT = 5;
 const watcherRestartCounts = new Map();
 
 function scheduleWatcherRestart(key, isEnabled, start) {
+  if (isDevSafeMode()) return false;
   const attempts = (watcherRestartCounts.get(key) || 0) + 1;
   if (!isEnabled() || attempts > WATCHER_RESTART_LIMIT) return false;
   watcherRestartCounts.set(key, attempts);
@@ -2769,7 +2852,7 @@ function noteWatcherHealthy(key) {
 // tray, or was never shown because the app started with --hidden.
 let activationWindow = null;
 
-function openActivationWindow(reason = 'missing') {
+function openActivationWindow(reason = 'none') {
   if (activationWindow && !activationWindow.isDestroyed()) {
     if (activationWindow.isMinimized()) activationWindow.restore();
     activationWindow.show();
@@ -2778,13 +2861,15 @@ function openActivationWindow(reason = 'missing') {
   }
   const applicationIcon = neutronImage();
   activationWindow = new BrowserWindow({
-    width: 560,
-    height: 620,
+    width: 980,
+    height: 680,
+    minWidth: 860,
+    minHeight: 620,
     resizable: false,
     minimizable: true,
     maximizable: false,
     frame: false,
-    backgroundColor: '#050a18',
+    backgroundColor: '#070a0d',
     show: false,
     icon: applicationIcon || NEUTRON_ICON_PATH,
     // Not parented to mainWindow on purpose: mainWindow may not exist, and a
@@ -2801,7 +2886,15 @@ function openActivationWindow(reason = 'missing') {
     activationWindow?.show();
     activationWindow?.focus();
   });
-  activationWindow.on('closed', () => { activationWindow = null; });
+  activationWindow.on('closed', () => {
+    activationWindow = null;
+    // In locked mode the account window is the whole application. Closing it
+    // must not leave a tray icon, timer, or headless Electron process behind.
+    if (!licenseStatus().active && !isQuitting) {
+      isQuitting = true;
+      app.quit();
+    }
+  });
   activationWindow.loadFile(path.join(__dirname, 'activation.html'), {
     query: { reason: String(reason) },
   });
@@ -2845,6 +2938,28 @@ function stopAllWatchers(options = { silent: true }) {
   stopRansomwareWatcher(options);
 }
 
+function stopLicensedRuntime() {
+  stopAllWatchers({ silent: true });
+  if (activeScan?.child) {
+    try { activeScan.child.kill(); } catch { /* already stopped */ }
+  }
+  activeScan = null;
+
+  for (const timer of [updateCheckTimer, scheduledScanTimer, signatureUpdateTimer]) {
+    if (timer) clearInterval(timer);
+  }
+  updateCheckTimer = null;
+  scheduledScanTimer = null;
+  signatureUpdateTimer = null;
+
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.destroy();
+  mainWindow = null;
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
+}
+
 function notifyLicenseLapsed(reason) {
   if (!appSettings.notifications_enabled || !Notification.isSupported()) return;
   new Notification({
@@ -2860,42 +2975,40 @@ function notifyLicenseLapsed(reason) {
 function enforceLicenseState(options = {}) {
   const status = licenseStatus();
   if (status.active) {
-    if (licenseWasActive === false) {
-      // Recovered: close the activation window and bring protection back.
-      closeActivationWindow();
-      startEnabledWatchers();
-      updateTrayMenu();
-    }
+    const recovered = licenseWasActive === false;
     licenseWasActive = true;
     lastLicenseReminderAt = 0;
+    closeActivationWindow();
+    startLicensedRuntime({ forceShow: recovered || options.forceWindow }).catch((error) => {
+      console.error('Neutron lisanslı çalışma alanı başlatılamadı:', error);
+    });
     return true;
   }
 
-  // Distinguishing expiry from a missing licence matters to the user: one is
-  // "renew", the other is "you never activated this".
-  const reason = status.expired ? 'expired' : (status.license || status.failures?.length ? 'invalid' : 'missing');
+  const reason = status.status || 'none';
   const justLapsed = licenseWasActive !== false;
   licenseWasActive = false;
-
-  stopAllWatchers();
-  updateTrayMenu();
-
   const now = Date.now();
   if (justLapsed || now - lastLicenseReminderAt >= LICENSE_REMINDER_INTERVAL_MS) {
     lastLicenseReminderAt = now;
-    notifyLicenseLapsed(reason);
     openActivationWindow(justLapsed ? reason : 'reminder');
+    if (!options.silent) notifyLicenseLapsed(reason);
   } else if (options.forceWindow) {
     openActivationWindow(reason);
   }
+  // Create the account surface before destroying the main renderer so
+  // Electron never observes a licensed-to-locked transition with zero
+  // windows and mistakes it for an application shutdown.
+  stopLicensedRuntime();
   return false;
 }
 
 function startLicenseWatchdog() {
   if (licenseCheckTimer) return;
   licenseCheckTimer = setInterval(() => {
-    invalidateLicenseStatusCache();
-    enforceLicenseState();
+    refreshLicenseStatus().then(() => enforceLicenseState()).catch((error) => {
+      console.error('Hesap durumu yenilenemedi:', error);
+    });
   }, LICENSE_CHECK_INTERVAL_MS);
 }
 
@@ -2957,7 +3070,6 @@ async function createWindow() {
   if (applicationIcon && process.platform === 'win32') window.setIcon(applicationIcon);
 
   mainWindow = window;
-  createTray();
   window.once('ready-to-show', () => {
     if (!startHidden) window.show();
   });
@@ -2982,25 +3094,69 @@ async function createWindow() {
     if (mainWindow === window) mainWindow = null;
   });
 
-  await readAppSettings();
-
   // Watchers must not start until the renderer is listening. They emit their
   // readiness events immediately ('watch-ready', 'service-connected'), and
   // anything sent before loadFile() resolves lands on a webContents with no
   // listeners and is dropped -- leaving modules stuck on "Başlatılıyor" in the
   // UI even though the process behind them was running fine.
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
+  return window;
+}
 
-  // Runs before the watchers: if the licence has lapsed this stops them being
-  // started at all and opens the activation window, rather than starting
-  // protection and tearing it down again a moment later.
-  enforceLicenseState({ forceWindow: true });
+let licensedRuntimePromise = null;
+
+async function startLicensedRuntime(options = {}) {
+  if (!licenseStatus().active) return null;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (options.forceShow) showMainWindow();
+    return mainWindow;
+  }
+  if (licensedRuntimePromise) return licensedRuntimePromise;
+
+  licensedRuntimePromise = (async () => {
+    const window = await createWindow();
+    // The account may have been revoked while the renderer was loading.
+    if (!licenseStatus().active) {
+      stopLicensedRuntime();
+      openActivationWindow(licenseStatus().status || 'none');
+      return null;
+    }
+    createTray();
+    startEnabledWatchers();
+    startUpdateChecks();
+    startScheduledScanTimer();
+    startAutomaticSignatureUpdateTimer();
+    if (options.forceShow && window && !window.isDestroyed()) {
+      window.show();
+      window.focus();
+    }
+    return window;
+  })().finally(() => { licensedRuntimePromise = null; });
+  return licensedRuntimePromise;
+}
+
+async function startApplication() {
+  // Licensing is the startup gate. Until this resolves no main renderer,
+  // tray, scanner, updater, or protection child process is created.
+  await readAppSettings();
+  await refreshLicenseStatus();
+  // Watchdog/Windows-start launches are intentionally invisible. If the
+  // account is no longer valid, do not let an automatic --hidden launch turn
+  // into either a background process or an unsolicited sign-in popup. A
+  // normal user launch still opens the account window below.
+  if (!licenseStatus().active && process.argv.includes('--hidden')) {
+    isQuitting = true;
+    app.quit();
+    return;
+  }
   startLicenseWatchdog();
-
-  startEnabledWatchers();
-  startUpdateChecks();
-  startScheduledScanTimer();
-  startAutomaticSignatureUpdateTimer();
+  if (licenseStatus().active) {
+    licenseWasActive = true;
+    await startLicensedRuntime();
+    return;
+  }
+  licenseWasActive = false;
+  enforceLicenseState({ forceWindow: true, silent: true });
 }
 
 Menu.setApplicationMenu(null);
@@ -3024,21 +3180,38 @@ ipcMain.on('activation:close', (event) => {
 });
 
 ipcMain.handle('license:status', () => licenseStatus());
-ipcMain.handle('license:activate', (_event, key) => {
-  const result = saveLicense(key);
-  if (result.ok) {
-    // enforceLicenseState does the whole recovery -- restart the watchers,
-    // refresh the tray and close the activation window -- so the success path
-    // is the same one the watchdog takes. Duplicating it here is how the two
-    // drift apart.
-    invalidateLicenseStatusCache();
+
+// Every mutating account handler below does the same three things on
+// success: recompute status against Supabase, reset licenseWasActive so
+// enforceLicenseState treats this as a fresh transition (not a no-op repeat
+// of whatever it decided 15 minutes ago), then let it do the one real
+// recovery/teardown path -- restart watchers, refresh the tray, open or
+// close the activation window. Duplicating that here is how the two drift
+// apart, the same reasoning the old license:activate handler already used.
+async function applyAccountResult(result) {
+  if (result.ok && !result.needsEmailConfirmation) {
+    await refreshLicenseStatus();
     licenseWasActive = false;
     enforceLicenseState();
   }
   return result;
+}
+
+ipcMain.handle('account:sign-up', (_event, email, password, customerName) =>
+  accountSignUp(email, password, customerName).then(applyAccountResult));
+ipcMain.handle('account:sign-in', (_event, email, password) =>
+  accountSignIn(email, password).then(applyAccountResult));
+ipcMain.handle('account:sign-out', () => {
+  const result = accountSignOut();
+  licenseWasActive = false;
+  enforceLicenseState({ forceWindow: true, silent: true });
+  return result;
 });
-ipcMain.handle('license:deactivate', () => removeStoredLicense());
-ipcMain.handle('license:reveal', () => revealStoredLicense());
+ipcMain.handle('account:refresh', () => refreshLicenseStatus().then(() => {
+  licenseWasActive = false;
+  enforceLicenseState();
+  return licenseStatus();
+}));
 
 ipcMain.handle('scan:start', (event) => startScan(event.sender));
 ipcMain.handle('scan:cancel', () => cancelScan());
@@ -3170,8 +3343,15 @@ ipcMain.handle('protection:service-status', () => ({
   connected: serviceConnected,
   configured: Boolean(appSettings.service_mode_enabled),
 }));
-ipcMain.handle('app:get-version', () => ({ ok: true, version: app.getVersion(), packaged: app.isPackaged }));
+ipcMain.handle('app:get-version', () => ({
+  ok: true,
+  version: app.getVersion(),
+  packaged: app.isPackaged,
+  safeMode: isDevSafeMode(),
+}));
 ipcMain.handle('app:check-for-update', () => {
+  const safeModeError = devSafeBlock('Uygulama güncelleme denetimi');
+  if (safeModeError) return safeModeError;
   if (!app.isPackaged || process.platform !== 'win32') {
     return { ok: false, message: 'Güncelleme denetimi yalnızca kurulu (paketlenmiş) sürümde çalışır.' };
   }
@@ -3179,6 +3359,8 @@ ipcMain.handle('app:check-for-update', () => {
   return { ok: true, latestUpdateInfo };
 });
 ipcMain.handle('app:prepare-uninstall', async () => {
+  const safeModeError = devSafeBlock('Sistem bileşenlerini kaldırma hazırlığı');
+  if (safeModeError) return safeModeError;
   return await cleanupPrivilegedComponentsOnUninstall();
 });
 ipcMain.handle('web:check-url', (_event, url) => requireLicense() || runEngineAction(['--check-url', String(url || '')], 'url-reputation'));
@@ -3190,6 +3372,8 @@ ipcMain.handle('web:open-url', async (_event, url) => {
 });
 ipcMain.handle('protection:history', () => runEngineAction(['--protection-history', '--limit', '20'], 'protection-history'));
 ipcMain.handle('protection:action', async (_event, itemId, action) => {
+  const safeModeError = devSafeBlock('Tehdit müdahalesi');
+  if (safeModeError) return safeModeError;
   if (!Number.isInteger(itemId) || itemId < 1 || !['remediate', 'quarantine', 'trust', 'trust-publisher', 'ignore'].includes(action)) {
     return { ok: false, message: 'Geçersiz tehdit işlemi.' };
   }
@@ -3231,6 +3415,8 @@ ipcMain.handle('protection:action', async (_event, itemId, action) => {
   }
 });
 ipcMain.handle('incident:rollback', async (_event, incidentId) => {
+  const safeModeError = devSafeBlock('Müdahale geri alma işlemi');
+  if (safeModeError) return safeModeError;
   if (!Number.isInteger(incidentId) || incidentId < 1) return { ok: false, message: 'Geçersiz müdahale kaydı.' };
   const status = await runEngineAction(['--incident-status', String(incidentId)], 'incident-status');
   if (!status.ok) return status;
@@ -3470,20 +3656,6 @@ async function installLocalProtonArchiveForService() {
   );
 }
 
-function activateSetupLicenseFile() {
-  const flagIndex = process.argv.indexOf('--activate-license-file');
-  const sourcePath = process.argv[flagIndex + 1];
-  if (!sourcePath || !existsSync(sourcePath)) {
-    return { ok: false, message: 'Kurulum lisans dosyası bulunamadı.' };
-  }
-  try {
-    const key = readFileSync(sourcePath, 'utf8').trim();
-    return saveLicense(key, { machineWide: true });
-  } catch (error) {
-    return { ok: false, message: error.message };
-  }
-}
-
 if (isInstallProtonArchiveMode) {
   app.whenReady().then(async () => {
     const result = await installLocalProtonArchiveForService();
@@ -3491,15 +3663,6 @@ if (isInstallProtonArchiveMode) {
     app.exit(result.ok ? 0 : 1);
   }).catch((error) => {
     console.error('Neutron Proton service maintenance failed:', error);
-    app.exit(1);
-  });
-} else if (isActivateLicenseFileMode) {
-  app.whenReady().then(() => {
-    const result = activateSetupLicenseFile();
-    process.stdout.write(`${JSON.stringify({ type: 'setup-license-activated', ...result })}\n`);
-    app.exit(result.ok ? 0 : 1);
-  }).catch((error) => {
-    console.error('Neutron setup license activation failed:', error);
     app.exit(1);
   });
 } else if (isProvisionSecurityMode) {
@@ -3520,20 +3683,29 @@ if (isInstallProtonArchiveMode) {
     app.exit(1);
   });
 } else {
-  app.whenReady().then(createWindow).catch((error) => {
+  app.whenReady().then(startApplication).catch((error) => {
     console.error('Neutron startup failed:', error);
   });
 }
 
 app.on('window-all-closed', () => {
-  // The tray owns the background lifecycle; explicit Exit is required.
+  // A licensed session is tray-resident. Locked mode owns no tray and must
+  // terminate with its single account window.
+  if (!licenseStatus().active && !isQuitting) {
+    isQuitting = true;
+    app.quit();
+  }
 });
 
 app.on('activate', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     showMainWindow();
+  } else if (licenseStatus().active) {
+    startLicensedRuntime({ forceShow: true }).catch((error) => {
+      console.error('Neutron arayüzü açılamadı:', error);
+    });
   } else {
-    createWindow();
+    openActivationWindow(licenseStatus().status || 'none');
   }
 });
 

@@ -2,92 +2,182 @@
 <html lang="tr">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'self';" />
-<title>Neutron'u etkinleştir</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'none';" />
+<title>Neutron — Güvenli giriş</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    --bg: #070a0d;
+    --panel: #0c1116;
+    --line: #1d2932;
+    --line-strong: #31414d;
+    --text: #f2f7fa;
+    --muted: #8fa0ad;
+    --quiet: #657580;
+    --accent: #63ddb7;
+    --accent-strong: #7aebc8;
+    --danger: #ff7480;
+    --warning: #f2c764;
+  }
   * { box-sizing: border-box; }
-  body {
-    margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
-    background: #050a18; color: #e8eefc;
-    display: flex; flex-direction: column; height: 100vh;
-  }
-  header {
-    -webkit-app-region: drag; display: flex; align-items: center; gap: 10px;
-    padding: 12px 16px; border-bottom: 1px solid #16203a;
-  }
-  header img { width: 22px; height: 22px; }
-  header strong { font-size: 13px; font-weight: 600; letter-spacing: .02em; }
-  main { flex: 1; overflow-y: auto; padding: 20px 24px 8px; }
-  h1 { font-size: 19px; margin: 0 0 6px; }
-  .lead { margin: 0 0 18px; font-size: 13px; line-height: 1.5; color: #93a3c4; }
-  .banner {
-    margin: 0 0 18px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
-    line-height: 1.5; background: #2a1520; border: 1px solid #5c2436; color: #ffc4d2;
-  }
-  .banner[hidden] { display: none; }
-  label { display: block; font-size: 11px; text-transform: uppercase;
-          letter-spacing: .08em; color: #7d8db0; margin: 0 0 6px; }
-  .field { margin-bottom: 16px; }
-  code, textarea {
-    width: 100%; display: block; font-family: "Cascadia Mono", Consolas, monospace;
-    font-size: 12.5px; background: #0b1226; border: 1px solid #1d2942;
-    border-radius: 8px; padding: 10px 12px; color: #e8eefc;
-  }
-  code { user-select: all; word-break: break-all; }
-  textarea { resize: vertical; min-height: 84px; }
-  textarea:focus { outline: none; border-color: #3b6ef5; }
-  .hint { margin: 6px 0 0; font-size: 11.5px; color: #6f7f9f; line-height: 1.5; }
-  footer { padding: 12px 24px 20px; display: flex; gap: 10px; align-items: center; }
-  button {
-    font: inherit; font-size: 13px; font-weight: 600; border-radius: 8px;
-    padding: 9px 18px; border: 1px solid transparent; cursor: pointer;
-  }
-  .primary { background: #3b6ef5; color: #fff; }
-  .primary:disabled { background: #24365e; color: #6f7f9f; cursor: default; }
-  .ghost { background: transparent; color: #93a3c4; border-color: #1d2942; }
-  .status { flex: 1; font-size: 12px; line-height: 1.4; }
-  .status.error { color: #ff9db1; }
-  .status.ok { color: #7ee2a8; }
+  html, body { height: 100%; }
+  body { margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  button, input { font: inherit; }
+  button { -webkit-app-region: no-drag; }
+  .titlebar { -webkit-app-region: drag; align-items: center; background: #080c10; border-bottom: 1px solid #151e25; display: flex; height: 48px; justify-content: space-between; padding: 0 10px 0 18px; }
+  .titlebar__brand { align-items: center; display: flex; gap: 10px; }
+  .titlebar__brand strong { font-size: 12px; font-weight: 700; letter-spacing: .12em; }
+  .window-close { align-items: center; background: transparent; border: 0; border-radius: 8px; color: #7f8e99; cursor: pointer; display: flex; height: 32px; justify-content: center; width: 38px; }
+  .window-close:hover { background: #d94352; color: #fff; }
+  .window-close:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .window-close svg { fill: none; height: 16px; stroke: currentColor; stroke-linecap: round; stroke-width: 1.7; width: 16px; }
+  .shell { display: grid; grid-template-columns: 42% 58%; height: calc(100vh - 48px); }
+  .identity { background: linear-gradient(180deg, rgba(99, 221, 183, .055), transparent 42%), #090d11; border-right: 1px solid var(--line); overflow: hidden; padding: 56px 48px; position: relative; }
+  .identity::before { background-image: linear-gradient(rgba(99, 221, 183, .045) 1px, transparent 1px), linear-gradient(90deg, rgba(99, 221, 183, .045) 1px, transparent 1px); background-size: 36px 36px; content: ""; inset: 0; mask-image: linear-gradient(145deg, #000, transparent 72%); pointer-events: none; position: absolute; }
+  .identity::after { background: linear-gradient(180deg, transparent, var(--accent), transparent); box-shadow: 0 0 28px rgba(99, 221, 183, .24); content: ""; height: 220px; opacity: .75; position: absolute; right: -1px; top: 76px; width: 1px; }
+  .identity__content { display: flex; flex-direction: column; height: 100%; position: relative; z-index: 1; }
+  .cube-stage { align-items: center; display: flex; height: 178px; justify-content: center; margin: -16px 0 2px -14px; perspective: 800px; position: relative; width: 220px; }
+  .cube-stage::before { background: radial-gradient(circle, rgba(99, 221, 183, .28), rgba(31, 133, 104, .1) 42%, transparent 70%); content: ""; filter: blur(9px); inset: -20px; position: absolute; }
+  .cube-stage::after { background: radial-gradient(ellipse, rgba(99, 221, 183, .2), transparent 70%); bottom: -7px; content: ""; filter: blur(8px); height: 18px; position: absolute; width: 126px; }
+  .cube-stage__orbit { border: 1px solid rgba(125, 235, 201, .2); border-radius: 50%; height: 62px; position: absolute; width: 188px; }
+  .cube-stage__orbit--one { animation: orbit-one 16s linear infinite; transform: rotate(-15deg); }
+  .cube-stage__orbit--two { animation: orbit-two 20s linear infinite reverse; border-color: rgba(159, 181, 192, .14); height: 78px; width: 148px; }
+  .cube-stage__core { animation: cube-float 7.5s ease-in-out infinite; display: grid; place-items: center; position: relative; z-index: 2; }
+  .neutron-cube { --cube-height: 146px; --cube-width: 130px; animation: cube-render 13s ease-in-out infinite; display: block; filter: blur(.35px) drop-shadow(-10px -10px 24px rgba(58, 244, 183, .34)); height: var(--cube-height); position: relative; width: var(--cube-width); }
+  .neutron-cube__face { display: block; height: 100%; inset: 0; position: absolute; width: 100%; }
+  .neutron-cube__face--right { background: linear-gradient(145deg, #1ddca2 0%, #098166 48%, #04463b 100%); clip-path: polygon(50% 49%, 100% 24%, 100% 75%, 50% 100%); }
+  .neutron-cube__face--left { background: linear-gradient(155deg, #45efb8 0%, #0b9a72 44%, #045143 100%); clip-path: polygon(0 24%, 50% 49%, 50% 100%, 0 75%); }
+  .neutron-cube__face--top { background: radial-gradient(circle at 18% 15%, #d4ffea 0%, #81ffd0 18%, #35eeb0 48%, #11956f 100%); clip-path: polygon(50% 0, 100% 24%, 50% 49%, 0 24%); }
+  .neutron-cube--mini { --cube-height: 24px; --cube-width: 22px; animation: mini-cube 8s ease-in-out infinite; filter: drop-shadow(0 0 7px rgba(99, 221, 183, .28)); flex: 0 0 auto; }
+  .eyebrow { color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .18em; margin: 10px 0 12px; }
+  .identity h1 { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; font-size: 34px; font-weight: 650; letter-spacing: -.035em; line-height: 1.12; margin: 0; max-width: 300px; }
+  .identity__intro { color: var(--muted); font-size: 14px; line-height: 1.65; margin: 18px 0 0; max-width: 300px; }
+  .assurances { display: grid; gap: 14px; margin-top: auto; }
+  .assurance { align-items: center; color: #a9b7c0; display: flex; font-size: 12px; gap: 11px; }
+  .assurance i { background: var(--accent); border: 4px solid #16352d; border-radius: 50%; box-shadow: 0 0 0 1px #2a6857; height: 12px; width: 12px; }
+  .workspace { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; padding: 42px 44px 28px 54px; }
+  .workspace__top { margin-bottom: 26px; }
+  .workspace__top span { color: var(--quiet); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+  .workspace__top strong { display: block; font-size: 14px; margin-top: 5px; }
+  .content { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 2px 10px 28px 2px; scrollbar-color: #32443f transparent; scrollbar-gutter: stable; scrollbar-width: thin; }
+  .content::-webkit-scrollbar { width: 8px; }
+  .content::-webkit-scrollbar-track { background: transparent; }
+  .content::-webkit-scrollbar-thumb { background: #263a35; border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; }
+  .content::-webkit-scrollbar-thumb:hover { background-color: #3c5a51; }
+  .banner { background: rgba(255, 116, 128, .08); border: 1px solid rgba(255, 116, 128, .28); border-radius: 10px; color: #ffabb3; font-size: 12px; line-height: 1.5; margin: 0 0 20px; padding: 11px 13px; }
+  .banner[hidden], .panel[hidden], button[hidden] { display: none !important; }
+  .banner.info, .banner.ok { background: rgba(99, 221, 183, .07); border-color: rgba(99, 221, 183, .25); color: #a9f0da; }
+  .tabs { background: #090e12; border: 1px solid var(--line); border-radius: 11px; display: grid; gap: 4px; grid-template-columns: 1fr 1fr; margin-bottom: 28px; padding: 4px; }
+  .tab { background: transparent; border: 0; border-radius: 8px; color: #758590; cursor: pointer; font-size: 12px; font-weight: 700; padding: 9px 12px; }
+  .tab:hover { color: #c7d1d7; }
+  .tab.active { background: #182128; box-shadow: inset 0 0 0 1px #2b3943; color: #f5fafc; }
+  form:not([hidden]), .state-panel:not([hidden]) { animation: panel-enter 260ms cubic-bezier(.2, .8, .2, 1) both; }
+  h2 { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; font-size: 27px; letter-spacing: -.025em; margin: 0 0 8px; }
+  .lead { color: var(--muted); font-size: 13px; line-height: 1.55; margin: 0 0 24px; max-width: 440px; }
+  .field { margin-bottom: 15px; }
+  label { color: #a6b3bc; display: block; font-size: 11px; font-weight: 650; margin: 0 0 7px; }
+  input, code { background: #090e12; border: 1px solid var(--line); border-radius: 10px; color: var(--text); display: block; font-size: 13px; padding: 12px 13px; transition: border-color 160ms ease, background 160ms ease; width: 100%; }
+  input:hover { border-color: var(--line-strong); }
+  input:focus { background: #0b1217; border-color: #4ba98d; outline: none; }
+  code { color: #cceee3; font-family: "Cascadia Mono", Consolas, monospace; user-select: none; }
+  .hint { color: var(--quiet); font-size: 11px; line-height: 1.5; margin: 6px 0 0; }
+  .state-panel { padding-top: 20px; }
+  .state-mark { align-items: center; background: #101820; border: 1px solid #2a3944; border-radius: 16px; color: var(--accent); display: flex; height: 58px; justify-content: center; margin-bottom: 22px; width: 58px; }
+  .state-mark svg { fill: none; height: 27px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.55; width: 27px; }
+  .state-mark[data-state="rejected"], .state-mark[data-state="revoked"], .state-mark[data-state="expired"] { color: var(--danger); }
+  .state-mark[data-state="pending"], .state-mark[data-state="no-request"] { color: var(--warning); }
+  .actions { align-items: center; background: linear-gradient(180deg, rgba(7, 10, 13, 0), #070a0d 18%); border-top: 1px solid var(--line); display: flex; flex: 0 0 auto; gap: 10px; margin-top: 0; min-height: 70px; padding-top: 18px; position: relative; z-index: 3; }
+  .status { color: var(--muted); flex: 1; font-size: 11px; line-height: 1.4; margin: 0; }
+  .status.error { color: var(--danger); }
+  .status.ok { color: var(--accent); }
+  .actions button { align-items: center; border-radius: 9px; cursor: pointer; display: inline-flex; font-size: 12px; font-weight: 750; justify-content: center; min-height: 39px; padding: 0 16px; }
+  .primary { background: var(--accent); border: 1px solid var(--accent); color: #061713; }
+  .primary:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+  .primary:disabled { cursor: wait; opacity: .48; }
+  .ghost { background: #10171c; border: 1px solid #2a3740; color: #bdc8ce; }
+  .ghost:hover { background: #172127; border-color: #3b4c57; color: #f3f7f9; }
+  @keyframes cube-render { 0%, 100% { transform: rotate(-4deg) scale(1); } 28% { transform: rotate(1deg) scale(1.025); } 56% { transform: rotate(4deg) scale(.99); } 78% { transform: rotate(-1deg) scale(1.015); } }
+  @keyframes cube-float { 0%, 100% { transform: translate3d(0, 3px, 0); } 35% { transform: translate3d(6px, -6px, 0); } 68% { transform: translate3d(-4px, -11px, 0); } }
+  @keyframes mini-cube { 0%, 100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-2px) rotate(3deg); } }
+  @keyframes orbit-one { from { transform: rotate(-15deg); } to { transform: rotate(345deg); } }
+  @keyframes orbit-two { from { transform: rotate(28deg) scaleX(.86); } to { transform: rotate(388deg) scaleX(.86); } }
+  @keyframes panel-enter { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition: none !important; } }
 </style>
 </head>
 <body>
-  <header>
-    <img src="../assets/neutron-logo.png" alt="" />
-    <strong>Neutron — Etkinleştirme</strong>
+  <header class="titlebar">
+    <div class="titlebar__brand"><span class="neutron-cube neutron-cube--mini" aria-hidden="true"><i class="neutron-cube__face neutron-cube__face--right"></i><i class="neutron-cube__face neutron-cube__face--left"></i><i class="neutron-cube__face neutron-cube__face--top"></i></span><strong>NEUTRON</strong></div>
+    <button type="button" class="window-close" data-role="close" aria-label="Pencereyi kapat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
   </header>
-
-  <main>
-    <p class="banner" data-role="banner" hidden></p>
-
-    <h1>Neutron'u etkinleştir</h1>
-    <p class="lead">
-      Neutron geçerli bir lisans olmadan koruma sağlamaz. Aşağıdaki cihaz
-      kimliğini program yazarına iletin ve size verilen NTR1 aktivasyon
-      anahtarını buraya yapıştırın.
-    </p>
-
-    <div class="field">
-      <label for="device">Cihaz kimliği</label>
-      <code id="device" data-role="device">…</code>
-      <p class="hint">Bu kimlik yalnız bu bilgisayara aittir. Lisans bu kimliğe bağlanır ve başka bir bilgisayarda çalışmaz.</p>
-    </div>
-
-    <div class="field">
-      <label for="key">Aktivasyon anahtarı</label>
-      <textarea id="key" data-role="key" rows="4" spellcheck="false"
-                autocomplete="off" autocapitalize="characters"
-                placeholder="NTR1-XXXXX-XXXXX-…"></textarea>
-      <p class="hint">Anahtarın imzası, cihaz bağlantısı ve son kullanma tarihi çevrimdışı doğrulanır; hiçbir veri gönderilmez.</p>
-    </div>
+  <main class="shell">
+    <aside class="identity">
+      <div class="identity__content">
+        <div class="cube-stage" role="img" aria-label="Neutron güvenlik motoru">
+          <span class="cube-stage__orbit cube-stage__orbit--one" aria-hidden="true"></span>
+          <span class="cube-stage__orbit cube-stage__orbit--two" aria-hidden="true"></span>
+          <div class="cube-stage__core" aria-hidden="true">
+            <div class="neutron-cube">
+              <i class="neutron-cube__face neutron-cube__face--right"></i>
+              <i class="neutron-cube__face neutron-cube__face--left"></i>
+              <i class="neutron-cube__face neutron-cube__face--top"></i>
+            </div>
+          </div>
+        </div>
+        <p class="eyebrow">GÜVENLİ ERİŞİM</p>
+        <h1>Koruman, hesabınla başlar.</h1>
+        <p class="identity__intro">Neutron, onaylı hesabınla giriş yaptığın her cihazda çalışma alanını açar.</p>
+        <div class="assurances" aria-label="Güvenlik bilgileri">
+          <div class="assurance"><i></i><span>Hesabınla her cihazda erişim</span></div>
+          <div class="assurance"><i></i><span>Yerel koruma bileşenleri</span></div>
+          <div class="assurance"><i></i><span>Hesap doğrulanmadan işlem yok</span></div>
+        </div>
+      </div>
+    </aside>
+    <section class="workspace">
+      <div class="workspace__top"><span>Neutron çalışma alanı</span><strong>Hesabını doğrula</strong></div>
+      <div class="content">
+        <p class="banner" data-role="banner" hidden></p>
+        <section class="panel" data-panel="auth">
+          <div class="tabs" role="tablist" aria-label="Hesap işlemleri">
+            <button type="button" class="tab active" data-tab="signin" role="tab">Giriş yap</button>
+            <button type="button" class="tab" data-tab="signup" role="tab">Hesap oluştur</button>
+          </div>
+          <form data-form="signin">
+            <h2>Tekrar hoş geldin</h2>
+            <p class="lead">Neutron’u açmak ve korumaları başlatmak için hesabınla giriş yap.</p>
+            <div class="field"><label for="si-email">E-posta adresi</label><input id="si-email" type="email" autocomplete="email" required /></div>
+            <div class="field"><label for="si-password">Şifre</label><input id="si-password" type="password" autocomplete="current-password" required /></div>
+          </form>
+          <form data-form="signup" hidden>
+            <h2>Neutron hesabı oluştur</h2>
+            <p class="lead">Hesabın onaylandıktan sonra bu bilgisayarda koruma otomatik olarak başlar.</p>
+            <div class="field"><label for="su-name">Ad soyad</label><input id="su-name" type="text" autocomplete="name" required /></div>
+            <div class="field"><label for="su-email">E-posta adresi</label><input id="su-email" type="email" autocomplete="email" required /></div>
+            <div class="field"><label for="su-password">Şifre</label><input id="su-password" type="password" autocomplete="new-password" minlength="6" required /><p class="hint">En az 6 karakter kullan.</p></div>
+          </form>
+        </section>
+        <section class="panel state-panel" data-panel="waiting" hidden>
+          <div class="state-mark" data-role="waiting-icon" data-state="pending"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg></div>
+          <h2 data-role="waiting-title">Hesabın onay bekliyor</h2>
+          <p class="lead" data-role="waiting-text">Talebin alındı. Onaylandıktan sonra Neutron çalışma alanı açılır ve korumalar başlar.</p>
+          <p class="hint" data-role="waiting-email"></p>
+        </section>
+        <section class="panel state-panel" data-panel="offline" hidden>
+          <div class="state-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 9.5a10 10 0 0 1 13 0M8.5 13a5.5 5.5 0 0 1 7 0M11.8 17h.4"/><path d="M4 4 20 20"/></svg></div>
+          <h2>Hesap hizmetine ulaşılamıyor</h2>
+          <p class="lead" data-role="offline-text">Bağlantını kontrol edip yeniden dene.</p>
+        </section>
+      </div>
+      <footer class="actions">
+        <p class="status" data-role="status" aria-live="polite"></p>
+        <button type="button" class="ghost" data-role="sign-out" hidden>Farklı hesap kullan</button>
+        <button type="button" class="ghost" data-role="retry" hidden>Yeniden dene</button>
+        <button type="button" class="primary" data-role="submit">Giriş yap</button>
+      </footer>
+    </section>
   </main>
-
-  <footer>
-    <p class="status" data-role="status"></p>
-    <button type="button" class="ghost" data-role="close">Kapat</button>
-    <button type="button" class="primary" data-role="activate" disabled>Etkinleştir</button>
-  </footer>
-
   <script src="activation.js"></script>
 </body>
 </html>

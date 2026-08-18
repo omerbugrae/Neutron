@@ -29,6 +29,12 @@
 >
 > It is not a replacement for Microsoft Defender, endpoint protection, regular backups, or professional security advice.
 
+## Current release
+
+- **Neutron app:** 0.43
+- **Neutron Engine:** 0.4.0
+- **Access:** sign in with an approved Neutron account. The same account can be used on more than one device; there is no device-change request or activation key flow.
+
 ## ⚡ Features
 
 | Feature | Description |
@@ -40,6 +46,7 @@
 | 📦 **Quarantine** | Quarantine and restoration workflow for suspicious files |
 | 🪟 **AMSI integration** | Additional inspection for supported Windows script hosts |
 | 🔄 **Proton updates** | Signed threat-intelligence/rule updates with rollback support |
+| 👤 **Account access** | Approved-account sign-in; the same account can be used on multiple devices |
 | 📅 **Scheduled scanning** | Automatic quick-scan support, from the service even with no user signed in |
 | 🧷 **Driver & service monitoring** | Reports newly registered or repointed kernel drivers and Windows services (BYOVD visibility) |
 | ⏱️ **Scheduled task monitoring** | Reports new or repointed Task Scheduler entries running unsigned commands |
@@ -74,6 +81,7 @@ flowchart LR
 - Administrator privileges may be required for some system-level protection features
 - A trusted, up-to-date Windows installation
 - Current backups of important data
+- An approved Neutron account and an internet connection for the initial sign-in
 
 ## ⚠️ Important security notice
 

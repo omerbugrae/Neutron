@@ -35,6 +35,13 @@
         <circle cx="12" cy="12" r="3" />
         <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" />
       </symbol>
+      <symbol id="icon-user" viewBox="0 0 24 24">
+        <circle cx="12" cy="8" r="4" />
+        <path d="M4.5 20c.7-4.1 3.2-6.2 7.5-6.2s6.8 2.1 7.5 6.2" />
+      </symbol>
+      <symbol id="icon-sign-out" viewBox="0 0 24 24">
+        <path d="M10 4H5v16h5M14 8l4 4-4 4M8 12h10" />
+      </symbol>
       <symbol id="icon-bell" viewBox="0 0 24 24">
         <path d="M18 9a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8" />
         <path d="M14.2 21h-4.4" />
@@ -118,7 +125,7 @@
       <div class="titlebar-drag-space" aria-hidden="true"></div>
       <div class="titlebar-state" role="status" aria-live="polite" data-role="engine-state">
         <span class="titlebar-state__dot titlebar-state__dot--pending"></span>
-        Motor bağlantısı bekleniyor
+        Motor durumu denetleniyor
       </div>
       <div class="titlebar-controls">
         <button class="titlebar-control" type="button" data-window-action="minimize" aria-label="Küçült">
@@ -192,7 +199,7 @@
           class="navigation-item navigation-item--account"
           type="button"
           data-page-target="account">
-          <svg aria-hidden="true"><use href="#icon-shield"></use></svg>
+          <svg aria-hidden="true"><use href="#icon-user"></use></svg>
           <span>Hesap</span>
         </button>
 
@@ -701,22 +708,32 @@
         </section>
 
         <section class="app-page" data-page="account" hidden>
-          <header class="page-header"><div><p class="section-eyebrow">HESAP</p><h1>Neutron hesabın</h1><p>Lisansın bu bilgisayara güvenli şekilde bağlı ve çevrimdışı doğrulanıyor.</p></div></header>
+          <header class="page-header"><div><p class="section-eyebrow">HESAP</p><h1>Neutron hesabın</h1><p>Hesabın, erişim süren ve oturum güvenliğin burada görünür.</p></div></header>
           <article class="license-account-card license-account-card--full" data-role="license-account-card">
-            <div class="license-account-card__identity"><span class="license-account-card__badge">ÇEVRİMDIŞI HESAP</span><h2 data-role="license-customer-name">Lisanslı kullanıcı</h2><p data-role="license-edition">Neutron Standard</p></div>
-            <div class="license-account-card__details"><div><span>Lisans anahtarı</span><strong data-role="license-masked-key">NTR1-•••••-•••••</strong><button type="button" class="license-account-card__show" data-action="show-license">Lisansı göster</button><code data-role="license-full-key" hidden></code></div><div><span>Lisans süresi</span><strong data-role="license-duration">Süresiz</strong><div class="license-account-card__progress"><i data-role="license-duration-bar"></i></div><small data-role="license-duration-detail">Çevrimdışı lisans etkin</small></div></div>
+            <div class="license-account-card__identity">
+              <span class="license-account-card__avatar"><svg aria-hidden="true"><use href="#icon-user"></use></svg></span>
+              <div><span class="license-account-card__badge">AKTİF HESAP</span><h2 data-role="license-customer-name">Neutron kullanıcısı</h2><p data-role="license-edition">Neutron Standard</p></div>
+            </div>
+            <div class="license-account-card__details">
+              <div><span>E-posta</span><strong data-role="license-email">—</strong><small>Oturum açılan hesap</small></div>
+              <div><span>Erişim süresi</span><strong data-role="license-duration">Süresiz</strong><div class="license-account-card__progress"><i data-role="license-duration-bar"></i></div><small data-role="license-duration-detail">Hesap onaylı</small></div>
+            </div>
           </article>
           <div class="account-information-grid">
-            <article><span>Hesap türü</span><strong>Çevrimdışı hesap</strong><p>İleride çevrimiçi abonelik hesabına yükseltilebilir.</p></article>
-            <article><span>Cihaz bağlama</span><strong>Bu bilgisayara bağlı</strong><p>Lisans anahtarı başka bir cihazda kullanılamaz.</p></article>
+            <article class="account-information-card"><span>Hesap türü</span><strong>Neutron hesabı</strong><p>Kimliğin ve kullanım hakkın güvenli biçimde hesabınla eşleştirilir.</p></article>
+            <article class="account-information-card"><span>Erişim modeli</span><strong>Hesabınla her yerde eriş</strong><p>Onaylı hesabınla giriş yaptığın tüm cihazlarda Neutron'u kullanabilirsin.</p></article>
+            <article class="account-action-card account-action-card--danger">
+              <div><span>Oturum</span><strong>Oturumu kapat</strong><p>Çıkış yaptığında çalışma alanı kapanır ve yeniden giriş yapman gerekir.</p></div>
+              <button class="account-action account-action--danger" type="button" data-action="sign-out-account"><svg aria-hidden="true"><use href="#icon-sign-out"></use></svg><span>Çıkış yap</span></button>
+            </article>
           </div>
         </section>
 
         <section class="app-page" data-page="settings" hidden>
-          <header class="page-header"><div><p class="section-eyebrow">AYARLAR</p><h1>Neutron ayarları</h1><p>Koruma, bildirim, izleme ve tarama tercihleri bu bilgisayarda saklanır.</p></div></header>
+          <header class="page-header"><div><p class="section-eyebrow">AYARLAR</p><h1>Neutron ayarları</h1><p>Uygulama davranışı, bakım ve yerel çalışma verilerini buradan yönetebilirsin.</p></div></header>
           <article class="license-settings-summary" data-role="license-settings-summary">
-            <div><span>Hesap</span><strong data-role="license-settings-name">Lisanslı kullanıcı</strong><small data-role="license-settings-edition">Çevrimdışı hesap</small></div>
-            <div><span>Lisans süresi</span><strong data-role="license-settings-duration">Süresiz lisans</strong><small data-role="license-settings-detail">Etkin</small></div>
+            <div><span>Hesap</span><strong data-role="license-settings-name">Neutron kullanıcısı</strong><small data-role="license-settings-edition"></small></div>
+            <div><span>Erişim süresi</span><strong data-role="license-settings-duration">Süresiz erişim</strong><small data-role="license-settings-detail">Etkin</small></div>
             <button type="button" data-page-target="account">Hesabı görüntüle</button>
           </article>
           <div class="settings-grid">
@@ -727,70 +744,33 @@
                 <div class="settings-preference"><div><strong>Windows ile başlat</strong><p>Oturum açıldığında Neutron'u arka planda otomatik çalıştırır.</p></div><button class="settings-switch" type="button" data-setting-toggle="start_with_windows" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Gerçek zamanlı dosya korumasını aç</strong><p>Neutron başladığında dosya izleyicisini otomatik etkinleştirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Davranış izlemeyi aç</strong><p>Yeni süreçleri ve Windows otomatik başlangıç noktalarını dosya korumasından bağımsız izler.</p></div><button class="settings-switch" type="button" data-setting-toggle="behavior_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Web korumasını aç</strong><p>İndirilen dosyaları ve kaynak URL/domain itibarını yerel olarak denetler.</p></div><button class="settings-switch" type="button" data-setting-toggle="web_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Makine öğrenmesi destekli tespit</strong><p>Statik PE modelleri imzasız bir dosyayı iki yoldan işaretleyebilir: sezgisel denetimlerin zaten şüpheli bulduğu bir dosyayı güçlendirerek, ya da yeterli sayıda model neredeyse kesin hemfikirse tek başına karantinaya alarak. Hiçbir durumda geçerli Windows imzası taşıyan, istisna listendeki, Windows sistem klasöründeki veya Neutron'un kendi dosyalarına dokunamaz; her karantina Karantina sayfasından geri alınabilir. Kapatırsan modeller yalnız gözlem kaydeder.</p></div><button class="settings-switch" type="button" data-setting-toggle="ml_assisted_detection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Web korumasını aç</strong><p>İndirilen dosyaları ve kaynak bağlantı itibarını yerel olarak denetler.</p></div><button class="settings-switch" type="button" data-setting-toggle="web_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Makine öğrenmesi destekli tespit</strong><p>İmzasız şüpheli dosyaları yerel model değerlendirmesiyle inceler.</p></div><button class="settings-switch" type="button" data-setting-toggle="ml_assisted_detection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
                 <div class="settings-preference"><div><strong>Güvenlik bildirimleri</strong><p>Bir dosya işaretlendiğinde Windows bildirimi gösterir.</p></div><button class="settings-switch" type="button" data-setting-toggle="notifications_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Bulut itibar sorgusu</strong><p>Yerel imza eşleşmesi olmayan dosyalar için, yalnızca manuel taramalarda, SHA-256 hash'i aşağıdaki servislere sorulur. Dosya içeriği asla gönderilmez; gerçek zamanlı korumayı yavaşlatmaz. En az bir API anahtarı girilmeden hiçbir sorgu yapılmaz.</p></div><button class="settings-switch" type="button" data-setting-toggle="cloud_lookup_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Ağ bağlantısı izleme</strong><p>Bilinen kötü amaçlı IP adreslerine (C2/botnet) giden bağlantıları periyodik olarak denetler ve bildirir. Paket incelemesi veya engelleme yapmaz, yalnızca tespit eder.</p></div><button class="settings-switch" type="button" data-setting-toggle="network_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Bellek/process injection taraması</strong><p>Yeni başlayan süreçlerin belleğini YARA kurallarıyla ve şüpheli RWX bellek bölgesi sezgisiyle tarar. Tam görünürlük için Sistem Servisi Modu önerilir.</p></div><button class="settings-switch" type="button" data-setting-toggle="memory_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Çıkarılabilir medya (USB) koruması</strong><p>Takılan USB/SD kartları otomatik olarak autorun.inf ve kötü amaçlı dosyalar için tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="usb_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Fidye yazılımı koruması</strong><p>Belgeler, Masaüstü, Resimler ve İndirilenler klasörlerine gizli tuzak dosyaları koyar; bunlardan biri değiştirilirse veya kısa sürede çok sayıda dosya yüksek entropili içerikle yeniden yazılırsa uyarır. <strong>Önemli:</strong> çekirdek sürücüsü olmadığı için şifrelemeyi engelleyemez, yalnız saniyeler içinde haber verir; hangi programın yazdığını da tespit edemez.</p></div><button class="settings-switch" type="button" data-setting-toggle="ransomware_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference">
-                  <div>
-                    <strong>Sistem servisi korumaları <em>(kapatılamaz)</em></strong>
-                    <p>Sistem Servisi Modu açıkken aşağıdakilerin hepsi her zaman çalışır ve ayrı bir anahtarları yoktur. Bunlar tercih değil: kapatma düğmesi, bir saldırganın ilk basacağı düğmedir.</p>
-                    <p><strong>Bulgulara otomatik müdahale edilir.</strong> Zamanlanmış görevler devre dışı bırakılır, WMI abonelikleri silinir, sertifikalar depodan kaldırılır, kapatılan Windows ayarları geri alınır, şüpheli süreçler sonlandırılır. WMI silme dışında her müdahale <strong>Koruma geçmişinden geri alınabilir</strong>. On dakikada on iki müdahaleyi aşan bir artışta otomatik engelleme kendini durdurur ve yalnız bildirmeye döner.</p>
-                    <p><strong>Çekirdek bileşeni olmadan yapılamayanlar.</strong> Bir sürücünün yüklenmesi reddedilemez — servis devre dışı bırakılır, bu bir sonraki açılışta yüklenmesini önler; bellekteki sürücü yeniden başlatmaya kadar kalır. LSASS’e açılmış bir handle iptal edilemez — erişimi açan süreç sonlandırılır. Bir süreç çalışmadan durdurulamaz — başladıktan milisaniyeler sonra sonlandırılır.</p>
-                    <p><strong>Sürücü ve servis izleme.</strong> Yeni kaydedilen ya da hedefi değiştirilen çekirdek sürücülerini ve Windows servislerini bildirir. Geçerli imzalı bir sürücünün kurulması da bildirilir — BYOVD saldırıları tam olarak böyle görünür.</p>
-                    <p><strong>Zamanlanmış görev izleme.</strong> Görev Zamanlayıcı’ya eklenen veya hedefi değiştirilen, imzasız ya da çözümlenemeyen bir komut çalıştıran görevleri bildirir.</p>
-                    <p><strong>WMI kalıcılık izleme.</strong> WMI olay abonelikleri (filtre, tüketici, bağlama) SYSTEM olarak kod çalıştırabilen, kayıt defterinde de görev deposunda da görünmeyen üçüncü bir kalıcılık yoludur. Oluşturulmaları ve değiştirilmeleri bildirilir.</p>
-                    <p><strong>Süreç başlatma izleme.</strong> Her süreç başlatılmasını anlık olarak, soyağacıyla birlikte görür — milisaniyeler yaşayıp kapanan süreçler dahil. “Word → PowerShell” gibi beklenmeyen zincirler ayrıca işaretlenir.</p>
-                    <p><strong>Kimlik bilgisi erişimi izleme.</strong> LSASS belleğini okuma erişimiyle açık tutan süreçleri bildirir; parola hırsızlığı böyle yapılır. Windows klasöründeki imzalı sistem bileşenleri bastırılır.</p>
-                    <p><strong>Windows olay günlüğü izleme.</strong> Güvenlik günlüğünün temizlenmesi, denetim politikasının değişmesi, yerel yönetici grubuna hesap eklenmesi, servis kurulması, Defender’ın kapatılması ve başarısız oturum açma patlamaları. Güvenlik günlüğü SYSTEM olmadan okunamaz.</p>
-                    <p><strong>Windows güvenlik duruşu izleme.</strong> Defender’ın ya da güvenlik duvarının kapatılması, Defender istisnası eklenmesi, UAC’ın düşürülmesi, RDP’nin açılması, Güvenli Önyükleme’nin kapatılması, TESTSIGNING ile başlatılmış bir Windows. Sadece bildirir — bir Windows ayarını sorulmadan geri açmak, izleyen gözde zararlı yazılımdan ayrılamaz.</p>
-                    <p><strong>Sertifika güven deposu izleme.</strong> Makinenin kök sertifika deposuna eklenen bir sertifika, bu bilgisayarın bütün TLS trafiğinin okunabilmesi demektir ve hiçbir uyarı çıkmaz. Başlangıçtan sonraki eklemeler bildirilir.</p>
-                    <p><strong>Kendini koruma ve kurcalama denetimi.</strong> AMSI sağlayıcısının kaydını, NeutronService’i, kural deposunu ve karantinadaki dosyaların yerinde durduğunu sürekli doğrular. Kendi kendini onarmaz — bildirir, kararı size bırakır.</p>
-                    <p><strong>Servis tarafı zamanlanmış tarama.</strong> Zamanlanmış hızlı taramayı, Neutron penceresi kapalıyken ve hiç kimse oturum açmamışken de servis çalıştırır; makinedeki her kullanıcı profilini tarar. Bu, aşağıdaki “Zamanlanmış hızlı tarama” tercihine uyar: onu kapatırsanız servis de taramaz.</p>
-                  </div>
-                </div>
-                <div class="settings-preference"><div><strong>Zamanlanmış hızlı tarama</strong><p>Neutron arka planda açık kaldığı sürece, kullanıcı profilini ve Temp klasörlerini günde bir kez otomatik tarar. Bulgular yalnızca gösterilir; otomatik karantina uygulanmaz, karar sizde kalır.</p></div><button class="settings-switch" type="button" data-setting-toggle="scheduled_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
-                <div class="settings-preference"><div><strong>Proton imzalarını otomatik güncelle</strong><p>İmzalı Proton/YARA paketlerini belirli aralıklarla denetler; doğrulanmayan veya bozuk paketleri etkinleştirmez.</p></div><button class="settings-switch" type="button" data-setting-toggle="signature_auto_update_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Bulut itibar sorgusu</strong><p>Yerel imza eşleşmesi olmayan dosyaların özetini, yalnız manuel taramalarda seçtiğiniz servislere sorar.</p></div><button class="settings-switch" type="button" data-setting-toggle="cloud_lookup_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Ağ bağlantısı izleme</strong><p>Bilinen kötü amaçlı IP adreslerine giden bağlantıları denetler ve bildirir.</p></div><button class="settings-switch" type="button" data-setting-toggle="network_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Bellek/process injection taraması</strong><p>Yeni başlayan süreçlerin belleğini YARA kuralları ve şüpheli bellek bölgesi sezgisiyle tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="memory_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Çıkarılabilir medya (USB) koruması</strong><p>Takılan USB ve SD kartları autorun.inf ve kötü amaçlı dosyalar için tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="usb_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Fidye yazılımı koruması</strong><p>Tuzak dosyaları ve toplu şifreleme belirtilerini izleyerek erken uyarı verir.</p></div><button class="settings-switch" type="button" data-setting-toggle="ransomware_protection_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Zamanlanmış hızlı tarama</strong><p>Neutron açıkken kullanıcı profilini ve Temp klasörlerini günde bir kez tarar.</p></div><button class="settings-switch" type="button" data-setting-toggle="scheduled_scan_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
+                <div class="settings-preference"><div><strong>Proton imzalarını otomatik güncelle</strong><p>İmzalı Proton/YARA paketlerini belirli aralıklarla denetler.</p></div><button class="settings-switch" type="button" data-setting-toggle="signature_auto_update_enabled" aria-pressed="false"><i></i><span>Kapalı</span></button></div>
               </div>
             </article>
             <article class="settings-card settings-card--wide">
-              <p class="section-eyebrow">BULUT İTİBAR SORGUSU</p>
-              <h2>API anahtarları (en az biri gerekli)</h2>
-              <p>Her iki servis de ücretsiz ama kendi API anahtarınızı gerektiriyor (paylaşılan/gömülü bir anahtar kullanılmaz). MalwareBazaar: auth.abuse.ch adresinden. VirusTotal: hesabınızın profil sayfasından ücretsiz alınır.</p>
-              <form class="exclusion-extension-form" data-role="mb-api-key-form">
-                <label for="mb-api-key">MalwareBazaar Auth-Key</label>
-                <div><input id="mb-api-key" data-role="mb-api-key-input" type="password" maxlength="128" spellcheck="false" autocomplete="off" placeholder="MalwareBazaar Auth-Key"><button class="settings-action" type="submit">Kaydet</button></div>
-              </form>
+              <p class="section-eyebrow">BULUT İTİBAR SORGUSU</p><h2>API anahtarları</h2><p>Her iki servis için kendi API anahtarını kullanırsın; dosya içeriği gönderilmez.</p>
+              <form class="exclusion-extension-form" data-role="mb-api-key-form"><label for="mb-api-key">MalwareBazaar Auth-Key</label><div><input id="mb-api-key" data-role="mb-api-key-input" type="password" maxlength="128" spellcheck="false" autocomplete="off" placeholder="MalwareBazaar Auth-Key"><button class="settings-action" type="submit">Kaydet</button></div></form>
               <p class="settings-save-state" data-role="mb-api-key-state">Anahtar bu bilgisayarda yerel olarak saklanır.</p>
-              <form class="exclusion-extension-form" data-role="vt-api-key-form">
-                <label for="vt-api-key">VirusTotal API anahtarı (isteğe bağlı, ikinci kaynak)</label>
-                <div><input id="vt-api-key" data-role="vt-api-key-input" type="password" maxlength="128" spellcheck="false" autocomplete="off" placeholder="VirusTotal API anahtarınız"><button class="settings-action" type="submit">Kaydet</button></div>
-              </form>
+              <form class="exclusion-extension-form" data-role="vt-api-key-form"><label for="vt-api-key">VirusTotal API anahtarı</label><div><input id="vt-api-key" data-role="vt-api-key-input" type="password" maxlength="128" spellcheck="false" autocomplete="off" placeholder="VirusTotal API anahtarınız"><button class="settings-action" type="submit">Kaydet</button></div></form>
               <p class="settings-save-state" data-role="vt-api-key-state">Anahtar bu bilgisayarda yerel olarak saklanır.</p>
             </article>
             <article class="settings-card settings-card--wide">
               <div class="settings-card-heading"><div><p class="section-eyebrow">İZLENEN KLASÖRLER</p><h2>Gerçek zamanlı kapsam</h2></div><button class="settings-action" type="button" data-action="add-watch-folder">Klasör ekle</button></div>
-              <p>Liste boşsa kullanıcı profilinizin tamamı (<code>C:\Users\...</code>) ve geçici klasörler otomatik olarak izlenir. Buraya klasör eklerseniz yalnızca eklediğiniz klasörler izlenir.</p>
-              <div class="watch-path-list" data-role="watch-path-list"><p class="settings-empty">Varsayılan klasörler kullanılıyor.</p></div>
+              <p>Liste boşsa kullanıcı profiliniz ve geçici klasörler izlenir; klasör eklerseniz yalnız seçtikleriniz izlenir.</p><div class="watch-path-list" data-role="watch-path-list"><p class="settings-empty">Varsayılan klasörler kullanılıyor.</p></div>
             </article>
             <article class="settings-card settings-card--wide exclusions-settings-card">
               <div class="settings-card-heading"><div><p class="section-eyebrow">TARAMA İSTİSNALARI</p><h2>İzin verilen öğeler</h2></div><button class="settings-action" type="button" data-action="add-exclusion-folder">Klasör ekle</button></div>
-              <p>Eklenen klasörler, uzantılar ve güvenilir dosya özetleri hem taramalarda hem gerçek zamanlı korumada atlanır.</p>
-              <form class="exclusion-extension-form" data-role="exclusion-extension-form">
-                <label for="exclusion-extension">Dosya uzantısı</label>
-                <div><input id="exclusion-extension" data-role="exclusion-extension-input" type="text" maxlength="18" spellcheck="false" autocomplete="off" placeholder=".log"><button class="settings-action" type="submit">Uzantı ekle</button></div>
-              </form>
-              <div class="exclusion-list" data-role="exclusion-list"><p class="settings-empty">Henüz bir istisna eklenmedi.</p></div>
-              <details class="exclusion-history">
-                <summary>Son istisna değişiklikleri</summary>
-                <div class="exclusion-history-list" data-role="exclusion-history"><p class="settings-empty">Henüz değişiklik yok.</p></div>
-              </details>
-              <p class="settings-save-state" data-role="exclusion-state">İstisnalar hazırlanıyor</p>
-              <p class="settings-note">Güvenlik nedeniyle sürücü kökü, kullanıcı klasörünün tamamı, Windows ve Program Files klasörleri istisna bırakılamaz.</p>
+              <p>Eklenen klasörler, uzantılar ve güvenilir dosya özetleri hem taramalarda hem gerçek zamanlı korumada atlanır.</p><form class="exclusion-extension-form" data-role="exclusion-extension-form"><label for="exclusion-extension">Dosya uzantısı</label><div><input id="exclusion-extension" data-role="exclusion-extension-input" type="text" maxlength="18" spellcheck="false" autocomplete="off" placeholder=".log"><button class="settings-action" type="submit">Uzantı ekle</button></div></form>
+              <div class="exclusion-list" data-role="exclusion-list"><p class="settings-empty">Henüz bir istisna eklenmedi.</p></div><details class="exclusion-history"><summary>Son istisna değişiklikleri</summary><div class="exclusion-history-list" data-role="exclusion-history"><p class="settings-empty">Henüz değişiklik yok.</p></div></details><p class="settings-save-state" data-role="exclusion-state">İstisnalar hazırlanıyor</p>
             </article>
             <article class="settings-card">
               <p class="section-eyebrow">TARAMA SINIRI</p>

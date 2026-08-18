@@ -1800,35 +1800,274 @@ body.flat-ui.protection-pending {
 .flat-ui .license-gate__message { color: #94a4b4; font-size: 12px; line-height: 1.5; margin: 16px 0 0; }
 .flat-ui .license-gate__message.is-error { color: #ff8f97; }
 
-.flat-ui .license-account-card { align-items: center; background: #0e755a; border: 1px solid #5ce0ae; border-radius: 18px; box-shadow: 0 18px 40px rgba(16, 161, 107, .2); color: #eafff5; display: flex; gap: 28px; justify-content: space-between; margin: 0 0 22px; overflow: hidden; padding: 23px 26px; position: relative; }
-.flat-ui .license-account-card::after { background: linear-gradient(110deg, transparent 8%, rgba(149,255,205,.08) 27%, rgba(210,255,233,.35) 47%, rgba(83,241,181,.18) 64%, transparent 86%); content: ''; inset: -50% -70%; pointer-events: none; position: absolute; transform: translateX(-46%); animation: license-surface-sweep 9s ease-in-out infinite; }
+.flat-ui .license-account-card { align-items: center; background: linear-gradient(145deg, #101a1e 0%, #0c1318 58%, #0b1116 100%); border: 1px solid #29473f; border-radius: 18px; box-shadow: 0 18px 48px rgba(0, 0, 0, .24); color: #eafff5; display: flex; gap: 34px; justify-content: space-between; margin: 0 0 22px; overflow: hidden; padding: 26px 30px; position: relative; }
+.flat-ui .license-account-card::before { background: linear-gradient(180deg, transparent, #63ddb7, transparent); box-shadow: 0 0 24px rgba(99, 221, 183, .24); content: ''; height: 72%; left: 0; position: absolute; top: 14%; width: 2px; }
+.flat-ui .license-account-card::after { background: radial-gradient(circle, rgba(99, 221, 183, .11), transparent 68%); content: ''; height: 260px; pointer-events: none; position: absolute; right: -100px; top: -150px; width: 320px; }
 .flat-ui .license-account-card__identity, .flat-ui .license-account-card__details { position: relative; z-index: 1; }
-.flat-ui .license-account-card__badge { background: rgba(0, 45, 31, .35); border: 1px solid rgba(220, 255, 239, .42); border-radius: 100px; font-size: 10px; font-weight: 800; letter-spacing: .1em; padding: 5px 9px; }
-.flat-ui .license-account-card h2 { color: #fff; font-size: 22px; margin: 12px 0 3px; }
-.flat-ui .license-account-card p { color: #c4ffe6; margin: 0; }
-.flat-ui .license-account-card__details { display: grid; gap: 26px; grid-template-columns: minmax(240px, 1fr) minmax(200px, 1fr); min-width: min(100%, 560px); }
-.flat-ui .license-account-card__details span { color: #c7ffe7; display: block; font-size: 11px; margin-bottom: 6px; }
-.flat-ui .license-account-card__details strong { color: #fff; display: block; font-size: 14px; letter-spacing: .03em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flat-ui .license-account-card__identity { align-items: center; display: flex; gap: 16px; }
+.flat-ui .license-account-card__avatar { align-items: center; background: #132b25; border: 1px solid #326554; border-radius: 16px; color: #7be6c5; display: flex; flex: 0 0 auto; height: 56px; justify-content: center; width: 56px; }
+.flat-ui .license-account-card__avatar svg { fill: none; height: 26px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.55; width: 26px; }
+.flat-ui .license-account-card__badge { color: #71d9ba; display: block; font-size: 9px; font-weight: 800; letter-spacing: .13em; }
+.flat-ui .license-account-card h2 { color: #f6fbfd; font-size: 22px; margin: 7px 0 3px; }
+.flat-ui .license-account-card p { color: #8fa59f; margin: 0; }
+.flat-ui .license-account-card__details { display: grid; gap: 0; grid-template-columns: minmax(155px, 1.35fr) minmax(130px, 1fr) minmax(150px, 1fr); min-width: min(100%, 590px); }
+.flat-ui .license-account-card__details > div { border-left: 1px solid #223139; min-width: 0; padding: 2px 20px; }
+.flat-ui .license-account-card__details span { color: #71848e; display: block; font-size: 10px; margin-bottom: 7px; text-transform: uppercase; letter-spacing: .08em; }
+.flat-ui .license-account-card__details strong { color: #eaf2f5; display: block; font-size: 13px; letter-spacing: .01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .flat-ui .license-account-card__show { background: transparent; border: 0; color: #fff; cursor: pointer; font-size: 11px; font-weight: 800; margin: 8px 0 0; padding: 0; text-decoration: underline; }
 .flat-ui .license-account-card code { color: #f2fff8; display: block; font-size: 10px; line-height: 1.4; margin-top: 9px; max-width: 285px; overflow-wrap: anywhere; }
 .flat-ui .license-account-card code[hidden] { display: none !important; }
-.flat-ui .license-account-card__progress { background: rgba(0, 50, 35, .28); border: 1px solid rgba(224, 255, 239, .3); border-radius: 99px; height: 7px; margin-top: 10px; overflow: hidden; width: 100%; }
-.flat-ui .license-account-card__progress i { background: linear-gradient(90deg, #1169d6 0%, #237fe7 23%, #68c9ff 43%, #d2f4ff 50%, #68c9ff 57%, #237fe7 77%, #1169d6 100%); background-size: 260% 100%; border-radius: inherit; box-shadow: 0 0 14px rgba(107, 211, 255, .88); display: block; height: 100%; min-width: 8%; position: relative; width: 100%; animation: license-premium-wave 7s ease-in-out infinite; }
-.flat-ui .license-account-card small { color: #d7ffed; display: block; font-size: 10px; margin-top: 7px; }
-.flat-ui .license-account-card--full { min-height: 230px; padding: 42px; }
-.flat-ui .license-account-card--full .license-account-card__identity { max-width: 280px; }
+.flat-ui .license-account-card__progress { background: #172229; border-radius: 99px; height: 4px; margin-top: 10px; overflow: hidden; width: 100%; }
+.flat-ui .license-account-card__progress i { background: #63ddb7; border-radius: inherit; display: block; height: 100%; min-width: 8%; width: 100%; }
+.flat-ui .license-account-card small { color: #687c86; display: block; font-size: 10px; margin-top: 7px; }
+.flat-ui .license-account-card--full { min-height: 210px; padding: 34px; }
+.flat-ui .license-account-card--full .license-account-card__identity { max-width: 300px; }
 .flat-ui .license-account-card--full .license-account-card__details { align-items: center; flex: 1; }
 .flat-ui .license-account-card--full .license-account-card__details > div { min-width: 0; }
 .flat-ui .license-account-card--full .license-account-card__details strong { font-size: 16px; }
 .flat-ui .account-information-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.flat-ui .account-information-grid article, .flat-ui .license-settings-summary { background: var(--flat-surface); border: 1px solid var(--flat-border); border-radius: 14px; padding: 20px; }
+.flat-ui .account-information-grid article, .flat-ui .license-settings-summary { background: var(--flat-surface); border: 1px solid var(--flat-border); border-radius: 14px; padding: 22px; }
 .flat-ui .account-information-grid span, .flat-ui .license-settings-summary span { color: #7f93a3; display: block; font-size: 11px; margin-bottom: 7px; }
 .flat-ui .account-information-grid strong, .flat-ui .license-settings-summary strong { color: #dfeaf1; display: block; font-size: 16px; }
 .flat-ui .account-information-grid p { color: #7f93a3; font-size: 12px; line-height: 1.5; margin: 8px 0 0; }
+.flat-ui .account-action-card { align-items: center; display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) auto; }
+.flat-ui .account-action-card > small { color: #78dabb; font-size: 11px; grid-column: 1 / -1; min-height: 0; }
+.flat-ui .account-action { align-items: center; background: #12211e; border: 1px solid #2d5f51; border-radius: 10px; color: #82e4c6; cursor: pointer; display: inline-flex; font-size: 11px; font-weight: 750; gap: 8px; justify-content: center; min-height: 40px; padding: 0 13px; white-space: nowrap; }
+.flat-ui .account-action:hover { background: #173029; border-color: #3d7c6a; color: #a0efd8; }
+.flat-ui .account-action:disabled { cursor: wait; opacity: .55; }
+.flat-ui .account-action svg { fill: none; height: 16px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.65; width: 16px; }
+.flat-ui .account-information-grid .account-action span { color: inherit; display: inline; font-size: inherit; margin: 0; }
+.flat-ui .account-action-card--danger { border-color: #35242a; }
+.flat-ui .account-action--danger { background: #211419; border-color: #5a2d37; color: #ff929c; }
+.flat-ui .account-action--danger:hover { background: #2c181f; border-color: #7b3946; color: #ffadb4; }
 .flat-ui .license-settings-summary { align-items: center; display: grid; gap: 22px; grid-template-columns: 1fr 1fr auto; margin: 0 0 22px; }
 .flat-ui .license-settings-summary small { color: #7f93a3; display: block; font-size: 11px; margin-top: 6px; }
 .flat-ui .license-settings-summary button { background: #15382e; border: 1px solid #2f8165; border-radius: 9px; color: #87efd0; cursor: pointer; font-weight: 700; padding: 10px 13px; white-space: nowrap; }
-@media (max-width: 760px) { .flat-ui .license-account-card { align-items: flex-start; flex-direction: column; } .flat-ui .license-account-card--full { padding: 26px; } .flat-ui .license-account-card__details, .flat-ui .account-information-grid, .flat-ui .license-settings-summary { grid-template-columns: 1fr; width: 100%; } }
+@media (max-width: 980px) { .flat-ui .license-account-card { align-items: flex-start; flex-direction: column; } .flat-ui .license-account-card__details { width: 100%; } }
+@media (max-width: 760px) { .flat-ui .license-account-card--full { padding: 26px; } .flat-ui .license-account-card__details, .flat-ui .account-information-grid, .flat-ui .license-settings-summary, .flat-ui .account-action-card { grid-template-columns: 1fr; width: 100%; } .flat-ui .license-account-card__details > div { border-left: 0; border-top: 1px solid #223139; padding: 16px 0; } .flat-ui .account-action { justify-self: stretch; } }
 
-@keyframes license-surface-sweep { 0%, 100% { opacity: .25; transform: translateX(-47%) rotate(-4deg); } 50% { opacity: 1; transform: translateX(47%) rotate(-4deg); } }
-@keyframes license-premium-wave { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+/* Retained only as an inactive experiment; it must not affect the restored UI. */
+@media (max-width: 0px) {
+/* Unified control-room surface language. The account page established this
+   vocabulary: a quiet charcoal field, a thin factual state rail, and colour
+   reserved for the state the person needs to act on. */
+.flat-ui {
+  --state-active: #63ddb7;
+  --state-active-line: rgba(99, 221, 183, .52);
+  --state-off: #ff6e7c;
+  --state-off-line: rgba(255, 110, 124, .58);
+  --state-pending: #f5c45f;
+  --state-pending-line: rgba(245, 196, 95, .56);
+  --state-panel: linear-gradient(145deg, #101a1e 0%, #0c1318 58%, #0b1116 100%);
+}
+
+.flat-ui .app-page > .page-header,
+.flat-ui .app-page > .dashboard-header {
+  border-bottom: 1px solid rgba(115, 143, 155, .18);
+  margin-bottom: 22px;
+  padding-bottom: 18px;
+}
+
+.flat-ui .app-page .page-header h1,
+.flat-ui .dashboard-heading h1 {
+  color: #f2f8fa;
+  letter-spacing: -.035em;
+}
+
+.flat-ui .app-page .page-header > div > p:last-child,
+.flat-ui .dashboard-subtitle {
+  color: #81949d;
+  max-width: 64ch;
+}
+
+.flat-ui .app-page .detail-module,
+.flat-ui .app-page .protection-module,
+.flat-ui .app-page .settings-card,
+.flat-ui .app-page .history-panel,
+.flat-ui .app-page .firewall-card,
+.flat-ui .app-page .audit-card,
+.flat-ui .app-page .startup-card,
+.flat-ui .app-page .scan-info-panel,
+.flat-ui .app-page .scan-result-panel,
+.flat-ui .app-page .protection-event-panel,
+.flat-ui .app-page .protection-control-panel {
+  background: var(--state-panel);
+  border-color: rgba(90, 124, 136, .30);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .18);
+  overflow: hidden;
+  position: relative;
+}
+
+.flat-ui .app-page .detail-module::before,
+.flat-ui .app-page .protection-module::before,
+.flat-ui .app-page .settings-card::before,
+.flat-ui .app-page .history-panel::before,
+.flat-ui .app-page .firewall-card::before,
+.flat-ui .app-page .audit-card::before,
+.flat-ui .app-page .startup-card::before,
+.flat-ui .app-page .scan-info-panel::before,
+.flat-ui .app-page .scan-result-panel::before,
+.flat-ui .app-page .protection-event-panel::before,
+.flat-ui .app-page .protection-control-panel::before {
+  background: rgba(137, 160, 170, .32);
+  content: '';
+  height: 68%;
+  left: 0;
+  position: absolute;
+  top: 16%;
+  width: 2px;
+}
+
+.flat-ui .app-page .detail-module[data-module-state="active"]::before,
+.flat-ui .app-page .protection-module[data-module-state="active"]::before,
+.flat-ui .app-page .protection-control-panel[data-module-state="active"]::before { background: var(--state-active); box-shadow: 0 0 18px rgba(99, 221, 183, .32); }
+.flat-ui .app-page .detail-module[data-module-state="pending"]::before,
+.flat-ui .app-page .protection-module[data-module-state="pending"]::before,
+.flat-ui .app-page .protection-control-panel[data-module-state="pending"]::before { background: var(--state-pending); box-shadow: 0 0 18px rgba(245, 196, 95, .28); }
+.flat-ui .app-page .detail-module[data-module-state="off"],
+.flat-ui .app-page .detail-module[data-module-state="error"],
+.flat-ui .app-page .protection-module[data-module-state="off"],
+.flat-ui .app-page .protection-module[data-module-state="error"],
+.flat-ui .app-page .protection-control-panel[data-module-state="off"],
+.flat-ui .app-page .protection-control-panel[data-module-state="error"] {
+  background: linear-gradient(135deg, rgba(105, 25, 42, .34), rgba(32, 15, 22, .96) 48%, #10151a 100%);
+  border-color: var(--state-off-line);
+}
+.flat-ui .app-page .detail-module[data-module-state="off"]::before,
+.flat-ui .app-page .detail-module[data-module-state="error"]::before,
+.flat-ui .app-page .protection-module[data-module-state="off"]::before,
+.flat-ui .app-page .protection-module[data-module-state="error"]::before,
+.flat-ui .app-page .protection-control-panel[data-module-state="off"]::before,
+.flat-ui .app-page .protection-control-panel[data-module-state="error"]::before { background: var(--state-off); box-shadow: 0 0 18px rgba(255, 110, 124, .30); }
+.flat-ui .app-page .detail-module[data-module-state="limited"] { border-color: var(--state-pending-line); }
+.flat-ui .app-page .detail-module[data-module-state="limited"]::before { background: var(--state-pending); }
+
+.flat-ui .app-page .detail-module[data-module-state="off"] .section-eyebrow,
+.flat-ui .app-page .detail-module[data-module-state="error"] .section-eyebrow,
+.flat-ui .app-page .protection-module[data-module-state="off"] .section-eyebrow,
+.flat-ui .app-page .protection-module[data-module-state="error"] .section-eyebrow { color: #ff8d98; }
+.flat-ui .app-page .detail-module[data-module-state="pending"] .section-eyebrow,
+.flat-ui .app-page .detail-module[data-module-state="limited"] .section-eyebrow { color: #f4ca72; }
+
+.flat-ui .app-page .detail-module[data-module-state="off"] .protection-toggle:not(.is-active),
+.flat-ui .app-page .protection-control-panel[data-module-state="off"] .protection-toggle:not(.is-active) {
+  border-color: rgba(255, 110, 124, .62);
+  color: #ff9aa3;
+}
+
+.flat-ui .app-page .detail-module[data-module-state="off"] .protection-toggle:not(.is-active) .protection-toggle__track,
+.flat-ui .app-page .protection-control-panel[data-module-state="off"] .protection-toggle:not(.is-active) .protection-toggle__track { background: #401f27; border-color: #86414c; }
+.flat-ui .app-page .detail-module[data-module-state="pending"] .protection-toggle .protection-toggle__track { background: #493816; border-color: #9a7427; }
+
+.flat-ui .titlebar-state__dot--error {
+  background: var(--state-off) !important;
+  box-shadow: 0 0 9px rgba(255, 110, 124, .78), 0 0 20px rgba(255, 110, 124, .28);
+}
+
+.flat-ui .protection-management { margin-top: 38px; }
+.flat-ui .protection-section-header { border-bottom: 1px solid rgba(115, 143, 155, .18); display: grid; gap: 6px; margin: 0 0 18px; padding: 0 0 18px; text-align: left; }
+.flat-ui .protection-section-header .section-eyebrow { margin: 0 0 3px; }
+.flat-ui .protection-section-header h2 { color: #edf6f7; font-size: clamp(24px, 2.1vw, 30px); letter-spacing: -.035em; margin: 0; }
+.flat-ui .protection-section-header__description { color: #8fa1aa; margin: 0; max-width: 62ch; }
+.flat-ui .protection-management-grid { margin-bottom: 18px; }
+.flat-ui .protection-configuration-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.flat-ui .protection-configuration-grid > :last-child { grid-column: 1 / -1; }
+.flat-ui .protection-configuration-grid .settings-card { margin: 0; }
+
+/* Every workspace uses the same measured "field report" rhythm: the heading
+   names the task, the card holds the decision, and lists read as evidence. */
+.flat-ui .app-page > .page-header {
+  border-left: 2px solid rgba(99, 221, 183, .72);
+  margin-left: 0;
+  padding: 3px 0 20px 18px;
+}
+.flat-ui .app-page > .page-header .section-eyebrow { letter-spacing: .16em; margin-bottom: 8px; }
+.flat-ui .app-page > .page-header h1 { font-size: clamp(30px, 3.25vw, 44px); line-height: .98; margin: 0 0 11px; }
+.flat-ui .app-page > .page-header p:not(.section-eyebrow) { font-size: 14px; line-height: 1.6; }
+
+.flat-ui .scan-primary-panel,
+.flat-ui .finding-panel,
+.flat-ui .quarantine-panel,
+.flat-ui .empty-page-panel,
+.flat-ui .activity-card,
+.flat-ui .audit-hero,
+.flat-ui .audit-card,
+.flat-ui .performance-card {
+  background: linear-gradient(145deg, #101a1f, #0a1116 72%);
+  border: 1px solid rgba(90, 124, 136, .30);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, .18);
+}
+.flat-ui .scan-primary-panel,
+.flat-ui .finding-panel,
+.flat-ui .quarantine-panel,
+.flat-ui .activity-card,
+.flat-ui .audit-hero,
+.flat-ui .performance-card { border-radius: 16px; }
+.flat-ui .empty-page-panel { border-radius: 16px; min-height: 310px; }
+.flat-ui .empty-page-icon,
+.flat-ui .scan-primary-icon,
+.flat-ui .scan-result-panel__icon { background: #101e24; border: 1px solid rgba(99, 221, 183, .3); color: #83e8ca; }
+
+.flat-ui .finding-panel__header,
+.flat-ui .protection-event-panel__header,
+.flat-ui .history-panel__header,
+.flat-ui .settings-card-heading {
+  border-bottom: 1px solid rgba(115, 143, 155, .16);
+  padding-bottom: 14px;
+}
+.flat-ui .finding-list,
+.flat-ui .history-list,
+.flat-ui .protection-event-list,
+.flat-ui .quarantine-list,
+.flat-ui .firewall-recent-list { gap: 8px; }
+.flat-ui .history-empty,
+.flat-ui .settings-empty { color: #81959f; }
+
+.flat-ui .scan-mode-tab,
+.flat-ui .settings-preference,
+.flat-ui .firewall-recent-item,
+.flat-ui .quarantine-row,
+.flat-ui .finding-row,
+.flat-ui .protection-event-row {
+  border-radius: 10px;
+}
+.flat-ui .settings-action,
+.flat-ui .web-check-form button,
+.flat-ui .license-settings-summary button {
+  box-shadow: inset 0 1px rgba(255, 255, 255, .06), 0 8px 20px rgba(0, 0, 0, .15);
+}
+
+/* The cube remains Neutron's signature; a protection problem changes nearby
+   status surfaces, never the cube's geometry or material. */
+.flat-ui.protection-off .rendered-cube__face--front { background: linear-gradient(145deg, #52eab7 0%, #10a27c 52%, #075546 100%); }
+.flat-ui.protection-off .rendered-cube__face--back { background: linear-gradient(145deg, #0c725e, #043d34); }
+.flat-ui.protection-off .rendered-cube__face--right { background: linear-gradient(145deg, #1ddca2 0%, #098166 48%, #04463b 100%); }
+.flat-ui.protection-off .rendered-cube__face--left { background: linear-gradient(155deg, #45efb8 0%, #0b9a72 44%, #045143 100%); }
+.flat-ui.protection-off .rendered-cube__face--top { background: radial-gradient(circle at 18% 15%, #d4ffea 0%, #81ffd0 18%, #35eeb0 48%, #11956f 100%); }
+.flat-ui.protection-off .ambient-cube-light .rendered-cube { filter: blur(28px) drop-shadow(0 0 90px rgba(56, 230, 179, .4)); }
+.flat-ui.protection-off .hero-cube .rendered-cube { filter: blur(2px) drop-shadow(-12px -12px 28px rgba(51, 226, 174, .34)); }
+
+.flat-ui .app-page .settings-card:hover,
+.flat-ui .app-page .detail-module:hover,
+.flat-ui .app-page .protection-module:hover { border-color: rgba(135, 177, 185, .48); transform: translateY(-1px); }
+.flat-ui .app-page .settings-card,
+.flat-ui .app-page .detail-module,
+.flat-ui .app-page .protection-module { transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
+.flat-ui .app-page .settings-card:focus-within,
+.flat-ui .app-page .detail-module:focus-within { border-color: var(--state-active-line); box-shadow: 0 0 0 3px rgba(99, 221, 183, .10), 0 18px 42px rgba(0, 0, 0, .18); }
+
+@media (max-width: 900px) {
+  .flat-ui .protection-configuration-grid { grid-template-columns: 1fr; }
+  .flat-ui .protection-configuration-grid > :last-child { grid-column: auto; }
+}
+
+@media (max-width: 640px) {
+  .flat-ui .protection-section-header { align-items: flex-start; flex-direction: column; gap: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flat-ui .app-page .settings-card,
+  .flat-ui .app-page .detail-module,
+  .flat-ui .app-page .protection-module { transition: none; }
+}
+}

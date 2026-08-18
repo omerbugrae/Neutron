@@ -320,7 +320,7 @@ button { font: inherit; }
 .release-hint { margin: 14px 0 0; color: var(--muted-dim); font-size: 11px; }
 .release-foot { border-top: 1px solid rgba(210,235,255,.1); background: rgba(2,7,13,.18); }
 
-/* Lisans anahtarı uyarı paneli */
+/* Hesap erişimi uyarı paneli */
 .notice-panel { position: relative; padding: 34px 36px; overflow: hidden; border: 1px solid rgba(111,156,255,.2); border-radius: 26px; background: linear-gradient(140deg, rgba(111,156,255,.09), rgba(255,255,255,.02) 46%, rgba(98,230,189,.03)), rgba(14,24,38,.6); box-shadow: var(--shadow); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
 .notice-head { display: flex; align-items: center; gap: 13px; margin-bottom: 14px; }
 .notice-head svg { flex: 0 0 auto; color: var(--blue); }

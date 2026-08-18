@@ -55,6 +55,7 @@
   let selectedScanMode = 'quick';
   let selectedFullScanDrive = null;
   let activeThreatDetected = false;
+  let devSafeMode = false;
 
   // Activation itself now lives in its own window, opened by the main process
   // (see openActivationWindow in main.cjs). This is only a read: the main UI
@@ -65,10 +66,12 @@
     return Boolean(status?.active);
   };
 
-  const maskLicenseKey = (key) => {
-    const chunks = String(key || '').split('-');
-    if (chunks.length < 3) return 'NTR1-•••••-•••••';
-    return `${chunks[0]}-${chunks[1]}-•••••-•••••-${chunks.at(-1)}`;
+  const accountDisplayName = (license) => {
+    if (license.customerName) return license.customerName;
+    const localPart = String(license.email || '').split('@')[0];
+    const words = localPart.split(/[._-]+/).filter(Boolean);
+    if (!words.length) return 'Neutron kullanıcısı';
+    return words.map((word) => `${word.charAt(0).toLocaleUpperCase('tr-TR')}${word.slice(1)}`).join(' ');
   };
 
   const renderLicenseAccount = async () => {
@@ -77,42 +80,36 @@
     const settingsSummary = document.querySelector('[data-role="license-settings-summary"]');
     if (!result?.active || !result.license) { if (licenseAccountCard) licenseAccountCard.hidden = true; if (settingsSummary) settingsSummary.hidden = true; return; }
     if (licenseAccountCard) licenseAccountCard.hidden = false;
+    if (settingsSummary) settingsSummary.hidden = false;
     const license = result.license;
-    setText('license-customer-name', license.customerName || license.licenseId || 'Lisanslı kullanıcı');
-    setText('license-edition', `Neutron ${license.edition || 'Standard'} · Çevrimdışı hesap`);
-    setText('license-settings-name', license.customerName || license.licenseId || 'Lisanslı kullanıcı');
-    setText('license-settings-edition', `Neutron ${license.edition || 'Standard'} · Çevrimdışı hesap`);
-    const reveal = await engine.revealLicense?.();
-    const key = reveal?.ok ? reveal.key : '';
-    setText('license-masked-key', maskLicenseKey(key));
+    const displayName = accountDisplayName(license);
+    setText('license-customer-name', displayName);
+    setText('license-edition', `Neutron ${license.edition || 'Standard'}`);
+    setText('license-email', license.email || '—');
+    setText('license-settings-name', displayName);
+    setText('license-settings-edition', license.email || '');
     const expiry = license.expiresAt ? new Date(license.expiresAt) : null;
-    const issued = license.issuedAt ? new Date(license.issuedAt) : null;
     if (!expiry || Number.isNaN(expiry.getTime())) {
-      setText('license-duration', 'Süresiz lisans'); setText('license-duration-detail', 'Çevrimdışı lisans etkin');
-      setText('license-settings-duration', 'Süresiz lisans'); setText('license-settings-detail', 'Çevrimdışı lisans etkin');
+      setText('license-duration', 'Süresiz erişim'); setText('license-duration-detail', 'Hesap onaylı');
+      setText('license-settings-duration', 'Süresiz erişim'); setText('license-settings-detail', 'Hesap onaylı');
       textTargets('license-duration-bar').forEach((bar) => { bar.style.width = '100%'; });
       return;
     }
-    const total = issued && !Number.isNaN(issued.getTime()) ? Math.max(1, expiry - issued) : 1;
     const remaining = Math.max(0, expiry - Date.now());
-    const percent = Math.max(8, Math.min(100, (remaining / total) * 100));
     const days = Math.max(0, Math.ceil(remaining / 86_400_000));
     setText('license-duration', `${days} gün kaldı`);
     setText('license-duration-detail', `Bitiş: ${new Intl.DateTimeFormat('tr-TR', { dateStyle: 'long' }).format(expiry)}`);
     setText('license-settings-duration', `${days} gün kaldı`);
     setText('license-settings-detail', `Bitiş: ${new Intl.DateTimeFormat('tr-TR', { dateStyle: 'medium' }).format(expiry)}`);
-    textTargets('license-duration-bar').forEach((bar) => { bar.style.width = `${percent}%`; });
+    textTargets('license-duration-bar').forEach((bar) => { bar.style.width = `${Math.max(8, Math.min(100, (remaining / (30 * 86_400_000)) * 100))}%`; });
   };
 
   document.addEventListener('click', async (event) => {
-    const target = event.target.closest('[data-action="show-license"]');
-    if (!target) return;
-    const output = document.querySelector('[data-role="license-full-key"]');
-    if (!output) return;
-    if (!output.hidden) { output.hidden = true; target.textContent = 'Lisansı göster'; return; }
-    const result = await engine?.revealLicense?.();
-    if (!result?.ok) return;
-    output.textContent = result.key; output.hidden = false; target.textContent = 'Lisansı gizle';
+    if (event.target.closest('[data-action="sign-out-account"]')) {
+      if (!window.confirm('Neutron oturumunu kapatmak istiyor musun?')) return;
+      await engine?.signOutAccount?.();
+      return;
+    }
   });
 
   const setText = (role, value) => textTargets(role).forEach((element) => {
@@ -363,6 +360,12 @@
     setText('realtime-protection-detail', detail);
     setText('file-protection-state', heading);
     setText('file-protection-detail', detail);
+    const fileProtectionCard = document.querySelector('[data-role="file-protection-state"]')?.closest('.detail-module');
+    if (fileProtectionCard) {
+      fileProtectionCard.dataset.moduleState = enabled && /başlatılıyor|bağlanıyor/i.test(heading)
+        ? 'pending'
+        : (enabled ? 'active' : 'error');
+    }
     setText('sidebar-protection-state', enabled ? 'Koruma etkin' : 'Koruma kapalı');
     setText('sidebar-protection-detail', enabled ? 'Dosyalar gerçek zamanlı izleniyor' : 'Korumayı yeniden açın');
     setText('dashboard-state-heading', activeThreatDetected ? 'Tehdit bulundu ve engellendi.' : (enabled ? 'Bilgisayarınız izleniyor.' : 'Koruma kapalı.'));
@@ -380,6 +383,7 @@
       protectionToggle.classList.toggle('is-active', enabled);
       protectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       protectionToggle.disabled = false;
+      setModuleState(protectionToggle, enabled && /başlatılıyor|bağlanıyor/i.test(heading) ? 'pending' : (enabled ? 'active' : 'off'));
     }
     refreshProtectionVisualState();
     syncHeroPrimaryAction();
@@ -400,6 +404,7 @@
         ?.classList.toggle('is-behavior-active', enabled);
       behaviorProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       behaviorProtectionToggle.disabled = false;
+      setModuleState(behaviorProtectionToggle, enabled && !ready ? 'pending' : (enabled ? 'active' : 'off'));
     }
     refreshProtectionVisualState();
   };
@@ -415,6 +420,7 @@
       webProtectionToggle.classList.toggle('is-active', enabled);
       webProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       webProtectionToggle.disabled = false;
+      setModuleState(webProtectionToggle, enabled && !ready ? 'pending' : (enabled ? 'active' : 'off'));
     }
     refreshProtectionVisualState();
   };
@@ -428,6 +434,7 @@
       amsiProtectionToggle.classList.toggle('is-active', enabled);
       amsiProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       amsiProtectionToggle.disabled = false;
+      setModuleState(amsiProtectionToggle, enabled && !ready ? 'pending' : (enabled ? 'active' : 'off'));
     }
   };
 
@@ -440,6 +447,7 @@
       watchdogProtectionToggle.classList.toggle('is-active', enabled);
       watchdogProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       watchdogProtectionToggle.disabled = false;
+      setModuleState(watchdogProtectionToggle, enabled ? 'active' : 'off');
     }
   };
 
@@ -452,6 +460,7 @@
       wscProtectionToggle.classList.toggle('is-active', enabled);
       wscProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       wscProtectionToggle.disabled = !available;
+      setModuleState(wscProtectionToggle, available ? (enabled ? 'active' : 'off') : 'managed');
     }
   };
 
@@ -464,17 +473,36 @@
       serviceProtectionToggle.classList.toggle('is-active', enabled);
       serviceProtectionToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
       serviceProtectionToggle.disabled = false;
+      setModuleState(serviceProtectionToggle, enabled && /bağlanıyor/i.test(heading) ? 'pending' : (enabled ? 'active' : 'off'));
     }
+  };
+
+  // A state belongs to the card that explains it, not to an isolated switch.
+  // This keeps the same visual language on the overview and protection pages.
+  const setModuleState = (source, state) => {
+    const card = source?.closest?.('.detail-module, .protection-control-panel, .protection-module');
+    if (card) card.dataset.moduleState = state;
+  };
+
+  const setEngineBannerState = (label, state = 'active') => {
+    setText('engine-state', label);
+    const dot = document.querySelector('.titlebar-state__dot');
+    dot?.classList.toggle('titlebar-state__dot--pending', state === 'pending');
+    dot?.classList.toggle('titlebar-state__dot--error', state === 'error');
   };
 
   const applyAppVersion = async () => {
     try {
       const result = await engine?.getAppVersion?.();
       if (!result?.ok) throw new Error();
+      devSafeMode = Boolean(result.safeMode);
       setText('update-heading', `Neutron ${result.version}`);
-      setText('update-detail', result.packaged
-        ? 'Güncellemeler otomatik denetlenir. Elle de kontrol edebilirsiniz.'
-        : 'Geliştirme modu — güncelleme denetimi yalnızca kurulu sürümde çalışır.');
+      document.body.classList.toggle('dev-safe-mode', devSafeMode);
+      setText('update-detail', result.safeMode
+        ? 'Güvenli geliştirme modu etkin — güncelleme ve sistem değişiklikleri engellendi.'
+        : result.packaged
+          ? 'Güncellemeler otomatik denetlenir. Elle de kontrol edebilirsiniz.'
+          : 'Geliştirme modu — güncelleme denetimi yalnızca kurulu sürümde çalışır.');
     } catch {
       setText('update-heading', 'Neutron');
       setText('update-detail', 'Sürüm bilgisi alınamadı.');
@@ -484,7 +512,7 @@
   const applyEngineStatus = async () => {
     const overviewStatus = document.querySelector('[data-role="overview-engine-status"]');
     const overviewCard = overviewStatus?.closest('.protection-module');
-    const detailCard = document.querySelector('[data-glass-id="detail-engine"]');
+    const detailCard = document.querySelector('[data-role="engine-card-heading"]')?.closest('.detail-module');
     try {
       const result = await engine?.getEngineStatus?.();
       if (!result?.ok || !result.version) throw new Error('Motor durumu okunamadı');
@@ -496,28 +524,34 @@
         result.protection?.behaviorConfigured,
         result.protection?.webConfigured,
       ].filter(Boolean).length;
-      const healthy = yaraReady && ruleFiles > 0;
+      const rulesReady = yaraReady && ruleFiles > 0;
 
-      setText('overview-engine-state', healthy ? 'Çalışıyor' : 'Sınırlı');
-      setText('overview-engine-detail', healthy
+      setText('overview-engine-state', 'Çalışıyor');
+      setText('overview-engine-detail', rulesReady
         ? `Motor ${result.version} · YARA ${ruleFiles} kural dosyasıyla etkin.`
         : `Motor ${result.version} çalışıyor; YARA kuralları kullanılamıyor.`);
-      setText('engine-card-heading', `Neutron Engine ${result.version}`);
-      setText('engine-card-detail', healthy
+      setText('engine-card-heading', `Neutron Engine ${result.version} · Çalışıyor`);
+      setText('engine-card-detail', rulesReady
         ? `Proton ${protonVersion} · ${ruleFiles} YARA dosyası · ${activeModules}/3 canlı koruma modülü etkin.`
-        : `Proton ${protonVersion} yüklü; YARA motoru veya kural dosyaları kullanılamıyor.`);
-      overviewStatus?.classList.toggle('module-status--pending', !healthy);
+        : `Motor çalışıyor. Proton ${protonVersion} yüklü; YARA motoru veya kural dosyaları henüz kullanılamıyor.`);
+      setEngineBannerState(`Neutron Engine ${result.version} çalışıyor`);
+      overviewStatus?.classList.remove('module-status--pending');
       overviewCard?.classList.remove('protection-module--pending', 'engine-unavailable');
-      overviewCard?.classList.toggle('engine-limited', !healthy);
+      overviewCard?.classList.toggle('engine-limited', !rulesReady);
       detailCard?.classList.remove('engine-unavailable');
-      detailCard?.classList.toggle('engine-limited', !healthy);
+      detailCard?.classList.toggle('engine-limited', !rulesReady);
+      setModuleState(overviewStatus, rulesReady ? 'active' : 'limited');
+      setModuleState(detailCard, rulesReady ? 'active' : 'limited');
     } catch {
       setText('overview-engine-state', 'Kullanılamıyor');
       setText('overview-engine-detail', 'Yerel tarama motoruna bağlanılamadı.');
       setText('engine-card-heading', 'Motor kullanılamıyor');
       setText('engine-card-detail', 'Neutron Engine durum bilgisi alınamadı. Uygulamayı yeniden başlatın.');
+      setEngineBannerState('Neutron Engine kullanılamıyor', 'error');
       overviewCard?.classList.add('engine-unavailable');
       detailCard?.classList.add('engine-unavailable');
+      setModuleState(overviewStatus, 'error');
+      setModuleState(detailCard, 'error');
     }
   };
 
@@ -525,6 +559,31 @@
     try {
       const status = await engine?.getProtectionStatus?.();
       if (!status?.ok) throw new Error('Koruma durumu okunamadı');
+      if (status.safeMode) {
+        devSafeMode = true;
+        document.body.classList.add('dev-safe-mode');
+        const detail = 'NEUTRON_DEV_SAFE etkin; hiçbir koruma bileşeni veya sistem entegrasyonu başlatılmadı.';
+        setProtectionState(false, 'Güvenli geliştirme modu', detail);
+        setBehaviorProtectionState(false, false, 'Devre dışı', detail);
+        setWebProtectionState(false, false, 'Devre dışı', detail);
+        setAmsiProtectionState(false, false, 'Devre dışı', detail);
+        setWatchdogProtectionState(false, 'Devre dışı', detail);
+        setWscProtectionState(false, 'Devre dışı', detail, false);
+        setServiceProtectionState(false, 'Devre dışı', detail);
+        [
+          protectionToggle, behaviorProtectionToggle, webProtectionToggle,
+          amsiProtectionToggle, watchdogProtectionToggle, wscProtectionToggle,
+          serviceProtectionToggle,
+        ].filter(Boolean).forEach((control) => {
+          control.disabled = true;
+          control.title = 'Güvenli geliştirme modunda kullanılamaz';
+        });
+        [...quickScanButtons, ...folderScanButtons].forEach((control) => {
+          control.disabled = true;
+          control.title = 'Güvenli geliştirme modunda tarama başlatılamaz';
+        });
+        return;
+      }
       if (status.enabled) {
         setProtectionState(true, status.ready ? 'Koruma etkin' : 'Koruma başlatılıyor', status.ready
           ? 'Kullanıcı profiliniz ve geçici klasörler izleniyor.'
@@ -598,7 +657,6 @@
             : 'Servise bağlanılıyor…')
           : 'Sistem servisi modu kapalı. Etkinleştirmek yönetici izni gerektirir.',
       );
-      await applyEngineStatus();
     } catch {
       setProtectionState(false, 'Koruma kullanılamıyor', 'Python motoruna bağlanılamadı.');
       setBehaviorProtectionState(false, false, 'Kullanılamıyor', 'Davranış izleme motoruna bağlanılamadı.');
@@ -926,13 +984,15 @@
       // with text. Those mark their text span with data-toggle-label.
       const label = button.querySelector('[data-toggle-label]') || button.querySelector('span');
       if (label) label.textContent = enabled ? 'Açık' : 'Kapalı';
-      button.disabled = false;
+      button.disabled = devSafeMode;
+      button.title = devSafeMode ? 'Güvenli geliştirme modunda ayarlar değiştirilemez' : '';
+      setModuleState(button, enabled ? 'active' : 'off');
     });
     setText('ransomware-protection-state', settings.ransomware_protection_enabled ? 'Etkin' : 'Kapalı');
     if (scanLimitSelect) {
       const limit = Number(settings.scan_max_files);
       scanLimitSelect.value = String(Number.isFinite(limit) ? limit : 1500);
-      scanLimitSelect.disabled = false;
+      scanLimitSelect.disabled = devSafeMode;
     }
     renderWatchPaths(Array.isArray(settings.watch_paths) ? settings.watch_paths : []);
     if (vtApiKeyInput && document.activeElement !== vtApiKeyInput) {
@@ -2638,6 +2698,7 @@
   renderLicenseAccount();
   applyExclusions();
   applyAnalysisCacheStatus();
+  applyEngineStatus();
   applyProtectionStatus();
   applyAppVersion();
 })();

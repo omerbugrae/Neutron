@@ -40,18 +40,10 @@ ShowInstDetails nevershow
 ShowUninstDetails nevershow
 BrandingText "Neutron Security"
 
-Var LicenseDialog
-Var LicenseInput
-Var LicenseDeviceInput
-Var LicenseKey
-Var LicenseDeviceHash
-Var HadPreviousLicense
 Var ProgramDataDir
 Var DeleteUserData
-Var DeleteLicenseData
 Var UninstallDialog
 Var DeleteUserDataCheckbox
-Var DeleteLicenseCheckbox
 Var ProfileIndex
 Var ProfileKey
 Var ProfilePath
@@ -109,7 +101,6 @@ VIAddVersionKey /LANG=1055 "LegalCopyright" "Neutron"
 !define MUI_LICENSEPAGE_CHECKBOX_TEXT "Okudum, anladım ve kabul ediyorum."
 !insertmacro MUI_PAGE_LICENSE "${PROJECT_ROOT}\\tools\\installer\\risk-bildirimi.txt"
 
-Page custom LicensePageCreate LicensePageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -140,56 +131,6 @@ Function .onInit
   StrCmp $ProgramDataDir "" 0 program_data_ready
   StrCpy $ProgramDataDir "C:\\ProgramData"
 program_data_ready:
-  ReadRegStr $LicenseDeviceHash HKLM "SOFTWARE\\Microsoft\\Cryptography" "MachineGuid"
-  StrCmp $LicenseDeviceHash "" 0 device_hash_done
-  StrCpy $LicenseDeviceHash "Cihaz kodu okunamadı"
-device_hash_done:
-  StrCpy $HadPreviousLicense "0"
-  IfFileExists "$ProgramDataDir\\Neutron\\license\\activation.key" 0 license_backup_init_done
-  CopyFiles /SILENT "$ProgramDataDir\\Neutron\\license\\activation.key" "$PLUGINSDIR"
-  Rename "$PLUGINSDIR\\activation.key" "$PLUGINSDIR\\previous-activation.key"
-  StrCpy $HadPreviousLicense "1"
-license_backup_init_done:
-FunctionEnd
-
-Function LicensePageCreate
-  !insertmacro MUI_HEADER_TEXT "Lisans aktivasyonu" "Neutron bu bilgisayara bağlanan geçerli bir lisans gerektirir."
-  nsDialogs::Create 1018
-  Pop $LicenseDialog
-  ${If} $LicenseDialog == error
-    Abort
-  ${EndIf}
-
-  ${NSD_CreateLabel} 0 0 100% 24u "Aşağıdaki cihaz kodunu lisans oluşturucuya girin. Üretilen NTR1 aktivasyon anahtarını bu sayfaya yapıştırmadan kurulum devam etmez."
-  Pop $0
-  ${NSD_CreateLabel} 0 30u 100% 10u "Cihaz kodu"
-  Pop $0
-  ${NSD_CreateText} 0 42u 100% 14u "$LicenseDeviceHash"
-  Pop $LicenseDeviceInput
-  SendMessage $LicenseDeviceInput 0x00CF 1 0
-  ${NSD_CreateLabel} 0 60u 100% 16u "Program yazarıyla lisans kodu almak için iletişime geçin ve bu cihaz kodunu iletin."
-  Pop $0
-  ${NSD_CreateLabel} 0 80u 100% 10u "Aktivasyon anahtarı"
-  Pop $0
-  ${NSD_CreateText} 0 92u 100% 14u "$LicenseKey"
-  Pop $LicenseInput
-  ${NSD_CreateLabel} 0 114u 100% 22u "Anahtarın imzası, cihaz bağlantısı ve son kullanma tarihi kurulumdan önce doğrulanır."
-  Pop $0
-  nsDialogs::Show
-FunctionEnd
-
-Function LicensePageLeave
-  ${NSD_GetText} $LicenseInput $LicenseKey
-  StrCmp $LicenseKey "" license_input_error
-  StrCpy $0 $LicenseKey 5
-  StrCmp $0 "NTR1-" license_input_valid license_input_error
-license_input_error:
-  MessageBox MB_OK|MB_ICONEXCLAMATION "NTR1- ile başlayan aktivasyon anahtarını girin."
-  Abort
-license_input_valid:
-  FileOpen $0 "$PLUGINSDIR\\activation.key" w
-  FileWrite $0 "$LicenseKey"
-  FileClose $0
 FunctionEnd
 
 Function un.onInit
@@ -203,10 +144,9 @@ Function un.onInit
 un_program_data_ready:
 
   ; Varsayılan: hiçbir şey silinmez. Kaldırma sihirbazındaki veri sayfası
-  ; (un.OptionsPageCreate) bu iki değeri kullanıcının seçimine göre değiştirir;
-  ; sessiz kaldırmada o sayfa hiç gösterilmediği için bu varsayılanlar kalır.
+  ; (un.OptionsPageCreate) bu değeri kullanıcının seçimine göre değiştirir;
+  ; sessiz kaldırmada o sayfa hiç gösterilmediği için bu varsayılan kalır.
   StrCpy $DeleteUserData "0"
-  StrCpy $DeleteLicenseData "0"
 FunctionEnd
 
 ; Kaldırma sihirbazının veri sayfası.
@@ -233,15 +173,10 @@ Function un.OptionsPageCreate
 
   ${NSD_CreateCheckBox} 0 32u 100% 10u "Kişisel verileri sil"
   Pop $DeleteUserDataCheckbox
-  ${NSD_CreateLabel} 12u 44u 96% 34u "Ayarlar, tarama geçmişi ve veritabanı; makine öğrenmesi modelleri (kullanıcı profili başına yaklaşık 500 MB); ve KARANTINADAKİ DOSYALAR. Karantinadaki dosyalar sizin kendi dosyalarınızdır ve silinirlerse geri alınamaz."
+  ${NSD_CreateLabel} 12u 44u 96% 34u "Ayarlar, tarama geçmişi ve veritabanı; makine öğrenmesi modelleri (kullanıcı profili başına yaklaşık 500 MB); ve KARANTINADAKİ DOSYALAR. Karantinadaki dosyalar sizin kendi dosyalarınızdır ve silinirlerse geri alınamaz. Hesap oturumu (Supabase) da bu klasörde tutulur ve aynı kutuyla birlikte silinir."
   Pop $0
 
-  ${NSD_CreateCheckBox} 0 82u 100% 10u "Lisans anahtarını sil"
-  Pop $DeleteLicenseCheckbox
-  ${NSD_CreateLabel} 12u 94u 96% 24u "Aktivasyon anahtarı bu bilgisayara bağlıdır. Silerseniz yeniden kurulumda yeni bir anahtar gerekir. İşaretlemezseniz anahtar diskte kalır ve yeniden kurulum onu kendisi bulur."
-  Pop $0
-
-  ${NSD_CreateLabel} 0 122u 100% 16u "Hiçbirini işaretlemezseniz yalnız program kaldırılır; verileriniz olduğu gibi kalır."
+  ${NSD_CreateLabel} 0 90u 100% 16u "İşaretlemezseniz yalnız program kaldırılır; verileriniz olduğu gibi kalır."
   Pop $0
 
   nsDialogs::Show
@@ -253,12 +188,6 @@ Function un.OptionsPageLeave
     StrCpy $DeleteUserData "1"
   ${Else}
     StrCpy $DeleteUserData "0"
-  ${EndIf}
-  ${NSD_GetState} $DeleteLicenseCheckbox $0
-  ${If} $0 == 1
-    StrCpy $DeleteLicenseData "1"
-  ${Else}
-    StrCpy $DeleteLicenseData "0"
   ${EndIf}
 
   ; Geri alınamaz tek adım burasıdır ve onayı, kutuyu işaretleyen tıklamadan
@@ -299,43 +228,6 @@ Section "Neutron" SEC_MAIN
   File /r "${APP_DIR}\\*.*"
   SetDetailsPrint textonly
 
-  DetailPrint "Lisans doğrulanıyor ve kaydediliyor… (birkaç dakika sürebilir)"
-
-  ; nsExec reports failures as the literal strings "error" and "timeout", not
-  ; as exit codes, and IntCmp reads "timeout" as 0 -- i.e. as success. Without
-  ; the two StrCmp guards below, a slow start here was silently treated as a
-  ; verified licence: the installer carried on, nothing was ever written to
-  ; ProgramData, and the installed app then asked for a licence the user had
-  ; already entered. The robocopy call further down always had these guards;
-  ; this one and the provisioning call did not.
-  ;
-  ; The timeout is generous because this is an Electron cold start from a
-  ; freshly written temp staging directory, with the on-access scanner
-  ; reading every file it touches. 30 s was not enough.
-  nsExec::ExecToStack /TIMEOUT=420000 '"$PLUGINSDIR\\NeutronStage\\Neutron.exe" --activate-license-file "$PLUGINSDIR\\activation.key"'
-  Pop $0
-  Pop $1
-  StrCmp $0 "error" license_verification_failed
-  StrCmp $0 "timeout" license_verification_failed
-  IntCmp $0 0 license_check_persisted license_verification_failed license_verification_failed
-
-license_check_persisted:
-  ; Trusting the exit code alone is what produced an installed app that asked
-  ; for a licence the user had already entered: the activation reported
-  ; success but nothing survived it. Check the artefact itself, not the
-  ; report. HKLM is the copy the app reads first, so that is what must exist.
-  ClearErrors
-  ReadRegStr $2 HKLM "Software\\Neutron" "ActivationKey"
-  IfErrors 0 license_verified
-  StrCmp $2 "" 0 license_verified
-  StrCpy $0 "kayit dogrulanamadi"
-license_verification_failed:
-  RMDir /r "$PLUGINSDIR\\NeutronStage"
-  MessageBox MB_OK|MB_ICONSTOP "Lisans doğrulanamadı (kod $0). Anahtar hatalı, süresi dolmuş, başka bir bilgisayara bağlı olabilir ya da lisans kaydı diske yazılamadı. Hiçbir Neutron servisi ya da koruması kurulmadı."
-  SetErrorLevel 2
-  Quit
-license_verified:
-  DetailPrint "Lisans doğrulandı ve kaydedildi."
   DetailPrint "Çalışan Neutron bileşenleri durduruluyor…"
 
   ; A previous Neutron on this machine sits in the tray rather than exiting
@@ -413,14 +305,6 @@ amsi_unlock_done:
   StrCmp $0 "timeout" install_copy_failed
   IntCmp $0 8 install_copy_failed install_copy_ok install_copy_failed
 install_copy_failed:
-  StrCmp $HadPreviousLicense "1" restore_previous_license remove_new_license
-restore_previous_license:
-  CreateDirectory "$ProgramDataDir\\Neutron\\license"
-  CopyFiles /SILENT "$PLUGINSDIR\\previous-activation.key" "$ProgramDataDir\\Neutron\\license"
-  Goto install_copy_failure_done
-remove_new_license:
-  Delete "$ProgramDataDir\\Neutron\\license\\activation.key"
-install_copy_failure_done:
   RMDir /r "$PLUGINSDIR\\NeutronStage"
   MessageBox MB_OK|MB_ICONSTOP "Kurulum dosyaları hedef klasöre kopyalanamadı (robocopy kodu $0). Güvenlik bileşenleri etkinleştirilmedi.$\r$\n$\r$\nTanılama: $TEMP\Neutron-install-copy.log"
   SetErrorLevel 3
@@ -429,7 +313,6 @@ install_copy_ok:
   DetailPrint "Program dosyaları kopyalandı."
   Delete "$TEMP\\Neutron-install-copy.log"
   RMDir /r "$PLUGINSDIR\\NeutronStage"
-  Delete "$PLUGINSDIR\\activation.key"
   DetailPrint "Kısayollar ve kayıt defteri girdileri oluşturuluyor…"
 
   SetOutPath "$INSTDIR\\Recovery"
@@ -516,21 +399,11 @@ provision_failed:
   RMDir "$INSTDIR\\Recovery"
   Delete "$INSTDIR\\Uninstall.exe"
   RMDir "$INSTDIR"
-  StrCmp $HadPreviousLicense "1" provision_restore_previous provision_remove_new_license
-provision_restore_previous:
-  CreateDirectory "$ProgramDataDir\\Neutron\\license"
-  CopyFiles /SILENT "$PLUGINSDIR\\previous-activation.key" "$ProgramDataDir\\Neutron\\license"
-  Goto provision_rollback_done
-provision_remove_new_license:
-  Delete "$ProgramDataDir\\Neutron\\license\\activation.key"
-provision_rollback_done:
-  Delete "$PLUGINSDIR\\previous-activation.key"
   MessageBox MB_OK|MB_ICONSTOP "Neutron'un zorunlu güvenlik bileşenleri kurulamadı (kod $2). Eksik kurulum geri alındı; program çalıştırılmadı.$\r$\n$\r$\nTanılama: $TEMP\Neutron-install-error.txt"
   SetErrorLevel 4
   Quit
 provision_ok:
   Delete "$TEMP\Neutron-install-error.txt"
-  Delete "$PLUGINSDIR\\previous-activation.key"
   DetailPrint "Güvenlik bileşenleri etkinleştirildi."
   DetailPrint "Kurulum tamamlandı."
   SetDetailsPrint none
@@ -623,19 +496,14 @@ cleanup_done:
   RMDir /r /REBOOTOK "$INSTDIR"
 
 uninstall_user_data:
-  ; İki ayrı karar, iki ayrı kutu (bkz. un.OptionsPageCreate). Lisans klasörü
-  ; kasıtlı olarak kişisel verinin dışında tutuluyor: verileri silip lisansı
-  ; korumak, yeniden kurulumda baştan aktivasyon gerektirmeden sıfırdan
-  ; başlamanın tek yolu -- ve tersinin de mümkün olması gerekiyor.
-  StrCmp $DeleteLicenseData "1" 0 uninstall_keep_license
-  RMDir /r "$ProgramDataDir\\Neutron\\license"
-uninstall_keep_license:
-
   StrCmp $DeleteUserData "1" 0 uninstall_prune_machine_dir
 
   ; Makine geneli durum: servis modunda veritabanı, karantina ve modeller
-  ; burada yaşar. Lisans klasörü bilerek dışarıda: onu yalnız yukarıdaki
-  ; kutu siler.
+  ; burada yaşar. $ProgramDataDir\Neutron\license artık yeni kurulumlarda
+  ; hiç oluşmuyor (hesap oturumu %APPDATA%'da tutulur) -- yalnızca hesap
+  ; sisteminden önceki bir sürümden yükseltenlerde bulunabilecek eski bir
+  ; kalıntı, o yüzden ayrı bir soru yerine burada sessizce temizleniyor.
+  RMDir /r "$ProgramDataDir\\Neutron\\license"
   RMDir /r "$ProgramDataDir\\Neutron\\data"
 
   ; Per-user state (models, database, quarantine, per-user licence). The

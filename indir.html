@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>İndir — Neutron</title>
-  <meta name="description" content="Neutron kurulum dosyasını indirin: sürüm bilgisi, sistem gereksinimleri, lisans anahtarı adımı, dosya doğrulama ve kaldırma yönergeleri." />
+  <meta name="description" content="Neutron v0.43 kurulum dosyasını indirin: sürüm bilgisi, hesapla giriş, dosya doğrulama ve kaldırma yönergeleri." />
   <link rel="icon" href="assets/neutron.ico" />
   <link rel="stylesheet" href="./style.css?v=20260818.6" />
 </head>
@@ -62,13 +62,13 @@
             <span class="release-channel">KARARLI</span>
           </div>
           <div class="release-body">
-            <p class="release-version">v0.4.0</p>
-            <p class="release-file"><code>Neutron-0.4.0-x64-Setup.exe</code></p>
+            <p class="release-version">v0.43</p>
+            <p class="release-file"><code>Neutron-0.43-x64-Setup.exe</code></p>
             <dl class="release-meta">
               <div><dt>Platform</dt><dd>Windows 10 (1809+) / 11</dd></div>
               <div><dt>Mimari</dt><dd>x64 (AMD64)</dd></div>
               <div><dt>Kurulum türü</dt><dd>NSIS sihirbazı, yönetici izni</dd></div>
-              <div><dt>Lisans</dt><dd>Cihaza bağlı anahtar gerekir</dd></div>
+              <div><dt>Erişim</dt><dd>Onaylı Neutron hesabı gerekir</dd></div>
             </dl>
             <a class="btn btn-primary release-btn" href="https://github.com/omerbugrae/Neutron/releases/latest" target="_blank" rel="noopener">
               <span>GitHub sürüm sayfasını aç</span>
@@ -84,25 +84,25 @@
       </div>
     </section>
 
-    <!-- Gate: license key -->
+    <!-- Gate: account access -->
     <section class="section">
       <div class="container">
         <div class="notice-panel">
           <div class="notice-head">
             <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M15 7a4 4 0 11-3.8 5.2L7 16.4V19H4v-3l6.8-6.8A4 4 0 0115 7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <h2>Kurulumdan önce: lisans anahtarı gerekiyor</h2>
+            <h2>İlk açılışta: Neutron hesabınla giriş yap</h2>
           </div>
           <p>
-            Kurulum sihirbazı, indirdiğiniz dosyayı çalıştırdığınızda bir <b>cihaz kodu</b> gösterir
-            ve buna karşılık gelen bir <b>aktivasyon anahtarı</b> ister. Anahtar bu bilgisayara
-            bağlıdır; girilmeden kurulum devam etmez ve hiçbir güvenlik bileşeni kurulmaz.
+            Kurulum tamamlandıktan sonra Neutron hesabınla giriş yaparsın. Hesabın onaylıysa
+            çalışma alanı ve koruma bileşenleri açılır. Aynı hesabı giriş yaptığın diğer cihazlarda
+            da kullanabilirsin; cihaz kodu veya aktivasyon anahtarı gerekmez.
           </p>
           <ol class="key-steps">
-            <li><span>1</span><p>Kurulumu başlatın, <b>Lisans aktivasyonu</b> adımındaki cihaz kodunu kopyalayın.</p></li>
-            <li><span>2</span><p>Cihaz kodunu program yazarına iletip <code>NTR1-</code> ile başlayan anahtarı isteyin.</p></li>
-            <li><span>3</span><p>Anahtarı sihirbaza yapıştırın. İmza, cihaz bağlantısı ve son kullanma tarihi kurulumdan önce doğrulanır.</p></li>
+            <li><span>1</span><p>Kurulumu GitHub Releases üzerinden indirdiğin dosyayla tamamla.</p></li>
+            <li><span>2</span><p>Neutron açıldığında hesabınla giriş yap veya yeni hesap oluştur.</p></li>
+            <li><span>3</span><p>Hesap onaylandığında koruma çalışma alanı otomatik açılır.</p></li>
           </ol>
-          <a class="inline-link" href="https://github.com/omerbugrae/Neutron/issues" target="_blank" rel="noopener">Anahtar talebi için GitHub Issues<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 12h14m0 0l-6-6m6 6l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+          <a class="inline-link" href="https://github.com/omerbugrae/Neutron/issues" target="_blank" rel="noopener">Hesap erişimiyle ilgili GitHub Issues<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 12h14m0 0l-6-6m6 6l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
         </div>
       </div>
     </section>
@@ -122,7 +122,7 @@
           <div class="verify-step">
             <p class="verify-label">1 · Özeti hesaplayın</p>
             <div class="code-line">
-              <code id="hashCommand">Get-FileHash -Algorithm SHA256 "$HOME\Downloads\Neutron-0.4.0-x64-Setup.exe"</code>
+              <code id="hashCommand">Get-FileHash -Algorithm SHA256 "$HOME\Downloads\Neutron-0.43-x64-Setup.exe"</code>
               <button class="copy-btn" type="button" data-copy-target="hashCommand" aria-label="Komutu panoya kopyala">Kopyala</button>
             </div>
           </div>
@@ -199,8 +199,8 @@
           <li>
             <span class="rung-mark">02</span>
             <div>
-              <h3>Lisans doğrulanır</h3>
-              <p>Girdiğiniz <code>NTR1-</code> anahtarının imzası, cihaz bağlantısı ve süresi denetlenir. Doğrulanmazsa hiçbir bileşen kurulmaz ve kurulum durur.</p>
+              <h3>Hesapla giriş yapılır</h3>
+              <p>İlk açılışta Neutron hesabınla giriş yaparsın. Onaylı hesabın erişim süresi denetlenir; uygun değilse çalışma alanı açılmaz.</p>
             </div>
           </li>
           <li>
@@ -234,8 +234,8 @@
         <p class="section-eyebrow">KALDIRMA</p>
         <h2 class="section-title">Kurduğunuz kadar kolay kaldırın.</h2>
         <p class="section-lede">
-          Kaldırma sihirbazı iki ayrı soru sorar: kişisel verileriniz silinsin mi, lisans anahtarı
-          silinsin mi. İkisini de işaretlemezseniz yalnız program kaldırılır.
+          Kaldırma sihirbazı kişisel verilerinizin silinip silinmeyeceğini sorar. Hesap oturumunu
+          uygulama içinden ayrıca kapatabilirsiniz; işaretlemezseniz yalnız program kaldırılır.
         </p>
 
         <div class="uninstall-grid">
@@ -252,7 +252,7 @@
           <article class="uninstall-card">
             <span class="uninstall-tag">VERİLERİNİZ</span>
             <h3>Ne kalır, ne gider</h3>
-            <p>Karantinadaki dosyalar sizin dosyalarınızdır; silinirse geri gelmez. İşaretlemezseniz ayarlar, tarama geçmişi, ML modelleri ve lisans diskte kalır ve yeniden kurulumda kullanılır.</p>
+            <p>Karantinadaki dosyalar sizin dosyalarınızdır; silinirse geri gelmez. İşaretlemezseniz ayarlar, tarama geçmişi, ML modelleri ve yerel oturum verisi diskte kalır ve yeniden kurulumda kullanılır.</p>
           </article>
         </div>
       </div>
