@@ -66,21 +66,21 @@
           Deneysel yazılımdır, kendi sorumluluğunuzda kullanılır. Microsoft Defender'ın yerini almaz.
         </p>
         </div>
-        <div class="core-visual" aria-label="Neutron yerel tarama motoru etkin" role="img">
-          <div class="core-topline"><span>NEUTRON / LOCAL ENGINE</span><span class="live-dot">ETKİN</span></div>
-          <div class="orbit-field" aria-hidden="true">
-            <span class="orbit orbit-one"></span><span class="orbit orbit-two"></span>
-            <span class="electron electron-one"></span><span class="electron electron-two"></span>
-            <div class="core-mark"><img src="assets/neutron-logo.png" alt="" /></div>
-            <span class="scan-line"></span>
+        <div class="protection-console" aria-label="Neutron koruma konsolu; dört koruma katmanı etkin" role="img">
+          <div class="console-bar"><span>NEUTRON://LOCALHOST</span><span class="console-status"><i></i> KORUMA ETKİN</span></div>
+          <div class="console-main">
+            <div class="shield-gauge" aria-hidden="true">
+              <svg viewBox="0 0 220 220"><circle cx="110" cy="110" r="88" class="gauge-track" /><circle cx="110" cy="110" r="88" class="gauge-value" /></svg>
+              <div class="gauge-center"><img src="assets/neutron-logo.png" alt="" /><strong>YEREL</strong><span>motor çalışıyor</span></div>
+            </div>
+            <div class="module-stack">
+              <div><span>01</span><p><b>Dosya sistemi</b><small>YARA + statik analiz</small></p><i>ON</i></div>
+              <div><span>02</span><p><b>Bellek</b><small>Süreç davranışı</small></p><i>ON</i></div>
+              <div><span>03</span><p><b>Ağ</b><small>Bağlantı görünürlüğü</small></p><i>ON</i></div>
+              <div><span>04</span><p><b>Sistem</b><small>Servis + sürücü</small></p><i>ON</i></div>
+            </div>
           </div>
-          <div class="core-readout">
-            <span><b>04</b> koruma katmanı</span>
-            <span><b>0</b> buluta gönderilen veri</span>
-          </div>
-          <div class="engine-log" aria-hidden="true">
-            <span><i></i> YARA motoru hazır</span><span><i></i> Gerçek zamanlı izleme açık</span>
-          </div>
+          <div class="console-foot"><span><b>0 B</b> dışarı aktarılan veri</span><span><b>LOCAL</b> analiz hedefi</span><span class="pulse-label">CANLI</span></div>
         </div>
       </div>
     </section>
