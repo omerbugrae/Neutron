@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neutron — Deneysel, yerel-öncelikli güvenlik yazılımı</title>
+  <meta name="description" content="Neutron; Windows için deneysel, yerel-öncelikli güvenlik yazılımı. YARA tabanlı tespit, EMBER destekli makine öğrenmesi, gerçek zamanlı koruma ve şeffaf, kaynağı açık kod." />
+  <link rel="icon" href="assets/neutron.ico" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div class="noise-overlay" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#top">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </a>
+      <nav class="nav" aria-label="Ana gezinme">
+        <a href="#features">Özellikler</a>
+        <a href="#how-it-works">Nasıl çalışır</a>
+        <a href="#risk">Risk bildirimi</a>
+        <a href="#requirements">Gereksinimler</a>
+        <a href="#faq">SSS</a>
+        <a class="nav-cta" href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="mobileNav" aria-label="Menüyü aç/kapat">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobil gezinme">
+      <a href="#features">Özellikler</a>
+      <a href="#how-it-works">Nasıl çalışır</a>
+      <a href="#risk">Risk bildirimi</a>
+      <a href="#requirements">Gereksinimler</a>
+      <a href="#faq">SSS</a>
+      <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+
+    <!-- Hero -->
+    <section class="hero">
+      <div class="hero-grid" aria-hidden="true"></div>
+      <div class="container hero-inner">
+        <p class="eyebrow">Deneysel · Yerel-öncelikli · Windows 10/11</p>
+        <h1>Windows için şeffaf,<br /><span class="text-accent">yerelde çalışan</span> güvenlik.</h1>
+        <p class="hero-lede">
+          Neutron; dosya, bellek, ağ ve süreç davranışını yerelde tarayan deneysel bir güvenlik
+          uygulaması. YARA kuralları, EMBER tabanlı makine öğrenmesi ve gerçek zamanlı koruma
+          bir arada — kodu açık, veriniz sunucularımıza gitmiyor çünkü sunucumuz yok.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/omerbugrae/Neutron/releases" target="_blank" rel="noopener">
+            <span>En son sürümü indir</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">Kaynak kodunu incele</a>
+        </div>
+        <p class="hero-note">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A2 2 0 0 0 3.82 21h16.36a2 2 0 0 0 1.71-2.96L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Deneysel yazılımdır, kendi sorumluluğunuzda kullanılır. Microsoft Defender'ın yerini almaz.
+        </p>
+      </div>
+    </section>
+
+    <!-- Trust strip -->
+    <section class="trust-strip">
+      <div class="container trust-strip-inner">
+        <div class="trust-item">
+          <strong>Yerel-öncelikli</strong>
+          <span>Analiz cihazınızda çalışır</span>
+        </div>
+        <div class="trust-item">
+          <strong>Kaynağı görünür</strong>
+          <span>PolyForm Noncommercial 1.0.0</span>
+        </div>
+        <div class="trust-item">
+          <strong>İmzalı güncellemeler</strong>
+          <span>Geri alma desteğiyle Proton kanalı</span>
+        </div>
+        <div class="trust-item">
+          <strong>Tek platform</strong>
+          <span>Windows 10 / 11 · x64</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section id="features" class="section">
+      <div class="container">
+        <p class="section-eyebrow">ÖZELLİKLER</p>
+        <h2 class="section-title">Tek uygulama, çok katmanlı görünürlük.</h2>
+        <p class="section-lede">
+          Neutron; imza eşleştirmeden davranış izlemeye, sürücü kaydından WMI kalıcılığına kadar
+          Windows'un farklı katmanlarını aynı anda izler. Her katman ayrı ayrı açıklanmış,
+          hiçbiri "kara kutu" değil.
+        </p>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🔎</div>
+            <h3>Dosya tarama</h3>
+            <p>Hızlı, tam ve seçili klasör taramaları. Zamanlanmış taramalar Neutron kapalıyken bile servis üzerinden çalışabilir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧬</div>
+            <h3>YARA tabanlı tespit</h3>
+            <p>Kural ve imza tabanlı analiz; topluluk ve imzalı Proton kanalından gelen güncel tehdit tanımlarıyla beslenir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧠</div>
+            <h3>Statik analiz + ML</h3>
+            <p>PE yapısal analizi ve EMBER tabanlı makine öğrenmesi puanlaması; imzasız dosyalarda sezgisel tespiti güçlendirir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🛡️</div>
+            <h3>Gerçek zamanlı koruma</h3>
+            <p>İsteğe bağlı dosya, bellek, ağ ve fidye yazılımı izleme; şüpheli süreç zincirlerini anlık olarak yakalar.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">📦</div>
+            <h3>Karantina</h3>
+            <p>Şüpheli dosyalar için şifreli karantina ve geri yükleme akışı. Her otomatik müdahale kayıtlı ve geri alınabilir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🪟</div>
+            <h3>AMSI entegrasyonu</h3>
+            <p>PowerShell, WScript ve diğer desteklenen Windows betik ortamları için ön çalıştırma denetimi.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🔄</div>
+            <h3>Proton güncellemeleri</h3>
+            <p>İmzalı tehdit istihbaratı ve kural güncellemeleri; doğrulanmayan paketler asla etkinleştirilmez, geri alma desteklenir.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧷</div>
+            <h3>Sürücü ve servis izleme</h3>
+            <p>Yeni kaydedilen ya da hedefi değiştirilen çekirdek sürücülerini ve Windows servislerini bildirir — BYOVD görünürlüğü.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">📜</div>
+            <h3>Olay günlüğü izleme</h3>
+            <p>Temizlenen denetim günlükleri, yeni yerel yöneticiler, servis kurulumları ve Defender'ın kapatılması gibi olayları yakalar.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🧱</div>
+            <h3>Windows güvenlik duruşu</h3>
+            <p>Defender, güvenlik duvarı, UAC, RDP, Güvenli Önyükleme ve sürücü imzalama durumunu sürekli denetler.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🔑</div>
+            <h3>Kimlik bilgisi koruması</h3>
+            <p>LSASS belleğine okuma erişimi açan süreçleri bildirir; imzasız/güvenilmeyen olanları otomatik sonlandırır.</p>
+          </article>
+          <article class="feature-card">
+            <div class="feature-icon" aria-hidden="true">🛑</div>
+            <h3>Otomatik müdahale</h3>
+            <p>Görevleri ve servisleri devre dışı bırakır, sertifika kaldırır, Windows ayarlarını geri alır — kayıtlı, hız sınırlı, geri alınabilir.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- How it works -->
+    <section id="how-it-works" class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">NASIL ÇALIŞIR</p>
+        <h2 class="section-title">Katmanlı, yerelde çalışan bir mimari.</h2>
+        <p class="section-lede">
+          Masaüstü uygulaması ve isteğe bağlı Sistem Servisi Modu aynı motoru paylaşır. Servis
+          modu açıldığında koruma, Neutron penceresi kapalıyken ve hatta kimse oturum açmamışken
+          bile sürdürülür.
+        </p>
+
+        <div class="flow-diagram" role="img" aria-label="Kullanıcı, Neutron masaüstü uygulaması, tarama motoru ve alt bileşenler arasındaki akış şeması">
+          <div class="flow-row">
+            <div class="flow-node flow-node-accent">Kullanıcı</div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-node-accent">Neutron Masaüstü Uygulaması</div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-node-accent">Tarama Motoru</div>
+          </div>
+          <div class="flow-branches">
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">YARA Kuralları</div>
+            </div>
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">PE / ML Analizi</div>
+            </div>
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">Karantina</div>
+            </div>
+            <div class="flow-branch">
+              <div class="flow-connector" aria-hidden="true"></div>
+              <div class="flow-node">Sistem Servisi İzleyicileri</div>
+            </div>
+          </div>
+          <div class="flow-row flow-row-secondary">
+            <div class="flow-node flow-node-muted">Proton Güncellemeleri</div>
+            <div class="flow-arrow" aria-hidden="true">→</div>
+            <div class="flow-node flow-node-muted">YARA Kuralları</div>
+          </div>
+        </div>
+
+        <div class="steps">
+          <div class="step">
+            <span class="step-index">01</span>
+            <h3>Kur ve aktive et</h3>
+            <p>Kurulum sihirbazı risk bildirimini gösterir, cihaz koduna bağlı bir lisans anahtarı ister ve güvenlik bileşenlerini yönetici izniyle kurar.</p>
+          </div>
+          <div class="step">
+            <span class="step-index">02</span>
+            <h3>Katmanları seç</h3>
+            <p>Dosya, davranış, ağ, bellek, USB ve fidye yazılımı korumalarını ayrı ayrı açıp kapatabilirsiniz. İstisnalar ve API anahtarları sizin kontrolünüzde.</p>
+          </div>
+          <div class="step">
+            <span class="step-index">03</span>
+            <h3>İsteğe bağlı Sistem Servisi Modu</h3>
+            <p>Açıldığında sürücü/servis izleme, olay günlüğü, WMI kalıcılığı, süreç zinciri ve kimlik bilgisi koruması gibi ek katmanlar devreye girer — kapatılamaz, ayarsızdır.</p>
+          </div>
+          <div class="step">
+            <span class="step-index">04</span>
+            <h3>Bulguyu incele, gerekirse geri al</h3>
+            <p>Otomatik müdahaleler Koruma geçmişine kaydedilir. Karantina, servis devre dışı bırakma ve sertifika kaldırma gibi geri alınabilir işlemler tek tıkla geri alınabilir.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Risk notice -->
+    <section id="risk" class="section">
+      <div class="container">
+        <div class="risk-panel">
+          <div class="risk-panel-header">
+            <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.29 3.86l-8.18 14.18A2 2 0 0 0 3.82 21h16.36a2 2 0 0 0 1.71-2.96L13.71 3.86a2 2 0 0 0-3.42 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <h2>Önemli güvenlik bildirimi</h2>
+          </div>
+          <p>
+            Neutron deneysel bir güvenlik yazılımıdır ve kendi sorumluluğunuzda kullanılır.
+            Microsoft Defender, uç nokta koruması, düzenli yedekleme veya profesyonel güvenlik
+            danışmanlığının yerini almaz. Dosyaları inceleyebilir, sistem etkinliğini izleyebilir,
+            isteğe bağlı Windows güvenlik bileşenleri kaydedebilir, güvenlik duvarı kuralları
+            oluşturabilir ve şüpheli dosyaları karantinaya alabilir.
+          </p>
+          <div class="risk-checklist">
+            <p class="risk-checklist-title">Kullanmadan önce:</p>
+            <ul>
+              <li>Önemli verilerinizi yedekleyin.</li>
+              <li>Önce bir sanal makinede veya test ortamında deneyin.</li>
+              <li>Karantinaya almadan, silmeden veya kalıcı olarak kaldırmadan önce tespitleri inceleyin.</li>
+              <li>Hem yanlış pozitif hem yanlış negatif bekleyin.</li>
+              <li>Sonuçlarını tam olarak anlamadan Defender'ı ya da başka bir güvenlik ürününü devre dışı bırakmayın.</li>
+              <li>Yalnızca güvendiğiniz sürüm ve güncellemeleri kullanın.</li>
+            </ul>
+          </div>
+          <p class="risk-footnote">
+            Bu proje bağımsız bir güvenlik denetiminden geçmemiştir. Ayrıntılı riskler ve
+            sınırlamalar için <a href="https://github.com/omerbugrae/Neutron#-important-security-notice" target="_blank" rel="noopener">README</a> dosyasına bakın.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Requirements -->
+    <section id="requirements" class="section section-alt">
+      <div class="container">
+        <p class="section-eyebrow">GEREKSİNİMLER</p>
+        <h2 class="section-title">Kurulum öncesi kontrol listesi.</h2>
+        <div class="requirements-grid">
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Windows 10 (64-bit, 1809+) ya da Windows 11 — yalnız x64 (AMD64), ARM64/x86 desteklenmiyor</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>2 GHz veya daha hızlı AMD64 mimarili işlemci</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>En az 4 GB RAM (8 GB önerilir)</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>~1 GB boş disk alanı; isteğe bağlı ML Özellik Güncellemesi için +250 MB</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Bazı sistem düzeyi korumalar için yönetici yetkisi gerekebilir</span>
+          </div>
+          <div class="requirement">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Güncel ve güvenilir bir Windows kurulumu, güncel yedekler</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- License -->
+    <section class="section">
+      <div class="container">
+        <div class="license-panel">
+          <div class="license-panel-text">
+            <p class="section-eyebrow">LİSANS</p>
+            <h2 class="section-title">Kaynağı görünür, ticari kullanım değil.</h2>
+            <p>
+              Neutron, <a href="https://github.com/omerbugrae/Neutron/blob/main/LICENSE.md" target="_blank" rel="noopener">PolyForm Noncommercial License 1.0.0</a>
+              altında kaynağı görünür şekilde dağıtılır. Ticari kullanım, yeniden satış, ticari
+              dağıtım, ücretli hizmet ya da ticari bir ürünün parçası olarak kullanım, telif hakkı
+              sahibinden önceden yazılı izin gerektirir. Bu, OSI onaylı bir açık kaynak lisansı
+              değildir.
+            </p>
+          </div>
+          <div class="license-panel-badges">
+            <span class="badge">PolyForm Noncommercial 1.0.0</span>
+            <span class="badge">Windows 10/11 · x64</span>
+            <span class="badge">Electron + Python</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section id="faq" class="section section-alt">
+      <div class="container container-narrow">
+        <p class="section-eyebrow">SIKÇA SORULANLAR</p>
+        <h2 class="section-title">Merak edilenler.</h2>
+
+        <div class="faq-list">
+          <details class="faq-item">
+            <summary>Neutron, Microsoft Defender'ın yerini alır mı?</summary>
+            <p>Hayır. Neutron deneysel bir tamamlayıcıdır; Defender, uç nokta koruması, düzenli yedekleme veya profesyonel güvenlik danışmanlığının yerini almaz. Sonuçlarını tam olarak anlamadan Defender'ı devre dışı bırakmayın.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Verilerim bir sunucuya gönderiliyor mu?</summary>
+            <p>Hayır, tarama ve analiz cihazınızda çalışır. Bulut itibar sorgusu tamamen isteğe bağlıdır, kendi API anahtarınızı gerektirir ve yalnızca dosya hash'i gönderilir — dosya içeriği asla paylaşılmaz.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Kaynak kodunu inceleyebilir miyim?</summary>
+            <p>Evet, proje kaynağı görünür şekilde <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>'da yayınlanır. Ticari kullanım dışındaki her amaçla inceleyebilir, çalıştırabilir ve değiştirebilirsiniz — ayrıntılar için lisansa bakın.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Otomatik müdahaleler ne kadar agresif?</summary>
+            <p>Kapatılamayan sistem servisi katmanı bazı bulgularda otomatik müdahale eder (servis devre dışı bırakma, süreç sonlandırma, sertifika kaldırma gibi) ama yalnızca imzasız veya güvenilmeyen hedeflerde. Geçerli imzalı dosyalar otomatik olarak sonlandırılmaz veya devre dışı bırakılmaz; yalnız bildirilir. Neredeyse her işlem Koruma geçmişinden geri alınabilir, ve olağandışı bir artışta otomatik müdahale kendini durdurur.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Destek veya SLA sunuluyor mu?</summary>
+            <p>Hayır. Neutron deneysel ve topluluk destekli bir projedir; teknik destek, bakım garantisi veya acil müdahale hizmeti sunulmaz. Güvenlik bildirimleri gönüllü olarak değerlendirilebilir.</p>
+          </details>
+          <details class="faq-item">
+            <summary>Hangi Windows sürümlerinde çalışır?</summary>
+            <p>Windows 10 (64-bit, 1809 ve üzeri) ve Windows 11, yalnızca x64 mimaride. ARM64 ve x86 build'i bulunmuyor.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- Final CTA -->
+    <section class="cta-section">
+      <div class="container cta-inner">
+        <h2>Şeffaf, yerelde çalışan bir güvenlik katmanı deneyin.</h2>
+        <p>Kaynak kodu açık, veri toplamayan ve isteğe bağlı bir sistem servisiyle güçlendirilebilen deneysel bir güvenlik uygulaması.</p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/omerbugrae/Neutron/releases" target="_blank" rel="noopener">En son sürümü indir</a>
+          <a class="btn btn-ghost" href="https://github.com/omerbugrae/Neutron/issues" target="_blank" rel="noopener">Sorun bildir</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="assets/neutron-logo.png" alt="" class="brand-logo" />
+        <span>Neutron</span>
+      </div>
+      <nav class="footer-links" aria-label="Alt bilgi bağlantıları">
+        <a href="https://github.com/omerbugrae/Neutron" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/omerbugrae/Neutron/releases" target="_blank" rel="noopener">Sürümler</a>
+        <a href="https://github.com/omerbugrae/Neutron/issues" target="_blank" rel="noopener">Sorunlar</a>
+        <a href="https://github.com/omerbugrae/Neutron/blob/main/LICENSE.md" target="_blank" rel="noopener">Lisans</a>
+        <a href="https://github.com/omerbugrae/Neutron/blob/main/README.tr.md" target="_blank" rel="noopener">Türkçe README</a>
+      </nav>
+      <p class="footer-legal">
+        Neutron deneysel yazılımdır, olduğu gibi (as is) sunulur ve hiçbir garanti içermez.
+        Bağımsız bir güvenlik denetiminden geçmemiştir.
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" aria-label="Sayfa başına dön" type="button">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5m0 0l-6 6m6-6l6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <script src="script.js"></script>
+</body>
+</html>

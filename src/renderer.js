@@ -1812,6 +1812,160 @@
       return;
     }
 
+    // Bir bulgunun yalnız kaydedilmiş mi yoksa müdahale de edilmiş mi olduğu,
+    // kullanıcı için tek önemli fark: hâlâ yapması gereken bir şey var mı?
+    const withResponse = (reason, event, appliedText, skippedText) => {
+      if (event.blocked) return `${reason} · ${appliedText}`;
+      if (skippedText) return `${reason} · ${skippedText}`;
+      return `${reason} · Otomatik müdahale uygulanmadı, incelemeniz gerekiyor.`;
+    };
+
+    // Sistem servisi izleyicileri: sürücü/servis kaydı, zamanlanmış görev ve
+    // kendini koruma. Bunlar yalnız servis modunda olay gönderir ve kendi
+    // kartları yok -- bulgular koruma geçmişine yazılır. Burada karşılığı
+    // olmayan bir olay türü kullanıcı açısından görünmez demektir: geçmişte
+    // durur ama kimse bakmaz, çünkü bakması gerektiğini söyleyen bir şey yok.
+    if (event.type === 'driver-finding') {
+      const finding = event.finding || {};
+      const label = event.display_name || event.service_name || 'Bir sürücü kaydı';
+      setText('activity-title', `${label} ${event.blocked ? 'engellendi' : 'işaretlendi'}`);
+      setText('activity-detail', withResponse(
+        finding.reason || 'Yeni ya da değiştirilmiş sürücü/servis kaydı algılandı.',
+        event,
+        'Servis devre dışı bırakıldı; yüklü sürücü yeniden başlatmaya kadar bellekte kalır.',
+        event.block_skipped === 'boot-start'
+          ? 'Önyükleme sürücüsü olduğu için devre dışı bırakılmadı: bu, Windows’un açılmamasına yol açabilirdi.'
+          : event.block_skipped === 'trusted-signed'
+            ? 'Geçerli bir Windows imzası taşıdığı için otomatik olarak devre dışı bırakılmadı; yalnız yeni sürücü kurulumları BYOVD kontrolü amacıyla bildirilir.'
+            : '',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'task-finding') {
+      const finding = event.finding || {};
+      const label = String(event.task || '').split('/').pop() || 'Zamanlanmış görev';
+      setText('activity-title', `${label} ${event.blocked ? 'devre dışı bırakıldı' : 'işaretlendi'}`);
+      setText('activity-detail', withResponse(
+        finding.reason || 'Yeni ya da değiştirilmiş zamanlanmış görev algılandı.',
+        event,
+        'Görev devre dışı bırakıldı.',
+        event.block_skipped === 'microsoft-task'
+          ? 'Windows’un kendi görevi olduğu için dokunulmadı.'
+          : '',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'integrity-alert') {
+      const finding = event.finding || {};
+      setText('activity-title', 'Neutron bileşenlerinde sorun var');
+      setText('activity-detail', finding.reason || 'Bir Neutron güvenlik bileşeni eksik ya da devre dışı.');
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'integrity-recovered') {
+      setText('activity-detail', 'Neutron bileşen sorunu giderildi.');
+      return;
+    }
+
+    // İkinci grup sistem servisi izleyicileri. Aynı gerekçe: kendi kartları
+    // yok, bulgular koruma geçmişine yazılıyor, ve burada karşılığı olmayan
+    // bir olay türü kullanıcı için görünmez demek.
+    if (event.type === 'eventlog-finding') {
+      const finding = event.finding || {};
+      setText('activity-title', 'Windows olay günlüğünde şüpheli kayıt');
+      setText('activity-detail', finding.reason || 'İzlenen bir Windows güvenlik olayı kaydedildi.');
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'posture-finding') {
+      const finding = event.finding || {};
+      setText('activity-title', event.blocked
+        ? 'Windows güvenlik ayarı geri alındı'
+        : 'Windows güvenlik ayarı zayıflatıldı');
+      setText('activity-detail', withResponse(
+        finding.reason || 'Bir Windows güvenlik ayarı kapatılmış.',
+        event,
+        'Ayar eski haline getirildi; Koruma geçmişinden geri alınabilir.',
+        'Bu ayar otomatik olarak geri alınmıyor (uzaktan erişim ya da önyükleme yapılandırması).',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'posture-recovered') {
+      setText('activity-detail', 'Windows güvenlik ayarı sorunu giderildi.');
+      return;
+    }
+
+    if (event.type === 'certificate-finding') {
+      const finding = event.finding || {};
+      setText('activity-title', event.blocked
+        ? 'Yeni sertifika güven deposundan kaldırıldı'
+        : 'Güven deposuna yeni sertifika eklendi');
+      setText('activity-detail', withResponse(
+        finding.reason || 'Makine sertifika deposuna yeni bir sertifika eklendi.',
+        event,
+        'Sertifika kaldırıldı; Koruma geçmişinden geri yüklenebilir.',
+        '',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'wmi-finding') {
+      const finding = event.finding || {};
+      setText('activity-title', event.blocked ? 'WMI kalıcılık kaydı silindi' : 'WMI kalıcılık kaydı değişti');
+      setText('activity-detail', withResponse(
+        finding.reason || 'Bir WMI olay aboneliği oluşturuldu ya da değiştirildi.',
+        event,
+        'Abonelik silindi. Bu işlem geri alınamaz; silinen tanım Koruma geçmişinde kayıtlı.',
+        '',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'process-finding') {
+      const finding = event.finding || {};
+      const chain = Array.isArray(event.chain) && event.chain.length
+        ? event.chain.join(' → ')
+        : (event.file_name || 'Bir süreç');
+      setText('activity-title', `${event.file_name || 'Bir süreç'} ${event.blocked ? 'sonlandırıldı' : 'işaretlendi'}`);
+      setText('activity-detail', withResponse(
+        `${finding.reason || 'Şüpheli süreç başlatma'} · ${chain}`,
+        event,
+        'Süreç sonlandırıldı.',
+        event.block_skipped === 'trusted-signed'
+          ? 'Geçerli bir Windows imzası taşıdığı için sonlandırılmadı; incelemeniz gerekiyor.'
+          : '',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
+    if (event.type === 'credential-finding') {
+      const finding = event.finding || {};
+      setText('activity-title', event.blocked
+        ? 'LSASS erişimi sonlandırıldı'
+        : 'LSASS belleğine erişim algılandı');
+      setText('activity-detail', withResponse(
+        finding.reason || 'Bir süreç LSASS belleğini okuma erişimiyle açık tutuyor.',
+        event,
+        'Erişimi açık tutan süreç sonlandırıldı.',
+        event.block_skipped === 'trusted-signed'
+          ? 'Geçerli bir Windows imzası taşıdığı için sonlandırılmadı; incelemeniz gerekiyor.'
+          : '',
+      ));
+      applyProtectionHistory();
+      return;
+    }
+
     if (event.type === 'web-ready') {
       setWebProtectionState(true, true, 'Etkin', 'İndirilen dosyalar ve kaynak adresleri yerel olarak denetleniyor.');
       return;

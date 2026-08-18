@@ -40,7 +40,18 @@
 | 📦 **Quarantine** | Quarantine and restoration workflow for suspicious files |
 | 🪟 **AMSI integration** | Additional inspection for supported Windows script hosts |
 | 🔄 **Proton updates** | Signed threat-intelligence/rule updates with rollback support |
-| 📅 **Scheduled scanning** | Automatic quick-scan support |
+| 📅 **Scheduled scanning** | Automatic quick-scan support, from the service even with no user signed in |
+| 🧷 **Driver & service monitoring** | Reports newly registered or repointed kernel drivers and Windows services (BYOVD visibility) |
+| ⏱️ **Scheduled task monitoring** | Reports new or repointed Task Scheduler entries running unsigned commands |
+| 🩺 **Self-protection** | Continuously verifies the AMSI registration, the service, the rule store and the quarantine payloads |
+| 🧬 **WMI persistence monitoring** | Reports WMI event subscriptions being created or changed |
+| 🌳 **Process-start monitoring** | Push-based, with the ancestry chain — catches processes too short-lived to poll for |
+| 🔑 **Credential-access monitoring** | Reports processes holding read access to LSASS memory |
+| 📜 **Event log monitoring** | Cleared audit logs, audit-policy changes, new local admins, service installs, Defender being switched off |
+| 🧱 **Windows posture monitoring** | Defender, firewall, UAC, RDP, Secure Boot and driver-signing state |
+| 🛑 **Automatic response** | Disables tasks and services, deletes WMI subscriptions, removes trust-store certificates, reverts weakened Windows settings and terminates suspicious processes — logged, rate-limited and reversible |
+| 🔏 **Trust store monitoring** | Reports certificates added to the machine root and publisher stores |
+| 🧹 **Removal helper** | Standalone forced-removal script shipped with the app, plus an uninstall wizard reachable from Control Panel |
 
 ## 🧩 How it works
 

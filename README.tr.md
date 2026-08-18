@@ -40,7 +40,18 @@
 | 📦 **Karantina** | Şüpheli dosyalar için karantina ve geri yükleme akışı |
 | 🪟 **AMSI entegrasyonu** | Desteklenen Windows betik ortamları için ek inceleme |
 | 🔄 **Proton güncellemeleri** | İmzalı tehdit istihbaratı/rule güncellemeleri ve geri alma desteği |
-| 📅 **Zamanlanmış tarama** | Otomatik hızlı tarama desteği |
+| 📅 **Zamanlanmış tarama** | Otomatik hızlı tarama; servis modunda kimse oturum açmamışken de çalışır |
+| 🧷 **Sürücü ve servis izleme** | Yeni kaydedilen ya da hedefi değiştirilen çekirdek sürücülerini ve Windows servislerini bildirir (BYOVD görünürlüğü) |
+| ⏱️ **Zamanlanmış görev izleme** | Görev Zamanlayıcı'ya eklenen ya da hedefi değiştirilen, imzasız komut çalıştıran görevleri bildirir |
+| 🩺 **Kendini koruma** | AMSI kaydını, servisi, kural deposunu ve karantinadaki dosyaları sürekli doğrular |
+| 🧬 **WMI kalıcılık izleme** | Oluşturulan ya da değiştirilen WMI olay aboneliklerini bildirir |
+| 🌳 **Süreç başlatma izleme** | Anlık ve soyağacıyla — poll edilemeyecek kadar kısa yaşayan süreçleri de yakalar |
+| 🔑 **Kimlik bilgisi erişimi izleme** | LSASS belleğine okuma erişimi açık tutan süreçleri bildirir |
+| 📜 **Olay günlüğü izleme** | Temizlenen denetim günlükleri, denetim politikası değişiklikleri, yeni yerel yöneticiler, servis kurulumları, Defender'ın kapatılması |
+| 🧱 **Windows güvenlik duruşu izleme** | Defender, güvenlik duvarı, UAC, RDP, Güvenli Önyükleme ve sürücü imzalama durumu |
+| 🛑 **Otomatik müdahale** | Görevleri ve servisleri devre dışı bırakır, WMI aboneliklerini siler, güven deposundan sertifika kaldırır, zayıflatılan Windows ayarlarını geri alır, şüpheli süreçleri sonlandırır — kayıtlı, hız sınırlı ve geri alınabilir |
+| 🔏 **Güven deposu izleme** | Makine kök ve yayımcı depolarına eklenen sertifikaları bildirir |
+| 🧹 **Kaldırma yardımcısı** | Uygulamayla birlikte gelen bağımsız zorlamalı kaldırma betiği ve Denetim Masası'ndan erişilebilen kaldırma sihirbazı |
 
 ## 🧩 Nasıl çalışır?
 

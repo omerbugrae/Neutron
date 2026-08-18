@@ -73,6 +73,13 @@ del /f /q "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Neutron.lnk" >nul
 
 echo Neutron guvenlik duvari kurallari kaldiriliyor...
 netsh.exe advfirewall firewall delete rule name=all program="%INSTALL_ROOT%\Neutron.exe" >nul 2>&1
+REM Named Neutron-FW-* rules and the obsolete Security Center registration
+REM are not reachable through netsh alone. Same encoded payload the
+REM uninstaller runs, so the two cleanup paths cannot drift apart.
+powershell.exe -NoProfile -NonInteractive -EncodedCommand JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAnAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAJwA7ACAARwBlAHQALQBDAGkAbQBJAG4AcwB0AGEAbgBjAGUAIAAtAE4AYQBtAGUAcwBwAGEAYwBlACAAcgBvAG8AdABcAFMAZQBjAHUAcgBpAHQAeQBDAGUAbgB0AGUAcgAyACAALQBDAGwAYQBzAHMATgBhAG0AZQAgAEEAbgB0AGkAVgBpAHIAdQBzAFAAcgBvAGQAdQBjAHQAIAAtAEYAaQBsAHQAZQByACAAIgBpAG4AcwB0AGEAbgBjAGUARwB1AGkAZAA9ACcAYQBjADAAMAAwADgAYgAwAC0ANQA2ADQAYQAtADQANABmADgALQA4AGUAYwA3AC0AZgAyAGEAMgBkADgAMgBhADgAZgBlADgAJwAiACAAfAAgAFIAZQBtAG8AdgBlAC0AQwBpAG0ASQBuAHMAdABhAG4AYwBlADsAIABHAGUAdAAtAE4AZQB0AEYAaQByAGUAdwBhAGwAbABSAHUAbABlACAALQBOAGEAbQBlACAAJwBOAGUAdQB0AHIAbwBuAC0ARgBXAC0AKgAnACAAfAAgAFIAZQBtAG8AdgBlAC0ATgBlAHQARgBpAHIAZQB3AGEAbABsAFIAdQBsAGUA >nul 2>&1
+
+echo Neutron Baslat menusu klasoru kaldiriliyor...
+rd /s /q "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Neutron" >nul 2>&1
 
 echo Neutron program dosyalari siliniyor...
 rd /s /q "%INSTALL_ROOT%" >nul 2>&1
@@ -83,21 +90,30 @@ REM quarantine. Quarantined files are the user's own files that Neutron moved
 REM aside, and deleting them is irreversible -- so this is asked, never
 REM assumed. Leaving it behind is harmless: a fresh install reuses it.
 echo.
-echo Geriye su klasor kaldi: "%ProgramData%\Neutron"
-echo Icinde lisans, ayarlar ve KARANTINA dosyalari var.
-echo Karantinadaki dosyalar senin dosyalarindir; silinirse geri gelmez.
+echo Geriye Neutron verileri kaldi:
+echo   "%ProgramData%\Neutron"            (lisans, ayarlar, servis veritabani, KARANTINA)
+echo   "%%USERPROFILE%%\AppData\Roaming\Neutron"  (her kullanici icin: ML modelleri ~500 MB, veritabani, KARANTINA)
+echo.
+echo Karantinadaki dosyalar senin kendi dosyalarindir; silinirse geri gelmez.
+echo Silmezsen bu veriler diskte kalir ve Neutron'u yeniden kurarsan kullanilir.
 echo.
 set "PURGE_DATA="
-set /p "PURGE_DATA=Bu klasor de silinsin mi? (E = evet, baska tus = hayir): "
+set /p "PURGE_DATA=Bu veriler de silinsin mi? (E = evet, baska tus = hayir): "
+REM The per-profile loop below is deliberate: the elevated console's own
+REM AppData belongs to whoever approved the UAC prompt, which is not
+REM necessarily the account that installed and used Neutron. Comments stay
+REM outside the parenthesised block -- REM inside one is a known way to
+REM break cmd parsing.
 if /i "%PURGE_DATA%"=="E" (
   rd /s /q "%ProgramData%\Neutron" >nul 2>&1
+  for /d %%P in ("%SystemDrive%\Users\*") do rd /s /q "%%~fP\AppData\Roaming\Neutron" >nul 2>&1
   if exist "%ProgramData%\Neutron" (
     echo [UYARI] Klasor tamamen silinemedi, bazi dosyalar kilitli olabilir.
   ) else (
-    echo Klasor silindi.
+    echo Veriler silindi.
   )
 ) else (
-  echo Klasor birakildi.
+  echo Veriler birakildi.
 )
 
 del /f /q "%STATE_FILE%" >nul 2>&1

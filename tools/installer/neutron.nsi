@@ -3,6 +3,7 @@ Unicode True
 !include "MUI2.nsh"
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 
 !ifndef APP_DIR
   !error "APP_DIR is required"
@@ -47,6 +48,10 @@ Var LicenseDeviceHash
 Var HadPreviousLicense
 Var ProgramDataDir
 Var DeleteUserData
+Var DeleteLicenseData
+Var UninstallDialog
+Var DeleteUserDataCheckbox
+Var DeleteLicenseCheckbox
 Var ProfileIndex
 Var ProfileKey
 Var ProfilePath
@@ -109,6 +114,18 @@ Page custom LicensePageCreate LicensePageLeave
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
+
+; Kaldırma sihirbazının veri sayfası. Bu bir MessageBox olarak başlamıştı:
+; tek bir evet/hayır sorusu, kaldırıcı daha açılmadan sorulan, içinde
+; karantinadaki dosyaların kalıcı olarak silineceği uyarısı da bulunan tek
+; bir satır. Kişisel veriyi silmek ile lisansı korumak ayrı kararlardır ve
+; ayrı kutuları hak ediyorlar.
+;
+; Sessiz kaldırmada (QuietUninstallString, /S) NSIS özel sayfaları hiç
+; göstermez; o durumda un.onInit içindeki "hiçbir şeyi silme" varsayılanları
+; geçerli olur. Otomatik bir kaldırma asla kullanıcı verisi silmez.
+UninstPage custom un.OptionsPageCreate un.OptionsPageLeave
+
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_UNPAGE_FINISH
 
@@ -185,16 +202,74 @@ Function un.onInit
   StrCpy $ProgramDataDir "C:\\ProgramData"
 un_program_data_ready:
 
-  ; The uninstaller only ever removed $INSTDIR, which left the machine
-  ; learning models behind -- roughly half a gigabyte per user profile, in a
-  ; folder the user has no reason to know about. Ask once, here, so the
-  ; answer is known before anything is deleted.
+  ; Varsayılan: hiçbir şey silinmez. Kaldırma sihirbazındaki veri sayfası
+  ; (un.OptionsPageCreate) bu iki değeri kullanıcının seçimine göre değiştirir;
+  ; sessiz kaldırmada o sayfa hiç gösterilmediği için bu varsayılanlar kalır.
   StrCpy $DeleteUserData "0"
-  MessageBox MB_YESNO|MB_ICONQUESTION \
-    "Neutron'un kişisel verileri de silinsin mi?$\r$\n$\r$\nSilinecekler:$\r$\n  · Makine öğrenmesi modelleri (yaklaşık 500 MB)$\r$\n  · Tarama geçmişi, ayarlar ve veritabanı$\r$\n  · Karantinadaki dosyalar (KALICI olarak silinir, geri alınamaz)$\r$\n  · Lisans anahtarı (yeniden kurulumda tekrar aktivasyon gerekir)$\r$\n$\r$\nHayır derseniz bu veriler diskte kalır ve Neutron'u yeniden kurarsanız kullanılmaya devam eder." \
-    /SD IDNO IDNO un_keep_user_data
-  StrCpy $DeleteUserData "1"
-un_keep_user_data:
+  StrCpy $DeleteLicenseData "0"
+FunctionEnd
+
+; Kaldırma sihirbazının veri sayfası.
+;
+; Kaldırıcı yalnızca $INSTDIR klasörünü siliyordu; makine öğrenmesi modelleri
+; (profil başına yaklaşık 500 MB) ve karantina, kullanıcının varlığından
+; haberdar olmadığı klasörlerde kalıyordu. İki karar da geri alınamaz ve
+; birbirinden bağımsızdır, bu yüzden iki ayrı kutu:
+;
+;   · Karantinadaki dosyalar kullanıcının kendi dosyalarıdır; Neutron onları
+;     yalnızca kenara aldı. Silinirlerse geri gelmezler.
+;   · Lisans anahtarı bu bilgisayara bağlıdır. Silinirse yeniden kurulumda
+;     yeni bir aktivasyon gerekir; bırakılırsa yeniden kurulum onu bulur.
+Function un.OptionsPageCreate
+  !insertmacro MUI_HEADER_TEXT "Kaldırma seçenekleri" "Neutron kaldırılırken hangi verilerin silineceğini seçin."
+  nsDialogs::Create 1018
+  Pop $UninstallDialog
+  ${If} $UninstallDialog == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 26u "Program dosyaları, Windows servisi, AMSI kaydı ve güvenlik duvarı kuralları her durumda kaldırılır. Aşağıdakiler isteğe bağlıdır: işaretlemezseniz diskte kalır ve Neutron'u yeniden kurarsanız kullanılmaya devam eder."
+  Pop $0
+
+  ${NSD_CreateCheckBox} 0 32u 100% 10u "Kişisel verileri sil"
+  Pop $DeleteUserDataCheckbox
+  ${NSD_CreateLabel} 12u 44u 96% 34u "Ayarlar, tarama geçmişi ve veritabanı; makine öğrenmesi modelleri (kullanıcı profili başına yaklaşık 500 MB); ve KARANTINADAKİ DOSYALAR. Karantinadaki dosyalar sizin kendi dosyalarınızdır ve silinirlerse geri alınamaz."
+  Pop $0
+
+  ${NSD_CreateCheckBox} 0 82u 100% 10u "Lisans anahtarını sil"
+  Pop $DeleteLicenseCheckbox
+  ${NSD_CreateLabel} 12u 94u 96% 24u "Aktivasyon anahtarı bu bilgisayara bağlıdır. Silerseniz yeniden kurulumda yeni bir anahtar gerekir. İşaretlemezseniz anahtar diskte kalır ve yeniden kurulum onu kendisi bulur."
+  Pop $0
+
+  ${NSD_CreateLabel} 0 122u 100% 16u "Hiçbirini işaretlemezseniz yalnız program kaldırılır; verileriniz olduğu gibi kalır."
+  Pop $0
+
+  nsDialogs::Show
+FunctionEnd
+
+Function un.OptionsPageLeave
+  ${NSD_GetState} $DeleteUserDataCheckbox $0
+  ${If} $0 == 1
+    StrCpy $DeleteUserData "1"
+  ${Else}
+    StrCpy $DeleteUserData "0"
+  ${EndIf}
+  ${NSD_GetState} $DeleteLicenseCheckbox $0
+  ${If} $0 == 1
+    StrCpy $DeleteLicenseData "1"
+  ${Else}
+    StrCpy $DeleteLicenseData "0"
+  ${EndIf}
+
+  ; Geri alınamaz tek adım burasıdır ve onayı, kutuyu işaretleyen tıklamadan
+  ; ayrı olmalı: bir onay kutusu yanlışlıkla işaretlenebilir, bu soru
+  ; işaretlenemez.
+  StrCmp $DeleteUserData "1" 0 un_options_done
+  MessageBox MB_YESNO|MB_ICONEXCLAMATION \
+    "Karantinadaki dosyalar KALICI olarak silinecek ve geri alınamayacak.$\r$\n$\r$\nDevam edilsin mi?" \
+    /SD IDYES IDYES un_options_done
+  Abort
+un_options_done:
 FunctionEnd
 
 ; Removes one user profile's Neutron data folder. Called for every profile on
@@ -360,11 +435,28 @@ install_copy_ok:
   SetOutPath "$INSTDIR\\Recovery"
   File /oname=recover-neutron-boot.ps1 "${PROJECT_ROOT}\\tools\\security\\recover-neutron-boot.ps1"
   File /oname=remove-stuck-neutron.ps1 "${PROJECT_ROOT}\\tools\\security\\remove-stuck-neutron.ps1"
+  ; Kaldırma yardımcısı. Bu betik depoda zaten vardı ama hiçbir zaman
+  ; kurulumla birlikte gelmiyordu -- yani tam da ona ihtiyaç duyulan durumda
+  ; (Uninstall.exe silinmiş, servis takılmış, kurulum yarım kalmış) makinede
+  ; bulunmuyordu. Artık kuruluyor ve Başlat menüsünden erişilebiliyor.
+  File /oname=remove-neutron-completely.cmd "${PROJECT_ROOT}\\tools\\security\\remove-neutron-completely.cmd"
+  File /oname=repair-neutron-powershell.cmd "${PROJECT_ROOT}\\tools\\security\\repair-neutron-powershell.cmd"
   SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   CreateShortCut "$DESKTOP\\Neutron.lnk" "$INSTDIR\\Neutron.exe" "" "$INSTDIR\\Neutron.exe" 0
-  CreateShortCut "$SMPROGRAMS\\Neutron.lnk" "$INSTDIR\\Neutron.exe" "" "$INSTDIR\\Neutron.exe" 0
+  ; 0.35 ve öncesi Başlat menüsüne tek bir düz kısayol koyuyordu. Yükseltmede
+  ; önce o kaldırılır, yoksa menüde biri klasör biri kısayol olmak üzere iki
+  ; Neutron görünür.
+  Delete "$SMPROGRAMS\\Neutron.lnk"
+  CreateDirectory "$SMPROGRAMS\\Neutron"
+  CreateShortCut "$SMPROGRAMS\\Neutron\\Neutron.lnk" "$INSTDIR\\Neutron.exe" "" "$INSTDIR\\Neutron.exe" 0
+  CreateShortCut "$SMPROGRAMS\\Neutron\\Neutron'u Kaldır.lnk" "$INSTDIR\\Uninstall.exe" "" "$INSTDIR\\Uninstall.exe" 0
+  ; Kısayol bir .cmd dosyasını gösteriyor ve .cmd kısayolları kendiliğinden
+  ; yönetici olarak açılmaz. Betiğin kendisi ilk iş olarak yetkiyi denetleyip
+  ; ne yapılması gerektiğini yazıyor, bu yüzden kısayol sessizce başarısız
+  ; olmaz; adında da yönetici gerektiği yazıyor.
+  CreateShortCut "$SMPROGRAMS\\Neutron\\Neutron Kaldırma Yardımcısı (yönetici).lnk" "$INSTDIR\\Recovery\\remove-neutron-completely.cmd" "" "$INSTDIR\\Neutron.exe" 0
 
   WriteRegStr HKLM "Software\\Neutron" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Neutron.exe" "" "$INSTDIR\\Neutron.exe"
@@ -377,6 +469,17 @@ install_copy_ok:
   WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "QuietUninstallString" '$\"$INSTDIR\\Uninstall.exe$\" /S'
   WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "NoModify" 1
   WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "NoRepair" 1
+  ; Denetim Masası kaydının eksik kalan alanları. Programlar ve Özellikler
+  ; listesinde Boyut sütunu boş görünüyordu ve "bu ne, nereden geldi, kime
+  ; sorarım" sorusunun cevabı hiçbir yerde yazmıyordu -- bir güvenlik
+  ; yazılımı için ikisi de kötü.
+  ${GetSize} "$INSTDIR" "/S=0K" $4 $5 $6
+  WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "EstimatedSize" "$4"
+  ${GetTime} "" "L" $R0 $R1 $R2 $R3 $R4 $R5 $R6
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "InstallDate" "$R2$R1$R0"
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "HelpLink" "https://github.com/omerbugrae/Neutron/issues"
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "URLInfoAbout" "https://github.com/omerbugrae/Neutron"
+  WriteRegStr HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "URLUpdateInfo" "https://github.com/omerbugrae/Neutron/releases"
 
   DetailPrint "Güvenlik bileşenleri etkinleştiriliyor… (bu adım birkaç dakika sürebilir, lütfen bekleyin)"
   nsExec::ExecToStack /TIMEOUT=1200000 '"$INSTDIR\\Neutron.exe" --provision-security'
@@ -397,12 +500,19 @@ provision_failed:
   Pop $1
   Delete "$DESKTOP\\Neutron.lnk"
   Delete "$SMPROGRAMS\\Neutron.lnk"
+  Delete "$SMPROGRAMS\\Neutron\\Neutron.lnk"
+  Delete "$SMPROGRAMS\\Neutron\\Neutron'u Kaldır.lnk"
+  Delete "$SMPROGRAMS\\Neutron\\Neutron Kaldırma Yardımcısı (yönetici).lnk"
+  RMDir "$SMPROGRAMS\\Neutron"
   DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron"
   DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Neutron.exe"
   DeleteRegKey HKLM "Software\\Neutron"
   !include "${UNINSTALL_INCLUDE}"
   Delete "$INSTDIR\\Recovery\\recover-neutron-boot.ps1"
   Delete "$INSTDIR\\Recovery\\remove-stuck-neutron.ps1"
+  Delete "$INSTDIR\\Recovery\\remove-neutron-completely.cmd"
+  Delete "$INSTDIR\\Recovery\\repair-neutron-powershell.cmd"
+  Delete "$INSTDIR\\Recovery\\neutron-remove-root.txt"
   RMDir "$INSTDIR\\Recovery"
   Delete "$INSTDIR\\Uninstall.exe"
   RMDir "$INSTDIR"
@@ -482,6 +592,10 @@ cleanup_done:
 
   Delete "$DESKTOP\\Neutron.lnk"
   Delete "$SMPROGRAMS\\Neutron.lnk"
+  Delete "$SMPROGRAMS\\Neutron\\Neutron.lnk"
+  Delete "$SMPROGRAMS\\Neutron\\Neutron'u Kaldır.lnk"
+  Delete "$SMPROGRAMS\\Neutron\\Neutron Kaldırma Yardımcısı (yönetici).lnk"
+  RMDir "$SMPROGRAMS\\Neutron"
   DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron"
   DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Neutron.exe"
   DeleteRegKey HKLM "Software\\Neutron"
@@ -489,6 +603,9 @@ cleanup_done:
   !include "${UNINSTALL_INCLUDE}"
   Delete "$INSTDIR\\Recovery\\recover-neutron-boot.ps1"
   Delete "$INSTDIR\\Recovery\\remove-stuck-neutron.ps1"
+  Delete "$INSTDIR\\Recovery\\remove-neutron-completely.cmd"
+  Delete "$INSTDIR\\Recovery\\repair-neutron-powershell.cmd"
+  Delete "$INSTDIR\\Recovery\\neutron-remove-root.txt"
   RMDir "$INSTDIR\\Recovery"
   Delete "$INSTDIR\\Uninstall.exe"
   RMDir "$INSTDIR"
@@ -506,11 +623,20 @@ cleanup_done:
   RMDir /r /REBOOTOK "$INSTDIR"
 
 uninstall_user_data:
-  StrCmp $DeleteUserData "1" 0 uninstall_done
+  ; İki ayrı karar, iki ayrı kutu (bkz. un.OptionsPageCreate). Lisans klasörü
+  ; kasıtlı olarak kişisel verinin dışında tutuluyor: verileri silip lisansı
+  ; korumak, yeniden kurulumda baştan aktivasyon gerektirmeden sıfırdan
+  ; başlamanın tek yolu -- ve tersinin de mümkün olması gerekiyor.
+  StrCmp $DeleteLicenseData "1" 0 uninstall_keep_license
+  RMDir /r "$ProgramDataDir\\Neutron\\license"
+uninstall_keep_license:
 
-  ; Machine-wide state: the licence lives here, and so does the data
-  ; directory when Neutron runs as a service.
-  RMDir /r "$ProgramDataDir\\Neutron"
+  StrCmp $DeleteUserData "1" 0 uninstall_prune_machine_dir
+
+  ; Makine geneli durum: servis modunda veritabanı, karantina ve modeller
+  ; burada yaşar. Lisans klasörü bilerek dışarıda: onu yalnız yukarıdaki
+  ; kutu siler.
+  RMDir /r "$ProgramDataDir\\Neutron\\data"
 
   ; Per-user state (models, database, quarantine, per-user licence). The
   ; elevated uninstaller's own $APPDATA is not necessarily the user who
@@ -525,7 +651,7 @@ uninstall_user_data:
 uninstall_profile_loop:
   EnumRegKey $ProfileKey HKLM \
     "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList" $ProfileIndex
-  StrCmp $ProfileKey "" uninstall_done
+  StrCmp $ProfileKey "" uninstall_prune_machine_dir
   ReadRegStr $ProfilePath HKLM \
     "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\$ProfileKey" "ProfileImagePath"
   Push "$ProfilePath"
@@ -533,5 +659,9 @@ uninstall_profile_loop:
   IntOp $ProfileIndex $ProfileIndex + 1
   Goto uninstall_profile_loop
 
-uninstall_done:
+uninstall_prune_machine_dir:
+  ; İçi boşaldıysa üst klasörü de bırakma. RMDir (/r yok) dolu bir klasöre
+  ; dokunmaz, yani kullanıcı verisini korumayı seçtiyse burada hiçbir şey
+  ; olmaz.
+  RMDir "$ProgramDataDir\\Neutron"
 SectionEnd

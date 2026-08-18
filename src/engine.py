@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import ctypes
 import hashlib
 import json
@@ -29,6 +30,7 @@ import sys
 import threading
 import time
 from urllib.parse import urlsplit
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -117,7 +119,7 @@ NETWORK_INTERVAL_SECONDS = 10.0
 WATCH_DEBOUNCE_SECONDS = 0.9
 WATCH_SETTLE_SECONDS = 0.65
 SIGNATURE_DATABASE_NAME = "Proton"
-NEUTRON_ENGINE_VERSION = "0.3.0"
+NEUTRON_ENGINE_VERSION = "0.4.0"
 BUILTIN_SIGNATURE_VERSION = "1.00.001"
 PROTON_VERSION_PATTERN = re.compile(r"^\d+\.\d{2}\.\d{3}$")
 PROTON_SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -2731,7 +2733,8 @@ def rollback_response_incident(incident_id: int) -> int:
             if incident is None or incident["state"] != "active":
                 raise ValueError("Geri alınabilecek etkin müdahale bulunamadı")
             actions = connection.execute(
-                "SELECT id, action_type, target, after_json, state FROM response_actions WHERE incident_id=? AND reversible=1 ORDER BY id DESC",
+                "SELECT id, action_type, target, before_json, after_json, state "
+                "FROM response_actions WHERE incident_id=? AND reversible=1 ORDER BY id DESC",
                 (incident_id,),
             ).fetchall()
         pending: list[dict[str, Any]] = []
@@ -2746,17 +2749,54 @@ def rollback_response_incident(incident_id: int) -> int:
                 pending.append({"action_id": int(action["id"]), "type": action["action_type"], "target": action["target"], "after": json.loads(action["after_json"] or "{}")})
                 continue
             after = json.loads(action["after_json"] or "{}")
-            result = 0
-            if action["action_type"] == "quarantine" and after.get("item_id"):
-                result = update_quarantine_item(int(after["item_id"]), "restore")
-            elif action["action_type"] == "startup-disable" and after.get("backup_id"):
-                result = startup_restore_entry(int(after["backup_id"]))
-            if result == 0:
+            before = json.loads(action["before_json"] or "{}")
+            action_type = str(action["action_type"])
+            target = str(action["target"])
+
+            # Previously this defaulted a `result` variable to 0 (success) and
+            # only overwrote it for the two action types that existed, so any
+            # future type would have been marked "reverted" without anything
+            # having been reverted. With the automatic responses below there
+            # are now seven types, and an unknown one has to fail loudly --
+            # a rollback that silently does nothing is worse than one that
+            # reports it could not finish.
+            restored = False
+            try:
+                if action_type == "quarantine" and after.get("item_id"):
+                    restored = update_quarantine_item(int(after["item_id"]), "restore") == 0
+                elif action_type == "startup-disable" and after.get("backup_id"):
+                    restored = startup_restore_entry(int(after["backup_id"])) == 0
+                elif action_type == "service-disable":
+                    restored = registry_restore_dword(
+                        f"{SERVICE_REGISTRY_PATH}\\{target}", "Start", before.get("start"),
+                    )
+                elif action_type == "task-disable":
+                    restored = set_scheduled_task_enabled(target, True)
+                elif action_type == "certificate-delete":
+                    restored = restore_machine_certificate(
+                        str(after.get("store") or ""),
+                        base64.b64decode(str(after.get("der") or "")),
+                    )
+                elif action_type == "posture-revert":
+                    key_path, _separator, value_name = target.rpartition("\\")
+                    restored = registry_restore_dword(key_path, value_name, before.get("value"))
+                elif action_type == "defender-exclusion-remove":
+                    key_path, _separator, value_name = target.rpartition("\\")
+                    restored = registry_restore_string(key_path, value_name, before.get("value"))
+            except (OSError, ValueError, sqlite3.Error, binascii.Error):
+                restored = False
+
+            if restored:
                 with open_database() as connection:
                     connection.execute(
                         "UPDATE response_actions SET state='reverted', reverted_at=? WHERE id=?",
                         (datetime.now(timezone.utc).isoformat(), int(action["id"])),
                     )
+            else:
+                pending.append({
+                    "action_id": int(action["id"]), "type": action_type,
+                    "target": target, "after": after,
+                })
         rolled_back_at = datetime.now(timezone.utc).isoformat()
         with open_database() as connection:
             connection.execute(
@@ -2836,6 +2876,20 @@ _emit_sink: Any = None  # set by service_host() to route events over the
 # calling emit() completely unchanged, so no other code needed to know
 # it's now running as a thread inside the service instead of its own
 # stdout-JSON-lines subprocess.
+
+# True only inside service_host(). watch_integrity() needs it because the
+# service's settings database is not the desktop app's: provisioning writes
+# service_mode_enabled=false into the machine-wide copy and never revises it,
+# so "is service mode on" cannot be answered from settings on this side. If
+# this process is the service, the answer is yes by construction.
+_running_as_service = False
+
+# Set by watch_processes() once its event stream is actually running, cleared
+# when it stops. watch_behavior() reads it every pass rather than once at
+# startup: deciding at startup would mean that a watch_processes() which never
+# managed to start -- PowerShell blocked by policy, WMI broken -- silently
+# took process detection down with it.
+_process_watch_active = False
 
 
 def emit(event_type: str, **payload: Any) -> None:
@@ -3363,27 +3417,69 @@ def verify_authenticode(path: Path, has_embedded_signature: bool) -> str:
     file_info = WINTRUST_FILE_INFO(
         ctypes.sizeof(WINTRUST_FILE_INFO), str(path), None, None
     )
-    trust_data = WINTRUST_DATA(
-        ctypes.sizeof(WINTRUST_DATA),
-        None,
-        None,
-        2,
-        0,
-        1,
-        ctypes.pointer(file_info),
-        0,
-        None,
-        None,
-        0x00001000,
-        0,
-    )
+
+    WTD_REVOKE_NONE = 0
+    WTD_REVOKE_WHOLECHAIN = 1
+    WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000  # never touches the network
+
+    def run_verify(revocation_checks: int) -> int:
+        trust_data = WINTRUST_DATA(
+            ctypes.sizeof(WINTRUST_DATA),
+            None,
+            None,
+            2,
+            revocation_checks,
+            1,
+            ctypes.pointer(file_info),
+            0,
+            None,
+            None,
+            WTD_CACHE_ONLY_URL_RETRIEVAL,
+            0,
+        )
+        return wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(trust_data))
+
     try:
         wintrust = ctypes.WinDLL("wintrust", use_last_error=True)
         wintrust.WinVerifyTrust.argtypes = [
             wintypes.HWND, ctypes.POINTER(GUID), ctypes.POINTER(WINTRUST_DATA)
         ]
         wintrust.WinVerifyTrust.restype = ctypes.c_long
-        return "trusted" if wintrust.WinVerifyTrust(None, ctypes.byref(action), ctypes.byref(trust_data)) == 0 else "invalid"
+
+        # A signing certificate that is *revoked* -- the standard response
+        # once a CA or Microsoft learns a code-signing key was stolen or
+        # abused -- used to pass here as "trusted": the original call asked
+        # for WTD_REVOKE_NONE and never checked revocation status at all.
+        # Malware that carries a signature from a since-revoked certificate
+        # is not hypothetical; it is one of the more common ways a signed
+        # binary turns out to be malicious.
+        #
+        # The chain is asked for revocation whole-chain first. Two outcomes
+        # collapse to the same thing WTD_REVOKE_NONE always returned --
+        # "trusted": success outright, and "the chain itself is fine but this
+        # specific certificate's revocation status could not be determined".
+        # The second case is not an edge case on a machine with
+        # WTD_CACHE_ONLY_URL_RETRIEVAL forcing every check to stay off the
+        # network -- it is the common case for any signed file whose CRL/OCSP
+        # response Windows has not already cached, which on an offline or
+        # freshly imaged machine is most of them. Treating "revocation
+        # unknown" as untrusted would have turned that into a wave of new
+        # false positives on exactly the machines this product is meant to
+        # protect without a network dependency; a second call with revocation
+        # switched back off distinguishes "revoked" from "unknown" without
+        # ever making a network request.
+        code = run_verify(WTD_REVOKE_WHOLECHAIN) & 0xFFFFFFFF
+        if code == 0:
+            return "trusted"
+        REVOCATION_UNKNOWN_CODES = {
+            0x800B010E,  # CERT_E_REVOCATION_FAILURE
+            0x80092012,  # CRYPT_E_NO_REVOCATION_CHECK
+            0x80092013,  # CRYPT_E_REVOCATION_OFFLINE
+        }
+        if code in REVOCATION_UNKNOWN_CODES:
+            fallback = run_verify(WTD_REVOKE_NONE) & 0xFFFFFFFF
+            return "trusted" if fallback == 0 else "invalid"
+        return "invalid"
     except (OSError, ValueError):
         return "present-unverified"
 
@@ -6532,6 +6628,43 @@ def memory_trim() -> int:
     return 0
 
 
+# The only executables whose command line changes suspicious_process_finding()'s
+# verdict. Hoisted to module scope so process_command_line_for() can consult the
+# same list -- two copies of this set would drift, and the drift would be
+# silent: a name added here but not there means a detection that quietly stops
+# firing.
+SUSPICIOUS_ARGUMENT_RULES: dict[str, tuple[tuple[str, ...], int]] = {
+    "powershell.exe": (("-encodedcommand", "-enc ", "frombase64string", "downloadstring", "invoke-expression", "iex "), 38),
+    "pwsh.exe": (("-encodedcommand", "-enc ", "frombase64string", "downloadstring", "invoke-expression", "iex "), 38),
+    "mshta.exe": (("http://", "https://", "javascript:", "vbscript:"), 42),
+    "rundll32.exe": (("javascript:", "http://", "https://", "\\temp\\", "\\downloads\\"), 35),
+    "regsvr32.exe": (("/i:http", "/i:https", "scrobj.dll", "/n /u"), 42),
+    "certutil.exe": (("-urlcache", "-decode", "-decodehex"), 30),
+    "bitsadmin.exe": (("/transfer", "/addfile"), 32),
+    "wscript.exe": (("\\temp\\", "\\downloads\\", ".js", ".vbs"), 26),
+    "cscript.exe": (("\\temp\\", "\\downloads\\", ".js", ".vbs"), 26),
+}
+
+
+def process_command_line_for(image: Path, process_id: int) -> str:
+    """Fetch a process command line only when it can affect the verdict.
+
+    windows_process_command_line() spawns a PowerShell process to answer one
+    CIM query. Calling it for every process start -- which is what a caller
+    that passes it eagerly as an argument does -- means one PowerShell launch
+    per process launched on the machine. On a build server that is a fork bomb
+    with good intentions, and it was already happening on every watch_behavior
+    poll before watch_processes existed.
+
+    Nothing is lost by asking first: only the executables in
+    SUSPICIOUS_ARGUMENT_RULES have command-line heuristics attached, and for
+    everything else the argument was being fetched and then ignored.
+    """
+    if image.name.casefold() not in SUSPICIOUS_ARGUMENT_RULES:
+        return ""
+    return windows_process_command_line(process_id)
+
+
 def suspicious_process_finding(
     path: Path, *, command_line: str = "", parent_path: str = "",
 ) -> Finding | None:
@@ -6581,18 +6714,7 @@ def suspicious_process_finding(
         # to an attacker.
         reasons.append((22, f"{location} içinden çalıştırıldı"))
 
-    suspicious_arguments = {
-        "powershell.exe": (("-encodedcommand", "-enc ", "frombase64string", "downloadstring", "invoke-expression", "iex "), 38),
-        "pwsh.exe": (("-encodedcommand", "-enc ", "frombase64string", "downloadstring", "invoke-expression", "iex "), 38),
-        "mshta.exe": (("http://", "https://", "javascript:", "vbscript:"), 42),
-        "rundll32.exe": (("javascript:", "http://", "https://", "\\temp\\", "\\downloads\\"), 35),
-        "regsvr32.exe": (("/i:http", "/i:https", "scrobj.dll", "/n /u"), 42),
-        "certutil.exe": (("-urlcache", "-decode", "-decodehex"), 30),
-        "bitsadmin.exe": (("/transfer", "/addfile"), 32),
-        "wscript.exe": (("\\temp\\", "\\downloads\\", ".js", ".vbs"), 26),
-        "cscript.exe": (("\\temp\\", "\\downloads\\", ".js", ".vbs"), 26),
-    }
-    argument_rule = suspicious_arguments.get(executable_name)
+    argument_rule = SUSPICIOUS_ARGUMENT_RULES.get(executable_name)
     if argument_rule:
         matches = [marker for marker in argument_rule[0] if marker in command]
         if matches:
@@ -6622,8 +6744,16 @@ def watch_behavior() -> int:
     if os.name != "nt":
         emit("behavior-error", code="UNSUPPORTED_PLATFORM", message="Davranış izleme yalnız Windows'ta kullanılabilir.")
         return 2
-    processes = windows_process_snapshot()
-    parents = toolhelp_parent_processes()
+    # watch_processes() owns process starts while it is running: it is
+    # push-based, so it also catches the ones that live and die between two
+    # of these polls, and it carries the ancestry chain. Running both would
+    # write two protection-history rows for a single process start -- and
+    # taking two Toolhelp snapshots every three seconds to produce findings
+    # nobody would use is not free either. Persistence is unaffected: nothing
+    # else diffs the Run keys and Startup folders.
+    watching_processes = not _process_watch_active
+    processes = windows_process_snapshot() if watching_processes else {}
+    parents = toolhelp_parent_processes() if watching_processes else {}
     persistence = persistence_snapshot()
     exclusions = load_exclusion_set()
     own_roots = neutron_owned_roots()
@@ -6631,14 +6761,26 @@ def watch_behavior() -> int:
         "behavior-ready",
         backend="windows-native",
         process_count=len(processes),
+        process_watch=watching_processes,
         persistence_points=len(persistence),
         interval_seconds=BEHAVIOR_INTERVAL_SECONDS,
     )
     try:
         while True:
             time.sleep(BEHAVIOR_INTERVAL_SECONDS)
-            current_processes = windows_process_snapshot()
-            current_parents = toolhelp_parent_processes()
+            if watching_processes == _process_watch_active:
+                # The other watcher just started or just died. Re-baseline
+                # before doing anything else: resuming a poll with a snapshot
+                # taken minutes ago would report every process started in
+                # between as brand new.
+                watching_processes = not _process_watch_active
+                processes = windows_process_snapshot() if watching_processes else {}
+                parents = toolhelp_parent_processes() if watching_processes else {}
+                emit("behavior-process-watch", enabled=watching_processes)
+                continue
+
+            current_processes = windows_process_snapshot() if watching_processes else {}
+            current_parents = toolhelp_parent_processes() if watching_processes else {}
             process_paths = {**processes, **current_processes}
             parent_links = {**parents, **current_parents}
             for process_id, raw_path in current_processes.items():
@@ -6649,7 +6791,9 @@ def watch_behavior() -> int:
                 parent_id = current_parents.get(process_id, 0)
                 parent_path = current_processes.get(parent_id) or processes.get(parent_id, "")
                 finding = suspicious_process_finding(
-                    Path(raw_path), command_line=windows_process_command_line(process_id), parent_path=parent_path,
+                    Path(raw_path),
+                    command_line=process_command_line_for(Path(raw_path), process_id),
+                    parent_path=parent_path,
                 )
                 if finding is None:
                     continue
@@ -7111,6 +7255,2721 @@ def watch_usb() -> int:
         return 0
 
 
+# --- Automatic response for the LocalSystem watchers ----------------------
+#
+# What "blocking" can and cannot mean here, stated once so the rest of this
+# section reads honestly:
+#
+#   * A kernel driver load cannot be refused from user mode. That needs an
+#     ELAM driver or a kernel callback, and Neutron has neither. What this can
+#     do is set the service's Start value to SERVICE_DISABLED, which stops the
+#     *next* load. A driver already in memory stays there until reboot.
+#   * A handle to LSASS cannot be denied. Denying it needs ObRegisterCallbacks
+#     from ring 0. What this can do is terminate the process holding it --
+#     after the fact, but usually within a minute of it being opened.
+#   * A process cannot be stopped before it runs. Win32_ProcessStartTrace
+#     fires after CreateProcess has returned. Termination happens milliseconds
+#     later, which stops what the process was about to do but not what it
+#     already did.
+#
+#   * Scheduled tasks, WMI subscriptions, trust-store certificates and Windows
+#     security settings *can* genuinely be undone, and are.
+#
+# Every action goes through the existing response_incidents/response_actions
+# ledger (see remediate_protection_event) so that the UI's rollback path works
+# on automatic responses exactly as it does on manual ones. Actions that
+# cannot be undone are recorded as reversible=0 rather than pretended about.
+
+# A wrong rule that fires once is a bug; a wrong rule that fires two hundred
+# times is an outage caused by the antivirus. Same reasoning as the automatic
+# quarantine brake above, and a deliberately lower ceiling: these actions
+# change machine state rather than move a file.
+RESPONSE_BURST_WINDOW_SECONDS = 600
+RESPONSE_BURST_LIMIT = 12
+
+_response_lock = threading.Lock()
+_response_history: list[float] = []
+_response_paused = False
+
+
+def response_allowed() -> bool:
+    """Rate-limit automatic responses, and stop entirely once the rate is absurd.
+
+    Once tripped this stays tripped for the life of the service process:
+    whatever caused twelve automatic state changes in ten minutes needs a
+    human to look at it, and resuming on a timer would just produce the same
+    burst again an hour later.
+    """
+    global _response_paused
+    now = time.monotonic()
+    with _response_lock:
+        if _response_paused:
+            return False
+        _response_history[:] = [
+            stamp for stamp in _response_history if now - stamp < RESPONSE_BURST_WINDOW_SECONDS
+        ]
+        if len(_response_history) >= RESPONSE_BURST_LIMIT:
+            _response_paused = True
+            paused = True
+        else:
+            _response_history.append(now)
+            paused = False
+    if paused:
+        emit(
+            "response-brake",
+            count=RESPONSE_BURST_LIMIT,
+            window_seconds=RESPONSE_BURST_WINDOW_SECONDS,
+            message=(
+                f"Son {RESPONSE_BURST_WINDOW_SECONDS // 60} dakikada {RESPONSE_BURST_LIMIT} "
+                "otomatik engelleme uygulandı. Bu, normal bir hızın çok üstünde. Otomatik "
+                "engelleme durduruldu; yeni bulgular yalnız bildirilecek. Uygulanan "
+                "müdahaleler Koruma geçmişinden geri alınabilir."
+            ),
+        )
+        return False
+    return True
+
+
+def open_response_incident(event_id: int | None, summary: str) -> int | None:
+    try:
+        with open_database() as connection:
+            cursor = connection.execute(
+                "INSERT INTO response_incidents (protection_event_id, created_at, summary) VALUES (?, ?, ?)",
+                (event_id, datetime.now(timezone.utc).isoformat(), summary[:500]),
+            )
+            return int(cursor.lastrowid)
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def close_response_incident(incident_id: int, event_id: int | None) -> None:
+    """Mark the originating protection event as handled.
+
+    Without this the UI would keep offering "remediate" on an event that has
+    already been remediated automatically, and remediate_protection_event()
+    would refuse it anyway because the disposition is no longer pending --
+    an offer that cannot succeed is worse than no offer.
+    """
+    if event_id is None:
+        return
+    try:
+        with open_database() as connection:
+            connection.execute(
+                "UPDATE protection_events SET disposition='remediated', disposition_at=?, incident_id=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), incident_id, event_id),
+            )
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def registry_write_dword(key_path: str, value_name: str, value: int) -> tuple[bool, Any]:
+    """Set one HKLM DWORD, returning (applied, previous value or None)."""
+    if os.name != "nt" or winreg is None:
+        return False, None
+    previous: Any = None
+    try:
+        key = winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+    except OSError:
+        return False, None
+    with key:
+        try:
+            previous = winreg.QueryValueEx(key, value_name)[0]
+        except OSError:
+            previous = None
+        try:
+            winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, int(value))
+        except OSError:
+            return False, previous
+    return True, previous
+
+
+def registry_restore_dword(key_path: str, value_name: str, previous: Any) -> bool:
+    if os.name != "nt" or winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            if previous is None:
+                try:
+                    winreg.DeleteValue(key, value_name)
+                except OSError:
+                    return False
+            else:
+                winreg.SetValueEx(key, value_name, 0, winreg.REG_DWORD, int(previous))
+    except OSError:
+        return False
+    return True
+
+
+def registry_delete_value(key_path: str, value_name: str) -> tuple[bool, Any]:
+    if os.name != "nt" or winreg is None:
+        return False, None
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+            try:
+                previous = winreg.QueryValueEx(key, value_name)[0]
+            except OSError:
+                previous = None
+            winreg.DeleteValue(key, value_name)
+    except OSError:
+        return False, None
+    return True, previous
+
+
+def registry_restore_string(key_path: str, value_name: str, previous: Any) -> bool:
+    if os.name != "nt" or winreg is None:
+        return False
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, "" if previous is None else str(previous))
+    except OSError:
+        return False
+    return True
+
+
+def disable_service_start(service_name: str) -> tuple[bool, Any]:
+    """Set a service or driver to SERVICE_DISABLED, returning the old Start value.
+
+    This is the strongest thing available without a kernel component, and its
+    limit is worth being precise about: a driver already loaded into the
+    kernel keeps running until the machine reboots. What this guarantees is
+    that it does not come back.
+    """
+    return registry_write_dword(f"{SERVICE_REGISTRY_PATH}\\{service_name}", "Start", SERVICE_START_DISABLED)
+
+
+def scheduled_task_name(identity: str) -> str:
+    """task://Folder/Sub/Name -> \\Folder\\Sub\\Name, or "" if unusable."""
+    raw = identity[len("task://"):] if identity.startswith("task://") else identity
+    raw = raw.strip("/")
+    if not raw or ".." in raw:
+        return ""
+    return "\\" + raw.replace("/", "\\")
+
+
+def set_scheduled_task_enabled(task_name: str, enabled: bool) -> bool:
+    if os.name != "nt" or not task_name.startswith("\\"):
+        return False
+    try:
+        completed = subprocess.run(
+            ["schtasks.exe", "/Change", "/TN", task_name, "/ENABLE" if enabled else "/DISABLE"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def delete_wmi_subscription(class_name: str, name: str) -> bool:
+    """Remove one WMI subscription object by name.
+
+    The name is refused rather than escaped if it contains a quote or a
+    backslash: it reaches PowerShell inside a WQL filter string, and building
+    a query out of an attacker-chosen name is how a watcher becomes an
+    execution primitive. A subscription with a quote in its name is reported
+    and left alone, which is the safe failure.
+    """
+    if os.name != "nt":
+        return False
+    if class_name not in {"__EventFilter", "__EventConsumer", "__FilterToConsumerBinding"}:
+        return False
+    if not name or any(character in name for character in "'\"\\`$;\r\n"):
+        return False
+    script = (
+        "$ErrorActionPreference='Stop';"
+        f"Get-CimInstance -Namespace root/subscription -ClassName {class_name} "
+        f"-Filter \"Name='{name}'\" | Remove-CimInstance"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+class _CRYPT_INTEGER_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+
+class _CERT_CONTEXT(ctypes.Structure):
+    _fields_ = [
+        ("dwCertEncodingType", ctypes.c_ulong),
+        ("pbCertEncoded", ctypes.POINTER(ctypes.c_ubyte)),
+        ("cbCertEncoded", ctypes.c_ulong),
+        ("pCertInfo", ctypes.c_void_p),
+        ("hCertStore", ctypes.c_void_p),
+    ]
+
+
+def _crypt32_writable_store(store_name: str) -> tuple[Any, Any]:
+    from ctypes import wintypes
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    crypt32.CertOpenStore.restype = wintypes.HANDLE
+    crypt32.CertOpenStore.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE, wintypes.DWORD, wintypes.LPCWSTR,
+    ]
+    crypt32.CertFindCertificateInStore.restype = ctypes.POINTER(_CERT_CONTEXT)
+    crypt32.CertFindCertificateInStore.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.POINTER(_CERT_CONTEXT),
+    ]
+    crypt32.CertDeleteCertificateFromStore.restype = wintypes.BOOL
+    crypt32.CertDeleteCertificateFromStore.argtypes = [ctypes.POINTER(_CERT_CONTEXT)]
+    crypt32.CertAddEncodedCertificateToStore.restype = wintypes.BOOL
+    crypt32.CertAddEncodedCertificateToStore.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        wintypes.DWORD, ctypes.c_void_p,
+    ]
+    crypt32.CertCloseStore.restype = wintypes.BOOL
+    crypt32.CertCloseStore.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+    CERT_STORE_PROV_SYSTEM_W = 10
+    CERT_SYSTEM_STORE_LOCAL_MACHINE = 0x00020000
+    store = crypt32.CertOpenStore(
+        CERT_STORE_PROV_SYSTEM_W, 0, None, CERT_SYSTEM_STORE_LOCAL_MACHINE, store_name,
+    )
+    return crypt32, store
+
+
+def delete_machine_certificate(store_name: str, thumbprint: str) -> bytes | None:
+    """Remove a certificate from a machine trust store, returning its DER bytes.
+
+    The DER is what makes this reversible: putting the certificate back is
+    CertAddEncodedCertificateToStore with exactly these bytes. Returning None
+    means nothing was deleted.
+    """
+    if os.name != "nt" or store_name not in {"ROOT", "CA", "TrustedPublisher"}:
+        return None
+    try:
+        digest = bytes.fromhex(thumbprint)
+    except ValueError:
+        return None
+    if len(digest) != 20:
+        return None
+
+    crypt32, store = _crypt32_writable_store(store_name)
+    if not store:
+        return None
+    try:
+        X509_ASN_ENCODING = 0x1
+        PKCS_7_ASN_ENCODING = 0x10000
+        CERT_FIND_HASH = 0x10000
+        buffer = (ctypes.c_ubyte * len(digest)).from_buffer_copy(digest)
+        blob = _CRYPT_INTEGER_BLOB(len(digest), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)))
+        context = crypt32.CertFindCertificateInStore(
+            store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_HASH,
+            ctypes.byref(blob), None,
+        )
+        if not context:
+            return None
+        encoded = bytes(bytearray(context.contents.pbCertEncoded[: context.contents.cbCertEncoded]))
+        # CertDeleteCertificateFromStore frees the context whether it succeeds
+        # or fails, so the encoded copy has to be taken first and the context
+        # must not be touched afterwards.
+        if not crypt32.CertDeleteCertificateFromStore(context):
+            return None
+        return encoded
+    finally:
+        crypt32.CertCloseStore(store, 0)
+
+
+def restore_machine_certificate(store_name: str, encoded: bytes) -> bool:
+    if os.name != "nt" or store_name not in {"ROOT", "CA", "TrustedPublisher"} or not encoded:
+        return False
+    crypt32, store = _crypt32_writable_store(store_name)
+    if not store:
+        return False
+    try:
+        X509_ASN_ENCODING = 0x1
+        PKCS_7_ASN_ENCODING = 0x10000
+        CERT_STORE_ADD_REPLACE_EXISTING = 3
+        buffer = (ctypes.c_ubyte * len(encoded)).from_buffer_copy(encoded)
+        return bool(crypt32.CertAddEncodedCertificateToStore(
+            store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, buffer, len(encoded),
+            CERT_STORE_ADD_REPLACE_EXISTING, None,
+        ))
+    finally:
+        crypt32.CertCloseStore(store, 0)
+
+
+def terminate_process_by_id(process_id: int, expected_image: str) -> bool:
+    """Terminate one process, refusing if its image is no longer what we saw.
+
+    The image re-check is the PID reuse guard: between the detection and this
+    call the process may have exited and its number been handed to something
+    else, and killing an innocent process because it inherited a number is a
+    far worse outcome than missing the guilty one.
+    """
+    if os.name != "nt" or process_id <= 4 or process_id == os.getpid():
+        return False
+    current = windows_process_snapshot().get(process_id, "")
+    if not current or not expected_image:
+        return False
+    try:
+        if canonical_path(Path(current)) != canonical_path(Path(expected_image)):
+            return False
+    except (OSError, RuntimeError):
+        return False
+    for root in protected_system_quarantine_roots():
+        try:
+            if path_is_within(canonical_path(Path(current)), root):
+                return False
+        except (OSError, RuntimeError):
+            continue
+
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    PROCESS_TERMINATE = 0x0001
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, process_id)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.TerminateProcess(handle, 1))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+# Which posture findings are safe for a background service to undo on its own.
+#
+# Absent on purpose, and each for a different reason:
+#   RDP_ENABLED -- turning Remote Desktop off can lock the only administrator
+#     out of a machine they are administering remotely, including the one
+#     reading this alert. Reported, never reverted.
+#   SECURE_BOOT_OFF / TESTSIGNING_ON / INTEGRITY_CHECKS_OFF / SAFE_MODE --
+#     firmware and boot configuration. Nothing user mode writes changes them
+#     for the boot that is already running.
+#   DEFENDER_EXCLUSION_PRESENT -- a narrow exclusion is usually a developer
+#     who got tired of their build directory being scanned. Only the
+#     drive-wide ones (DEFENDER_EXCLUSION_BROAD) are removed.
+POSTURE_REVERTS: dict[str, tuple[str, str, int]] = {
+    "DEFENDER_DISABLED": (r"SOFTWARE\Policies\Microsoft\Windows Defender", "DisableAntiSpyware", 0),
+    "DEFENDER_REALTIME_OFF": (
+        r"SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection",
+        "DisableRealtimeMonitoring", 0,
+    ),
+    "UAC_DISABLED": (
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "EnableLUA", 1,
+    ),
+    "UAC_PROMPT_OFF": (
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "ConsentPromptBehaviorAdmin", 5,
+    ),
+    "REMOTE_ADMIN_UNRESTRICTED": (
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "LocalAccountTokenFilterPolicy", 0,
+    ),
+    "DRIVER_BLOCKLIST_OFF": (
+        r"SYSTEM\CurrentControlSet\Control\CI\Config", "VulnerableDriverBlocklistEnable", 1,
+    ),
+}
+
+FIREWALL_PROFILE_KEYS = tuple(
+    f"SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy\\{profile}"
+    for profile in ("DomainProfile", "StandardProfile", "PublicProfile")
+)
+
+
+def respond(
+    event_id: int | None, summary: str, actions: list[tuple[str, str, Any, Any, bool]],
+) -> dict[str, Any] | None:
+    """Record and report one automatic response.
+
+    `actions` is a list of (action_type, target, before, after, reversible)
+    that the caller has *already applied*. Applying first and recording second
+    is the right order for exactly one reason: a response that worked but
+    could not be written to the ledger must still be reported, whereas a
+    ledger entry for something that never happened would make the rollback
+    path lie.
+    """
+    if not actions:
+        return None
+    incident_id = open_response_incident(event_id, summary)
+    if incident_id is None:
+        return {"incident_id": None, "actions": [action[0] for action in actions]}
+    for action_type, target, before, after, reversible in actions:
+        try:
+            record_response_action(
+                incident_id, action_type, target, before=before, after=after, reversible=reversible,
+            )
+        except (OSError, sqlite3.Error):
+            continue
+    close_response_incident(incident_id, event_id)
+    return {"incident_id": incident_id, "actions": [action[0] for action in actions]}
+
+
+# --- LocalSystem-only watchers -------------------------------------------
+#
+# The four watchers below are additions to service_host(), and unlike every
+# watcher above them they are deliberately *not* started as desktop
+# subprocesses by main.cjs. That is a constraint, not an oversight: each one
+# reads state an unelevated process either cannot see at all
+# (%SystemRoot%\System32\Tasks is SYSTEM/Administrators-only, so a per-user
+# task watcher would report "no tasks on this machine") or can only see half
+# of (a driver's ImagePath value reads fine from HKLM, the image it points at
+# does not). Running them anywhere but LocalSystem would produce confident,
+# wrong answers -- worse than not running them at all.
+#
+# They are still exposed as --watch-* actions, matching every other watcher
+# here, so each can be run and read on its own from an elevated prompt.
+
+DRIVER_POLL_INTERVAL_SECONDS = 15.0
+TASK_POLL_INTERVAL_SECONDS = 20.0
+INTEGRITY_POLL_INTERVAL_SECONDS = 120.0
+# The rule store is checked far less often than everything else; see
+# integrity_rule_problems().
+INTEGRITY_RULE_CHECK_INTERVAL_SECONDS = 3600.0
+SCHEDULER_POLL_INTERVAL_SECONDS = 300.0
+
+SERVICE_REGISTRY_PATH = r"SYSTEM\CurrentControlSet\Services"
+
+# Win32 service Type is a bitmask. 0x1/0x2 are kernel and file-system
+# (filter) drivers -- code that runs in ring 0 and that Neutron, having no
+# kernel component of its own, can only ever report on. 0x10/0x20 are
+# ordinary user-mode services.
+SERVICE_TYPE_KERNEL_DRIVER = 0x1
+SERVICE_TYPE_FILE_SYSTEM_DRIVER = 0x2
+SERVICE_TYPE_OWN_PROCESS = 0x10
+SERVICE_TYPE_SHARE_PROCESS = 0x20
+# Start=4 is SERVICE_DISABLED. A disabled entry cannot run, and the legacy
+# driver cleanup in windows-security.cjs deliberately parks old Neutron
+# drivers there -- reporting those would mean reporting our own uninstaller.
+SERVICE_START_DISABLED = 4
+
+# The AMSI provider Neutron registers (tools/amsi/). Kept in sync by hand
+# with the CLSID in tools/amsi/NeutronAmsi.h and tools/installer/neutron.nsi;
+# watch_integrity() only reads it, so a stale value here degrades to a false
+# "provider missing" alert rather than to a wrong registry write.
+AMSI_PROVIDER_CLSID = "{ADACFA90-B877-414D-A818-2EA5291E290E}"
+AMSI_PROVIDER_REGISTRY_PATH = rf"SOFTWARE\Microsoft\AMSI\Providers\{AMSI_PROVIDER_CLSID}"
+NEUTRON_SERVICE_NAME = "NeutronService"
+
+# The same 24 hours main.cjs uses (SCHEDULED_SCAN_INTERVAL_MS), in
+# milliseconds because scheduled_scan_last_run_at is written by Date.now() on
+# the Electron side and both schedulers share that one settings row.
+SCHEDULED_SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+
+def resolve_service_image_path(raw_image_path: str) -> Path | None:
+    """Turn a service/driver ImagePath registry value into a real file path.
+
+    Three different shapes end up in this one value and all of them have to
+    be handled here. Drivers store native NT paths (\\??\\C:\\..., or
+    \\SystemRoot\\System32\\drivers\\x.sys) and very often store nothing but a
+    file name, which means System32\\drivers. Services store a command line,
+    quoted or not, with arguments. Getting this wrong does not fail loudly --
+    it degrades into "file not found", and the caller would then report every
+    driver on a healthy Windows install as untrusted.
+
+    Returns None when nothing resolves to an existing file. Callers treat
+    that as suspicious rather than as trusted, so a parse failure is safe.
+    """
+    text = str(raw_image_path or "").strip()
+    if not text:
+        return None
+    if text.startswith('"'):
+        closing = text.find('"', 1)
+        text = text[1:closing] if closing > 1 else text[1:]
+    else:
+        # Cut at the first switch marker rather than the first space: plenty
+        # of legitimate services live under "Program Files".
+        for marker in (" -", " /"):
+            index = text.find(marker)
+            if index > 0:
+                text = text[:index]
+                break
+    text = text.strip()
+    if not text:
+        return None
+
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    lowered = text.casefold()
+    if lowered.startswith("\\??\\"):
+        text = text[4:]
+    elif lowered.startswith("\\systemroot\\"):
+        text = os.path.join(system_root, text[len("\\systemroot\\"):])
+    elif text.startswith("\\\\"):
+        pass  # UNC path, already absolute
+    elif text.startswith("\\"):
+        text = os.path.join(system_root, text.lstrip("\\"))
+    elif lowered.startswith("system32\\") or lowered.startswith("syswow64\\"):
+        text = os.path.join(system_root, text)
+    elif not os.path.splitdrive(text)[0]:
+        text = os.path.join(system_root, "System32", "drivers", text)
+
+    try:
+        candidate = Path(os.path.expandvars(text))
+        return candidate if candidate.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def system_service_snapshot() -> dict[str, dict[str, Any]]:
+    """One read-only entry per HKLM\\SYSTEM\\CurrentControlSet\\Services key.
+
+    Nothing is filtered out here on purpose. watch_drivers() needs the full
+    baseline so that an *existing* entry whose Type or ImagePath is later
+    repointed -- the quiet half of the technique, where an attacker reuses an
+    innocuous service name instead of creating one -- registers as a change
+    rather than as something there was never a baseline for.
+    """
+    if os.name != "nt" or winreg is None:
+        return {}
+    snapshot: dict[str, dict[str, Any]] = {}
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SERVICE_REGISTRY_PATH, 0, winreg.KEY_READ)
+    except OSError:
+        return {}
+    with root:
+        index = 0
+        while True:
+            try:
+                name = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            entry: dict[str, Any] = {
+                "name": name, "type": 0, "start": 0, "image_path": "", "display_name": "",
+            }
+            try:
+                with winreg.OpenKey(root, name, 0, winreg.KEY_READ) as key:
+                    for value_name, field in (("Type", "type"), ("Start", "start")):
+                        try:
+                            entry[field] = int(winreg.QueryValueEx(key, value_name)[0])
+                        except (OSError, ValueError, TypeError):
+                            pass
+                    for value_name, field in (("ImagePath", "image_path"), ("DisplayName", "display_name")):
+                        try:
+                            entry[field] = str(winreg.QueryValueEx(key, value_name)[0])
+                        except (OSError, ValueError, TypeError):
+                            pass
+            except OSError:
+                continue
+            snapshot[name] = entry
+    return snapshot
+
+
+def service_registration_finding(
+    entry: dict[str, Any],
+    previous: dict[str, Any] | None,
+    exclusions: ExclusionSet,
+    own_roots: tuple[Path, ...],
+) -> tuple[Finding, bool] | None:
+    """Decide whether one services-key entry is worth reporting.
+
+    Returns the finding together with whether the image is validly signed.
+    The two questions -- "is this worth a human's attention" and "is this
+    safe to disable automatically" -- have different answers for the same
+    entry, and collapsing them into one bool would force one of the two
+    watchers using this to be wrong.
+
+    The reporting threshold is broad on purpose: any newly registered kernel
+    driver is reported even when it is validly signed, because that is
+    exactly what BYOVD looks like -- a legitimately signed, legitimately
+    loadable driver with a known vulnerability, installed by something that
+    had no business installing a driver. New *user-mode* services are
+    reported only when their image is unsigned or unresolvable -- every
+    updater on the machine registers services, and reporting those would
+    drown the real signal.
+
+    The `trusted` flag this returns is the narrower, blocking-relevant
+    question: watch_drivers() disables a service automatically only when
+    `trusted` is False. A validly signed driver is still reported (Windows
+    Update, a new webcam, a new VPN client and a BYOVD payload all look
+    identical at the moment of registration), but it is not disabled
+    automatically -- doing that unconditionally would auto-disable every
+    signed driver a user ever installs, which is a false positive on
+    essentially all of them, not an edge case.
+    """
+    service_type = int(entry.get("type") or 0)
+    is_driver = bool(service_type & (SERVICE_TYPE_KERNEL_DRIVER | SERVICE_TYPE_FILE_SYSTEM_DRIVER))
+    is_service = bool(service_type & (SERVICE_TYPE_OWN_PROCESS | SERVICE_TYPE_SHARE_PROCESS))
+    if not is_driver and not is_service:
+        return None
+    if int(entry.get("start") or 0) == SERVICE_START_DISABLED:
+        return None
+
+    name = str(entry.get("name") or "")
+    if name.casefold() == NEUTRON_SERVICE_NAME.casefold():
+        return None
+    raw_image = str(entry.get("image_path") or "")
+    image_path = resolve_service_image_path(raw_image)
+    if image_path is not None:
+        if any(path_is_inside(image_path, root) for root in own_roots):
+            return None
+        if is_path_excluded(image_path, exclusions):
+            return None
+
+    if previous is not None:
+        # An entry that changed only in a field this watcher does not care
+        # about -- a DisplayName rewritten by a language pack, a Start value
+        # flipped between automatic and manual -- is not news.
+        if (
+            int(previous.get("type") or 0) == service_type
+            and str(previous.get("image_path") or "") == raw_image
+        ):
+            return None
+
+    trusted = image_path is not None and is_trusted_signed_image(image_path)
+    if is_service and trusted:
+        return None
+
+    is_new = previous is None
+    severity = "high" if (is_driver and not trusted) else "medium"
+    what = "Çekirdek sürücüsü" if is_driver else "Windows servisi"
+    how = "kaydedildi" if is_new else "değiştirildi"
+    if image_path is None:
+        why = "çalıştırılabilir dosyası çözümlenemedi"
+    elif not trusted:
+        why = "imzasız veya güvenilmeyen bir dosyayı gösteriyor"
+    else:
+        why = "imzalı, ancak sürücü kurulumu ender bir işlemdir (BYOVD kontrolü)"
+
+    size = 0
+    if image_path is not None:
+        try:
+            size = image_path.stat().st_size
+        except OSError:
+            size = 0
+    return Finding(
+        path=str(image_path) if image_path is not None else f"service://{name}",
+        kind="driver-registration" if is_driver else "service-registration",
+        severity=severity,
+        reason=f"{what} '{name}' {how}: {why}",
+        sha256=sha256_for(image_path, size) if image_path is not None and size else None,
+    ), trusted
+
+
+def watch_drivers() -> int:
+    """Report newly registered or repointed kernel drivers and services.
+
+    This closes the gap watch_behavior() leaves open. That watcher diffs Run
+    keys and Startup folders, which is where commodity malware lives, and
+    neither is touched when something installs a driver or registers a
+    LocalSystem service to run at boot -- the two persistence mechanisms that
+    outrank everything Neutron can see from user mode.
+
+    Nothing here blocks. Neutron has no kernel component and cannot refuse a
+    driver load; by the time this loop notices, the driver is registered.
+    Reporting it is still the difference between a machine that shows what
+    happened and one that does not.
+    """
+    if os.name != "nt":
+        emit("driver-error", code="UNSUPPORTED_PLATFORM",
+             message="Sürücü izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+    if winreg is None:
+        emit("driver-error", code="REGISTRY_UNAVAILABLE", message="Kayıt defteri okunamadı.")
+        return 2
+
+    known = system_service_snapshot()
+    if not known:
+        emit("driver-error", code="SERVICE_KEY_UNREADABLE",
+             message="Servis kayıt defteri anahtarı okunamadı; sürücü izleme yönetici yetkisi gerektirir.")
+        return 2
+    exclusions = load_exclusion_set()
+    own_roots = neutron_owned_roots()
+    emit("driver-ready", backend="registry-poll", tracked=len(known),
+         interval_seconds=DRIVER_POLL_INTERVAL_SECONDS)
+
+    try:
+        while True:
+            time.sleep(DRIVER_POLL_INTERVAL_SECONDS)
+            current = system_service_snapshot()
+            if not current:
+                # A transient read failure must not be read as "every driver
+                # on this machine was just removed", which is what an empty
+                # snapshot would mean to the diff below.
+                continue
+            for name, entry in current.items():
+                previous = known.get(name)
+                if previous is not None and previous == entry:
+                    continue
+                result = service_registration_finding(entry, previous, exclusions, own_roots)
+                if result is None:
+                    continue
+                finding, trusted = result
+                event_kind = (
+                    "driver-registered" if finding.kind == "driver-registration" else "service-registered"
+                )
+                try:
+                    event_id = save_protection_event(event_kind, finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                # Two independent gates, and both have to pass before anything
+                # is disabled:
+                #
+                #   * not trusted -- a validly signed image is reported (the
+                #     BYOVD case: signed does not mean safe) but never
+                #     auto-disabled. Every signed driver a user legitimately
+                #     installs -- a webcam, a VPN client, a GPU update --
+                #     would otherwise trip this on first boot after install,
+                #     which is not a rare edge case, it is most installs.
+                #   * not boot-start -- a boot-start driver (Start=0) loads
+                #     before the disk stack is up; disabling one is how a
+                #     machine ends at INACCESSIBLE_BOOT_DEVICE. Reported and
+                #     left alone regardless of trust.
+                response = None
+                start_value = int(entry.get("start") or 0)
+                block_skipped = None
+                if trusted:
+                    block_skipped = "trusted-signed"
+                elif start_value == 0:
+                    block_skipped = "boot-start"
+                elif response_allowed():
+                    applied, previous_start = disable_service_start(name)
+                    if applied:
+                        response = respond(
+                            event_id, f"{name} servisi otomatik olarak devre dışı bırakıldı",
+                            [("service-disable", name, {"start": previous_start}, {"start": SERVICE_START_DISABLED}, True)],
+                        )
+                emit(
+                    "driver-finding", event_id=event_id, service_name=name,
+                    display_name=str(entry.get("display_name") or ""),
+                    file_name=str(entry.get("display_name") or name),
+                    is_new=previous is None, finding=asdict(finding),
+                    response=response,
+                    blocked=bool(response),
+                    block_skipped=block_skipped,
+                )
+            for name in set(known) - set(current):
+                emit("driver-removed", service_name=name)
+            known = current
+    except KeyboardInterrupt:
+        emit("driver-stopped")
+        return 0
+
+
+def scheduled_tasks_directory() -> Path:
+    return Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "Tasks"
+
+
+def read_scheduled_task_command(task_file: Path) -> str:
+    """Extract the command a task XML runs, as a stable comparison string.
+
+    Task Scheduler writes one XML file per task, normally UTF-16 with a BOM.
+    The BOM is checked rather than assumed because a UTF-16 decode of a UTF-8
+    file does not raise -- it silently produces garbage of the right length,
+    which would make every task look like it had changed on every pass.
+
+    Regex rather than an XML parser: these files carry a default namespace, a
+    malformed or half-written one (the scheduler does not write them
+    atomically) has to degrade to "" instead of raising inside a watcher
+    thread, and only two leaf elements are ever needed.
+    """
+    try:
+        raw = task_file.read_bytes()
+    except (OSError, PermissionError):
+        return ""
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    commands = re.findall(r"<Command>(.*?)</Command>", text, re.DOTALL | re.IGNORECASE)
+    arguments = re.findall(r"<Arguments>(.*?)</Arguments>", text, re.DOTALL | re.IGNORECASE)
+    parts = [" ".join(item.split()) for item in commands + arguments]
+    return " ".join(part for part in parts if part)[:2000]
+
+
+def scheduled_task_snapshot() -> dict[str, str]:
+    """Registered Scheduled Tasks as identity -> command line.
+
+    Read straight off disk instead of shelling out to schtasks.exe: this runs
+    as LocalSystem, where the directory is readable, and spawning a console
+    process every 20 seconds to parse localised table output would be slower
+    and far more fragile than reading the same XML the scheduler wrote.
+    """
+    root = scheduled_tasks_directory()
+    if not root.is_dir():
+        return {}
+    snapshot: dict[str, str] = {}
+    for current_root, _directories, files in os.walk(root, onerror=lambda _error: None):
+        for file_name in files:
+            task_file = Path(current_root) / file_name
+            try:
+                relative = task_file.relative_to(root)
+            except ValueError:
+                continue
+            snapshot[f"task://{relative.as_posix()}"] = read_scheduled_task_command(task_file)
+            if len(snapshot) >= 5000:
+                return snapshot
+    return snapshot
+
+
+def watch_tasks() -> int:
+    """Report new or repointed Scheduled Tasks.
+
+    Scheduled Tasks are the persistence mechanism watch_behavior() cannot
+    see: they live in the Task Scheduler store rather than in a Run key, they
+    can run as SYSTEM, and they survive both a reboot and the removal of
+    whatever created them.
+
+    Known gap, stated rather than implied: WMI event subscriptions
+    (__EventFilter / __EventConsumer) are the other SYSTEM-level persistence
+    store and are *not* covered here. They live in the WMI repository, which
+    has no readable on-disk format, and reaching them means a CIM query --
+    a subprocess dependency this engine does not otherwise have.
+    """
+    if os.name != "nt":
+        emit("task-error", code="UNSUPPORTED_PLATFORM",
+             message="Görev izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+    if not scheduled_tasks_directory().is_dir():
+        emit("task-error", code="TASK_STORE_MISSING", message="Görev Zamanlayıcı deposu bulunamadı.")
+        return 2
+
+    known = scheduled_task_snapshot()
+    if not known:
+        emit("task-error", code="TASK_STORE_UNREADABLE",
+             message="Görev deposu okunamadı; görev izleme yönetici yetkisi gerektirir.")
+        return 2
+    exclusions = load_exclusion_set()
+    own_roots = neutron_owned_roots()
+    emit("task-ready", backend="task-store", tracked=len(known),
+         interval_seconds=TASK_POLL_INTERVAL_SECONDS)
+
+    try:
+        while True:
+            time.sleep(TASK_POLL_INTERVAL_SECONDS)
+            current = scheduled_task_snapshot()
+            if not current:
+                continue
+            for identity, command in current.items():
+                if identity in known and known[identity] == command:
+                    continue
+                if not command:
+                    # A task with no <Command> at all runs a COM handler or
+                    # shows a message, neither of which this watcher can
+                    # judge; reporting them would be noise without a verdict.
+                    continue
+                target = command_line_executable(command)
+                if target is not None:
+                    if any(path_is_inside(target, root) for root in own_roots):
+                        continue
+                    if is_path_excluded(target, exclusions):
+                        continue
+                    if is_trusted_signed_image(target):
+                        # Windows Update, drivers and every major application
+                        # rewrite their own tasks constantly. A signed target
+                        # is the same "not news" call watch_behavior() makes
+                        # for Run keys, for the same reason.
+                        continue
+                size = 0
+                if target is not None:
+                    try:
+                        size = target.stat().st_size
+                    except OSError:
+                        size = 0
+                is_new = identity not in known
+                finding = Finding(
+                    path=str(target) if target is not None else identity,
+                    kind="scheduled-task",
+                    severity="medium",
+                    reason=(
+                        f"Zamanlanmış görev {'eklendi' if is_new else 'değiştirildi'}: "
+                        f"{identity.split('/')[-1]} — imzasız ya da çözümlenemeyen bir komut çalıştırıyor"
+                    ),
+                    sha256=sha256_for(target, size) if target is not None and size else None,
+                )
+                try:
+                    event_id = save_protection_event("scheduled-task-changed", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                # Windows' own tasks are reported but not disabled. Servicing,
+                # Update and Defender maintenance all live under
+                # \Microsoft\Windows, they occasionally fail this watcher's
+                # signature check for reasons that have nothing to do with an
+                # attack, and disabling one of them breaks Windows in a way
+                # nobody will connect back to the antivirus.
+                task_name = scheduled_task_name(identity)
+                microsoft_task = task_name.casefold().startswith("\\microsoft\\windows\\")
+                response = None
+                if task_name and not microsoft_task and response_allowed():
+                    if set_scheduled_task_enabled(task_name, False):
+                        response = respond(
+                            event_id, f"{task_name} zamanlanmış görevi otomatik olarak devre dışı bırakıldı",
+                            [("task-disable", task_name, {"enabled": True}, {"enabled": False}, True)],
+                        )
+                emit(
+                    "task-finding", event_id=event_id, task=identity, is_new=is_new,
+                    file_name=identity.split("/")[-1],
+                    command=command[:500], finding=asdict(finding),
+                    response=response,
+                    blocked=bool(response),
+                    block_skipped=("microsoft-task" if microsoft_task else None),
+                )
+            for identity in set(known) - set(current):
+                emit("task-removed", task=identity)
+            known = current
+    except KeyboardInterrupt:
+        emit("task-stopped")
+        return 0
+
+
+def amsi_provider_registered() -> bool:
+    if os.name != "nt" or winreg is None:
+        return False
+    for view in registry_wow64_views():
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, AMSI_PROVIDER_REGISTRY_PATH, 0, winreg.KEY_READ | view
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def neutron_service_registered() -> bool:
+    if os.name != "nt" or winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            f"{SERVICE_REGISTRY_PATH}\\{NEUTRON_SERVICE_NAME}", 0, winreg.KEY_READ,
+        ) as key:
+            try:
+                return int(winreg.QueryValueEx(key, "Start")[0]) != SERVICE_START_DISABLED
+            except (OSError, ValueError, TypeError):
+                return True
+    except OSError:
+        return False
+
+
+def integrity_rule_problems() -> list[dict[str, str]]:
+    """Rule-store health, split out because it is the expensive check.
+
+    load_yara_rules() compiles every rule in the store. That is the right
+    check -- a store that is present but no longer compiles protects nothing,
+    and only compiling proves it -- but it is far too costly to repeat on the
+    watcher's two-minute cadence. Rules change when an update lands, so
+    watch_integrity() runs this hourly and carries the result forward in
+    between.
+    """
+    try:
+        compiled, status = load_yara_rules()
+    except Exception as error:  # noqa: BLE001 -- a rule-loading failure is itself the finding
+        return [{
+            "code": "RULES_UNREADABLE", "severity": "high",
+            "message": f"YARA kuralları yüklenemedi: {error}",
+        }]
+    if not status.get("available"):
+        return [{
+            "code": "RULES_ENGINE_MISSING", "severity": "high",
+            "message": "yara-python bu kurulumda yüklü değil; kural tabanlı tespit çalışmıyor.",
+        }]
+    if int(status.get("rule_files") or 0) <= 0:
+        return [{
+            "code": "RULES_EMPTY", "severity": "high",
+            "message": "Yüklenebilir YARA kuralı yok; kural tabanlı tespit çalışmıyor.",
+        }]
+    if compiled is None:
+        return [{
+            "code": "RULES_INVALID", "severity": "high",
+            "message": f"YARA kuralları derlenemedi: {status.get('message') or 'bilinmeyen hata'}",
+        }]
+    return []
+
+
+def integrity_check() -> list[dict[str, str]]:
+    """Every self-protection check, as a list of problems (empty == healthy).
+
+    Returning data rather than emitting from inside each check is what lets
+    the watcher diff one pass against the last, so a problem that persists is
+    reported once instead of every two minutes forever.
+    """
+    problems: list[dict[str, str]] = []
+    try:
+        settings = read_app_settings()
+    except (OSError, sqlite3.Error) as error:
+        return [{
+            "code": "SETTINGS_UNREADABLE", "severity": "high",
+            "message": f"Neutron ayar veritabanı okunamadı: {error}",
+        }]
+
+    if settings.get("amsi_protection_enabled") and not amsi_provider_registered():
+        problems.append({
+            "code": "AMSI_PROVIDER_MISSING", "severity": "high",
+            "message": "AMSI koruması açık ancak Neutron AMSI sağlayıcısının kaydı bulunamadı. "
+                       "Betik denetimi devre dışı.",
+        })
+    if _running_as_service and not neutron_service_registered():
+        problems.append({
+            "code": "SERVICE_MISSING", "severity": "high",
+            "message": "Neutron servis olarak çalışıyor ancak NeutronService kaydı bulunamadı ya da devre dışı bırakılmış.",
+        })
+
+    # Quarantined payloads deleted from underneath the database mean the
+    # store was tampered with: the UI keeps offering a restore for a file
+    # that is no longer there, and a threat the user believes is contained
+    # is simply gone -- possibly back to where it came from.
+    try:
+        quarantine_directory()  # also re-applies the store's protected DACL
+        with open_database() as connection:
+            rows = connection.execute(
+                "SELECT stored_path FROM quarantine_items WHERE state = 'active'"
+            ).fetchall()
+        missing = [str(stored) for (stored,) in rows if stored and not Path(str(stored)).is_file()]
+        if missing:
+            problems.append({
+                "code": "QUARANTINE_PAYLOAD_MISSING", "severity": "high",
+                "message": f"Karantinadaki {len(missing)} dosya diskte bulunamadı; "
+                           "karantina deposu dışarıdan değiştirilmiş.",
+            })
+    except (OSError, sqlite3.Error) as error:
+        problems.append({
+            "code": "QUARANTINE_UNREADABLE", "severity": "medium",
+            "message": f"Karantina klasörü doğrulanamadı: {error}",
+        })
+    return problems
+
+
+def watch_integrity() -> int:
+    """Neutron's own tamper watchdog.
+
+    Everything else in this file watches the machine; until now nothing
+    watched Neutron. Disabling the security product is the first move in most
+    intrusions, and on this machine every way of doing it is currently
+    silent: unregister the AMSI provider, disable or delete NeutronService,
+    empty the rule store, or delete the quarantined payloads out from under
+    the database.
+
+    It reports and does not repair, deliberately. Self-healing from inside
+    the process being attacked is a much larger design than one watcher, and
+    a repair loop fighting either an attacker or a misconfigured machine
+    would do more damage than a clear, repeated report.
+    """
+    if os.name != "nt":
+        emit("integrity-error", code="UNSUPPORTED_PLATFORM",
+             message="Bütünlük izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    emit("integrity-ready", interval_seconds=INTEGRITY_POLL_INTERVAL_SECONDS)
+    reported: set[str] = set()
+    rule_problems: list[dict[str, str]] = []
+    # -inf rather than 0: time.monotonic() starts near zero on some platforms,
+    # and "now - 0 >= 3600" would skip the very first rule check -- the one
+    # pass where a broken rule store most needs to be reported.
+    last_rule_check = float("-inf")
+    try:
+        while True:
+            if time.monotonic() - last_rule_check >= INTEGRITY_RULE_CHECK_INTERVAL_SECONDS:
+                last_rule_check = time.monotonic()
+                rule_problems = integrity_rule_problems()
+            problems = integrity_check() + rule_problems
+            codes = {problem["code"] for problem in problems}
+            for problem in problems:
+                if problem["code"] in reported:
+                    continue
+                reported.add(problem["code"])
+                finding = Finding(
+                    path=f"neutron://{problem['code'].casefold()}",
+                    kind="self-protection",
+                    severity=problem["severity"],
+                    reason=problem["message"],
+                    sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("integrity-alert", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                emit(
+                    "integrity-alert", event_id=event_id, code=problem["code"],
+                    file_name="Neutron", finding=asdict(finding),
+                )
+            for code in sorted(reported - codes):
+                reported.discard(code)
+                emit("integrity-recovered", code=code)
+            emit("integrity-status", healthy=not problems, problem_count=len(problems))
+            time.sleep(INTEGRITY_POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        emit("integrity-stopped")
+        return 0
+
+
+def machine_scan_targets() -> list[Path]:
+    """Scan targets for a scan that runs as LocalSystem.
+
+    home_scan_targets() resolves Path.home(), which under the service account
+    is C:\\Windows\\System32\\config\\systemprofile -- a directory nobody has
+    ever saved a file to. A scheduled scan driven from the service would have
+    walked that, plus C:\\Windows\\Temp, and reported "no threats found" after
+    scanning essentially nothing. The profiles that matter belong to other
+    accounts, so they have to be enumerated rather than derived from the
+    current one.
+
+    The file-count bound in scan_targets() is shared across every profile
+    returned here, exactly as it is shared across the folders of a single
+    profile today. On a multi-user machine that means less depth per user,
+    not an unbounded scan.
+    """
+    targets: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(candidate: Path) -> None:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return
+        if resolved.is_dir() and resolved not in seen:
+            seen.add(resolved)
+            targets.append(resolved)
+
+    if os.name == "nt" and winreg is not None:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList",
+                0, winreg.KEY_READ,
+            ) as root:
+                index = 0
+                while True:
+                    try:
+                        sid = winreg.EnumKey(root, index)
+                    except OSError:
+                        break
+                    index += 1
+                    # LocalSystem, LocalService and NetworkService. Their
+                    # profiles are Windows' own bookkeeping, not user data.
+                    if sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"}:
+                        continue
+                    try:
+                        with winreg.OpenKey(root, sid, 0, winreg.KEY_READ) as key:
+                            profile = str(winreg.QueryValueEx(key, "ProfileImagePath")[0])
+                    except (OSError, ValueError, TypeError):
+                        continue
+                    if profile:
+                        add(Path(os.path.expandvars(profile)))
+        except OSError:
+            pass
+
+    if not targets:
+        # Fallback for a machine whose ProfileList is unreadable. "C:" alone
+        # is a drive-relative path in Windows terms, so the separator is not
+        # optional here.
+        users_root = Path((os.environ.get("SystemDrive") or "C:") + "\\") / "Users"
+        if users_root.is_dir():
+            try:
+                for entry in users_root.iterdir():
+                    if entry.is_dir():
+                        add(entry)
+            except OSError:
+                pass
+
+    add(Path(os.environ.get("SystemRoot") or r"C:\Windows") / "Temp")
+    return targets
+
+
+def watch_scheduler() -> int:
+    """Run the daily quick scan from inside the service.
+
+    main.cjs's scheduler returns early unless a main window exists, so on the
+    machine this product is actually meant for -- Neutron minimised to the
+    tray, or nobody signed in at all -- the "scheduled scan" quietly never
+    ran. Same 24-hour cadence and the same scheduled_scan_last_run_at row,
+    but not the same targets: see machine_scan_targets() above for why a
+    scan running as LocalSystem cannot use scheduled_quick_scan().
+
+    The two schedulers cannot double-fire because main.cjs skips its own
+    timer entirely when service mode is on. They do not share a database (the
+    service reads %ProgramData%, the desktop app reads %APPDATA%), so that
+    check has to be the guard -- the shared timestamp is not one.
+    """
+    emit("scheduler-ready", interval_seconds=SCHEDULER_POLL_INTERVAL_SECONDS)
+    try:
+        while True:
+            time.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
+            try:
+                settings = read_app_settings()
+            except (OSError, sqlite3.Error):
+                continue
+            if not settings.get("scheduled_scan_enabled"):
+                continue
+            last_run_at = int(settings.get("scheduled_scan_last_run_at") or 0)
+            now_ms = int(time.time() * 1000)
+            # A clock moved backwards, or a settings row carried over from
+            # another machine, would otherwise park the next scan up to a
+            # full day into the future.
+            if last_run_at > now_ms:
+                last_run_at = 0
+            if now_ms - last_run_at < SCHEDULED_SCAN_INTERVAL_MS:
+                continue
+            # Written before the scan rather than after: a scan that takes
+            # the thread down would otherwise be retried on every pass.
+            try:
+                write_app_setting("scheduled_scan_last_run_at", now_ms)
+            except (OSError, sqlite3.Error, ValueError):
+                continue
+            targets = machine_scan_targets()
+            emit("scheduled-scan-started", source="service", target_count=len(targets))
+            code = scan_targets(targets, "scheduled")
+            emit("scheduled-scan-finished", source="service", code=code)
+    except KeyboardInterrupt:
+        emit("scheduler-stopped")
+        return 0
+
+
+# --- LocalSystem-only watchers, second group ------------------------------
+#
+# Same contract as the four above: no settings key, started unconditionally by
+# service_host(), exposed as --watch-* for running one in isolation from an
+# elevated prompt. What they add is the half of the machine the first group
+# still could not see -- the Windows event log, the security posture of
+# Windows itself, the certificate trust store, WMI persistence, process starts
+# too short-lived to poll for, and handles opened against LSASS.
+
+EVENTLOG_POLL_INTERVAL_SECONDS = 60.0
+POSTURE_POLL_INTERVAL_SECONDS = 300.0
+CERTIFICATE_POLL_INTERVAL_SECONDS = 300.0
+WMI_POLL_INTERVAL_SECONDS = 300.0
+CREDENTIAL_POLL_INTERVAL_SECONDS = 60.0
+
+# Queried window, deliberately three times the poll interval. The overlap
+# costs nothing (records are de-duplicated by EventRecordID) and covers a
+# pass that ran late because the machine was busy or asleep -- without it,
+# every slow pass would be a silent hole in coverage.
+EVENTLOG_LOOKBACK_MS = int(EVENTLOG_POLL_INTERVAL_SECONDS * 3 * 1000)
+
+# Remembering every record id forever would grow without bound in a service
+# that never restarts. Only ids inside the lookback window can be re-returned
+# by a query, so anything older than a few windows is safe to forget.
+EVENTLOG_SEEN_LIMIT = 4096
+
+# The events worth waking a human for, by channel. Deliberately short: an
+# event log watcher that reports everything is a log viewer, not a detector.
+# Each entry is (event id, severity, description).
+EVENTLOG_WATCHED: dict[str, tuple[tuple[int, str, str], ...]] = {
+    "Security": (
+        (1102, "high", "Güvenlik olay günlüğü temizlendi"),
+        (4719, "high", "Sistem denetim politikası değiştirildi"),
+        (4732, "high", "Bir hesap yerel yönetici grubuna eklendi"),
+        (4720, "medium", "Yeni yerel kullanıcı hesabı oluşturuldu"),
+        (4698, "medium", "Zamanlanmış görev oluşturuldu"),
+        (4702, "medium", "Zamanlanmış görev güncellendi"),
+        (4697, "medium", "Yeni bir servis kuruldu (güvenlik günlüğü)"),
+    ),
+    "System": (
+        (7045, "medium", "Yeni bir Windows servisi kuruldu"),
+        (104, "high", "Bir olay günlüğü temizlendi"),
+    ),
+    "Microsoft-Windows-Windows Defender/Operational": (
+        (5001, "high", "Microsoft Defender gerçek zamanlı koruması kapatıldı"),
+        (5010, "high", "Microsoft Defender kötü amaçlı yazılım taraması kapatıldı"),
+        (5012, "high", "Microsoft Defender virüs taraması kapatıldı"),
+        (1119, "high", "Microsoft Defender bir tehdide karşı işlem uygulayamadı"),
+        (1116, "medium", "Microsoft Defender bir tehdit tespit etti"),
+    ),
+}
+
+# Failed logons are only interesting in bulk: a mistyped password is not an
+# attack, forty of them in three minutes is. Counted per pass rather than
+# reported per event.
+EVENTLOG_FAILED_LOGON_ID = 4625
+EVENTLOG_FAILED_LOGON_THRESHOLD = 20
+
+
+def _eventlog_api() -> Any:
+    library = ctypes.WinDLL("wevtapi", use_last_error=True)
+    from ctypes import wintypes
+
+    library.EvtQuery.restype = wintypes.HANDLE
+    library.EvtQuery.argtypes = [
+        wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ]
+    library.EvtNext.restype = wintypes.BOOL
+    library.EvtNext.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    library.EvtRender.restype = wintypes.BOOL
+    library.EvtRender.argtypes = [
+        wintypes.HANDLE, wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+    ]
+    library.EvtClose.restype = wintypes.BOOL
+    library.EvtClose.argtypes = [wintypes.HANDLE]
+    return library
+
+
+def eventlog_query_xml(library: Any, channel: str, query: str, limit: int = 64) -> list[str]:
+    """Run one XPath query against one channel and return rendered event XML.
+
+    Returns an empty list rather than raising when the channel does not exist
+    on this Windows edition -- the Defender operational log is absent on a
+    machine where Defender was removed by policy, and that is a configuration,
+    not a failure worth taking the watcher down for.
+    """
+    from ctypes import wintypes
+
+    EVT_QUERY_CHANNEL_PATH = 0x1
+    EVT_QUERY_REVERSE_DIRECTION = 0x200
+    EVT_QUERY_TOLERATE_QUERY_ERRORS = 0x1000
+    EVT_RENDER_EVENT_XML = 1
+    ERROR_INSUFFICIENT_BUFFER = 122
+
+    handle = library.EvtQuery(
+        None, channel, query,
+        EVT_QUERY_CHANNEL_PATH | EVT_QUERY_REVERSE_DIRECTION | EVT_QUERY_TOLERATE_QUERY_ERRORS,
+    )
+    if not handle:
+        return []
+
+    documents: list[str] = []
+    try:
+        while len(documents) < limit:
+            events = (wintypes.HANDLE * 16)()
+            returned = wintypes.DWORD(0)
+            if not library.EvtNext(handle, 16, events, 2000, 0, ctypes.byref(returned)):
+                # ERROR_NO_MORE_ITEMS is the normal end of a result set.
+                break
+            if returned.value == 0:
+                break
+            for index in range(returned.value):
+                event = events[index]
+                try:
+                    used = wintypes.DWORD(0)
+                    count = wintypes.DWORD(0)
+                    library.EvtRender(
+                        None, event, EVT_RENDER_EVENT_XML, 0, None,
+                        ctypes.byref(used), ctypes.byref(count),
+                    )
+                    if used.value == 0 or ctypes.get_last_error() != ERROR_INSUFFICIENT_BUFFER:
+                        continue
+                    buffer = ctypes.create_string_buffer(used.value)
+                    if not library.EvtRender(
+                        None, event, EVT_RENDER_EVENT_XML, used.value, buffer,
+                        ctypes.byref(used), ctypes.byref(count),
+                    ):
+                        continue
+                    documents.append(buffer.raw[: used.value].decode("utf-16-le", errors="replace"))
+                finally:
+                    library.EvtClose(event)
+    finally:
+        library.EvtClose(handle)
+    return documents
+
+
+_EVENT_RECORD_ID_PATTERN = re.compile(r"<EventRecordID>(\d+)</EventRecordID>")
+_EVENT_ID_PATTERN = re.compile(r"<EventID[^>]*>(\d+)</EventID>")
+_EVENT_TIME_PATTERN = re.compile(r"<TimeCreated\s+SystemTime=['\"]([^'\"]+)['\"]")
+_EVENT_DATA_PATTERN = re.compile(r"<Data(?:\s+Name=['\"]([^'\"]*)['\"])?\s*>([^<]*)</Data>")
+
+
+def eventlog_summary(document: str) -> dict[str, Any]:
+    record = _EVENT_RECORD_ID_PATTERN.search(document)
+    identifier = _EVENT_ID_PATTERN.search(document)
+    occurred = _EVENT_TIME_PATTERN.search(document)
+    fields = {name or f"field{index}": value for index, (name, value) in enumerate(
+        _EVENT_DATA_PATTERN.findall(document))}
+    return {
+        "record_id": int(record.group(1)) if record else 0,
+        "event_id": int(identifier.group(1)) if identifier else 0,
+        "occurred_at": occurred.group(1) if occurred else "",
+        "fields": fields,
+    }
+
+
+def eventlog_actor(fields: dict[str, Any]) -> str:
+    """Best-effort "who/what" line, from whichever field this event carries."""
+    for key in (
+        "SubjectUserName", "TargetUserName", "AccountName", "ServiceName",
+        "ServiceFileName", "TaskName", "ProcessName", "Path", "ProductName",
+    ):
+        value = str(fields.get(key) or "").strip()
+        if value and value not in {"-", "N/A"}:
+            return value[:200]
+    return ""
+
+
+def watch_eventlog() -> int:
+    """Report the handful of Windows event log entries that mean something.
+
+    The Security channel is unreadable without SYSTEM or Administrators, which
+    is why nothing in Neutron looked at it until there was a service. What is
+    in there is not available anywhere else: a cleared audit log, an account
+    promoted to local administrator, a changed audit policy. Log clearing in
+    particular has no benign explanation on a workstation -- it is somebody
+    removing the record of what they did.
+
+    Polled rather than subscribed. EvtSubscribe would push, but it needs a
+    callback marshalled back into Python from a thread the interpreter does
+    not own; a query every minute over a three-minute window costs almost
+    nothing and cannot deadlock.
+    """
+    if os.name != "nt":
+        emit("eventlog-error", code="UNSUPPORTED_PLATFORM",
+             message="Olay günlüğü izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+    try:
+        library = _eventlog_api()
+    except (OSError, AttributeError) as error:
+        emit("eventlog-error", code="WEVTAPI_UNAVAILABLE",
+             message=f"Windows olay günlüğü arayüzü yüklenemedi: {error}")
+        return 2
+
+    watched_channels = sorted(EVENTLOG_WATCHED)
+    seen: dict[str, "OrderedDict[int, None]"] = {
+        channel: OrderedDict() for channel in watched_channels
+    }
+    seen["_logon"] = OrderedDict()
+    # The Security channel is the one that needs SYSTEM or Administrators.
+    # Losing it is worth saying out loud, but it must not take the System and
+    # Defender channels down with it -- those are readable either way and
+    # carry the service-install and Defender-disabled events on their own.
+    if not eventlog_query_xml(library, "Security", "*", limit=1):
+        emit("eventlog-warning", code="SECURITY_CHANNEL_UNREADABLE",
+             message="Güvenlik olay günlüğü okunamadı; yalnız Sistem ve Defender kanalları izlenecek.")
+    emit("eventlog-ready", channels=watched_channels,
+         interval_seconds=EVENTLOG_POLL_INTERVAL_SECONDS)
+
+    # First pass primes the seen-set instead of reporting: a service that
+    # starts up must not announce every logged event of the last three
+    # minutes as if it had just happened.
+    priming = True
+    try:
+        while True:
+            for channel, entries in EVENTLOG_WATCHED.items():
+                identifiers = " or ".join(f"EventID={event_id}" for event_id, _s, _d in entries)
+                query = (
+                    f"*[System[({identifiers}) and "
+                    f"TimeCreated[timediff(@SystemTime) <= {EVENTLOG_LOOKBACK_MS}]]]"
+                )
+                descriptions = {event_id: (severity, text) for event_id, severity, text in entries}
+                for document in eventlog_query_xml(library, channel, query):
+                    summary = eventlog_summary(document)
+                    record_id = summary["record_id"]
+                    channel_seen = seen[channel]
+                    if record_id in channel_seen:
+                        continue
+                    channel_seen[record_id] = None
+                    while len(channel_seen) > EVENTLOG_SEEN_LIMIT:
+                        channel_seen.popitem(last=False)
+                    if priming:
+                        continue
+                    severity, text = descriptions.get(summary["event_id"], ("medium", "İzlenen olay"))
+                    actor = eventlog_actor(summary["fields"])
+                    reason = f"{text} (olay {summary['event_id']}, {channel})"
+                    if actor:
+                        reason = f"{reason} — {actor}"
+                    finding = Finding(
+                        path=f"eventlog://{channel}/{summary['event_id']}/{record_id}",
+                        kind="windows-event", severity=severity, reason=reason, sha256=None,
+                    )
+                    try:
+                        event_db_id = save_protection_event("windows-event", finding)
+                    except (OSError, sqlite3.Error):
+                        event_db_id = None
+                    emit(
+                        "eventlog-finding", event_id=event_db_id, channel=channel,
+                        windows_event_id=summary["event_id"], record_id=record_id,
+                        occurred_at=summary["occurred_at"], file_name=actor or channel,
+                        finding=asdict(finding),
+                    )
+
+            # Failed logons, counted rather than listed.
+            logon_query = (
+                f"*[System[EventID={EVENTLOG_FAILED_LOGON_ID} and "
+                f"TimeCreated[timediff(@SystemTime) <= {EVENTLOG_LOOKBACK_MS}]]]"
+            )
+            documents = eventlog_query_xml(library, "Security", logon_query, limit=256)
+            fresh = 0
+            logon_seen = seen["_logon"]
+            for document in documents:
+                summary = eventlog_summary(document)
+                record_id = summary["record_id"]
+                if record_id in logon_seen:
+                    continue
+                logon_seen[record_id] = None
+                while len(logon_seen) > EVENTLOG_SEEN_LIMIT:
+                    logon_seen.popitem(last=False)
+                fresh += 1
+            if not priming and fresh >= EVENTLOG_FAILED_LOGON_THRESHOLD:
+                finding = Finding(
+                    path="eventlog://Security/4625",
+                    kind="windows-event", severity="high",
+                    reason=(f"{fresh} başarısız oturum açma denemesi "
+                            f"{int(EVENTLOG_LOOKBACK_MS / 60000)} dakika içinde kaydedildi"),
+                    sha256=None,
+                )
+                try:
+                    event_db_id = save_protection_event("windows-event", finding)
+                except (OSError, sqlite3.Error):
+                    event_db_id = None
+                emit("eventlog-finding", event_id=event_db_id, channel="Security",
+                     windows_event_id=EVENTLOG_FAILED_LOGON_ID, attempts=fresh,
+                     file_name="Oturum açma", finding=asdict(finding))
+
+            priming = False
+            time.sleep(EVENTLOG_POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        emit("eventlog-stopped")
+        return 0
+
+
+# Each entry: (code, severity, hive path, value name, "bad" predicate, message).
+# Read-only throughout -- this watcher reports a weakened machine, it does not
+# re-harden one. Silently turning Windows settings back on would be indis-
+# tinguishable from malware to anyone watching their own machine.
+def posture_problems() -> list[dict[str, str]]:
+    if os.name != "nt" or winreg is None:
+        return []
+
+    def read(path: str, name: str) -> Any:
+        for view in registry_wow64_views():
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | view) as key:
+                    return winreg.QueryValueEx(key, name)[0]
+            except OSError:
+                continue
+        return None
+
+    problems: list[dict[str, str]] = []
+
+    def flag(code: str, severity: str, message: str) -> None:
+        problems.append({"code": code, "severity": severity, "message": message})
+
+    defender_policy = r"SOFTWARE\Policies\Microsoft\Windows Defender"
+    if read(defender_policy, "DisableAntiSpyware") == 1:
+        flag("DEFENDER_DISABLED", "high",
+             "Microsoft Defender ilke ile tamamen devre dışı bırakılmış.")
+    if read(defender_policy + r"\Real-Time Protection", "DisableRealtimeMonitoring") == 1:
+        flag("DEFENDER_REALTIME_OFF", "high",
+             "Microsoft Defender gerçek zamanlı koruması ilke ile kapatılmış.")
+
+    # Adding a broad path exclusion is one of the cheapest ways to blind a
+    # machine, and it survives every reboot. The paths themselves are listed
+    # so the user can see what was carved out.
+    for scope, label in (
+        (r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths", "klasör"),
+        (r"SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions\Paths", "klasör (ilke)"),
+        (r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes", "süreç"),
+    ):
+        excluded: list[str] = []
+        for view in registry_wow64_views():
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, scope, 0, winreg.KEY_READ | view) as key:
+                    index = 0
+                    while True:
+                        try:
+                            name, _value, _type = winreg.EnumValue(key, index)
+                        except OSError:
+                            break
+                        index += 1
+                        if name not in excluded:
+                            excluded.append(name)
+            except OSError:
+                continue
+        if not excluded:
+            continue
+        digest = hashlib.sha256("\u0000".join(sorted(excluded)).encode("utf-8")).hexdigest()[:8]
+        risky = [item for item in excluded if len(item.strip("\\/")) <= 3 or item.strip().endswith(":\\")]
+        if risky:
+            flag(f"DEFENDER_EXCLUSION_BROAD:{digest}", "high",
+                 f"Microsoft Defender {label} istisnası bir sürücünün tamamını kapsıyor: "
+                 f"{', '.join(risky[:5])}")
+        else:
+            flag(f"DEFENDER_EXCLUSION_PRESENT:{digest}", "medium",
+                 f"Microsoft Defender {label} istisnası tanımlı: {', '.join(excluded[:5])}")
+
+    firewall_root = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy"
+    disabled_profiles = [
+        label for profile, label in (
+            ("DomainProfile", "Etki alanı"), ("StandardProfile", "Özel"), ("PublicProfile", "Genel"),
+        ) if read(f"{firewall_root}\\{profile}", "EnableFirewall") == 0
+    ]
+    if disabled_profiles:
+        flag("FIREWALL_PROFILE_OFF", "high",
+             f"Windows Güvenlik Duvarı şu profillerde kapalı: {', '.join(disabled_profiles)}")
+
+    policies = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    if read(policies, "EnableLUA") == 0:
+        flag("UAC_DISABLED", "high",
+             "Kullanıcı Hesabı Denetimi (UAC) kapatılmış; yükseltme istemi hiç gösterilmiyor.")
+    elif read(policies, "ConsentPromptBehaviorAdmin") == 0:
+        flag("UAC_PROMPT_OFF", "medium",
+             "UAC yöneticiler için istem göstermeyecek biçimde ayarlanmış.")
+    if read(policies, "LocalAccountTokenFilterPolicy") == 1:
+        flag("REMOTE_ADMIN_UNRESTRICTED", "medium",
+             "Yerel hesaplar için uzaktan yönetici erişimi kısıtlaması kaldırılmış.")
+
+    if read(r"SYSTEM\CurrentControlSet\Control\Terminal Server", "fDenyTSConnections") == 0:
+        flag("RDP_ENABLED", "medium",
+             "Uzak Masaüstü (RDP) bağlantılarına izin veriliyor.")
+
+    secure_boot = read(r"SYSTEM\CurrentControlSet\Control\SecureBoot\State", "UEFISecureBootEnabled")
+    if secure_boot == 0:
+        flag("SECURE_BOOT_OFF", "medium",
+             "UEFI Güvenli Önyükleme kapalı; imzasız önyükleme bileşenleri yüklenebilir.")
+
+    # SystemStartOptions reflects how this boot actually started, which is the
+    # question that matters. A BCD entry that was edited but not yet rebooted
+    # into has not weakened anything yet.
+    start_options = str(read(r"SYSTEM\CurrentControlSet\Control", "SystemStartOptions") or "").upper()
+    for token, code, message in (
+        ("TESTSIGNING", "TESTSIGNING_ON",
+         "Windows TESTSIGNING modunda başlatılmış; imzasız çekirdek sürücüleri yüklenebilir."),
+        ("NOINTEGRITYCHECKS", "INTEGRITY_CHECKS_OFF",
+         "Sürücü imza bütünlük denetimleri kapalı olarak başlatılmış."),
+        ("DISABLE_INTEGRITY_CHECKS", "INTEGRITY_CHECKS_OFF",
+         "Sürücü imza bütünlük denetimleri kapalı olarak başlatılmış."),
+        ("SAFEBOOT", "SAFE_MODE",
+         "Windows Güvenli Modda çalışıyor; güvenlik bileşenlerinin çoğu yüklü değil."),
+    ):
+        if token in start_options:
+            flag(code, "high", message)
+
+    if read(r"SYSTEM\CurrentControlSet\Control\CI\Config", "VulnerableDriverBlocklistEnable") == 0:
+        flag("DRIVER_BLOCKLIST_OFF", "medium",
+             "Microsoft'un savunmasız sürücü engelleme listesi kapatılmış (BYOVD riski).")
+
+    return problems
+
+
+def revert_posture_problem(code: str, event_id: int | None) -> dict[str, Any] | None:
+    """Undo one weakened Windows security setting, reversibly.
+
+    Split out of watch_posture() because the three shapes of revert -- a
+    single registry value, the three firewall profiles, and deleting a
+    drive-wide Defender exclusion -- do not fit one table, and burying that
+    in the middle of the watcher loop would hide which findings are acted on
+    and which are only reported. See POSTURE_REVERTS for what is deliberately
+    left alone.
+    """
+    # Actionability is decided before the rate limiter is consulted, not
+    # after. Asking first would spend a slot from the burst budget on findings
+    # this function was never going to act on -- Secure Boot, TESTSIGNING,
+    # RDP -- and those are exactly the ones that stay reported for as long as
+    # they are true, so they would trip the brake on their own and switch
+    # blocking off for everything else.
+    actionable = (
+        code in POSTURE_REVERTS
+        or code == "FIREWALL_PROFILE_OFF"
+        or code.startswith("DEFENDER_EXCLUSION_BROAD")
+    )
+    if not actionable or not response_allowed():
+        return None
+
+    if code in POSTURE_REVERTS:
+        key_path, value_name, safe_value = POSTURE_REVERTS[code]
+        applied, previous = registry_write_dword(key_path, value_name, safe_value)
+        if not applied:
+            return None
+        return respond(
+            event_id, f"Windows güvenlik ayarı geri alındı: {value_name}",
+            [("posture-revert", f"{key_path}\\{value_name}",
+              {"value": previous}, {"value": safe_value}, True)],
+        )
+
+    if code == "FIREWALL_PROFILE_OFF":
+        actions: list[tuple[str, str, Any, Any, bool]] = []
+        for key_path in FIREWALL_PROFILE_KEYS:
+            applied, previous = registry_write_dword(key_path, "EnableFirewall", 1)
+            if applied and previous == 0:
+                actions.append((
+                    "posture-revert", f"{key_path}\\EnableFirewall",
+                    {"value": previous}, {"value": 1}, True,
+                ))
+        return respond(event_id, "Windows Güvenlik Duvarı profilleri yeniden açıldı", actions)
+
+    if code.startswith("DEFENDER_EXCLUSION_BROAD"):
+        actions = []
+        for scope in (
+            r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths",
+            r"SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions\Paths",
+            r"SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes",
+        ):
+            for name in broad_defender_exclusions(scope):
+                deleted, previous = registry_delete_value(scope, name)
+                if deleted:
+                    actions.append((
+                        "defender-exclusion-remove", f"{scope}\\{name}",
+                        {"value": previous}, None, True,
+                    ))
+        return respond(event_id, "Sürücü genelindeki Defender istisnaları kaldırıldı", actions)
+
+    return None
+
+
+def broad_defender_exclusions(scope: str) -> list[str]:
+    """Exclusion entries under `scope` that cover a whole drive or close to it."""
+    if os.name != "nt" or winreg is None:
+        return []
+    names: list[str] = []
+    for view in registry_wow64_views():
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, scope, 0, winreg.KEY_READ | view) as key:
+                index = 0
+                while True:
+                    try:
+                        name, _value, _type = winreg.EnumValue(key, index)
+                    except OSError:
+                        break
+                    index += 1
+                    if name in names:
+                        continue
+                    if len(name.strip("\\/")) <= 3 or name.strip().endswith(":\\"):
+                        names.append(name)
+        except OSError:
+            continue
+    return names
+
+
+def watch_posture() -> int:
+    """Report Windows' own security settings being turned off.
+
+    watch_integrity() asks whether Neutron is still intact. This asks the
+    same question about Windows, and the answer matters more: an intruder
+    who disables Defender's real-time protection, adds C:\\ to its exclusion
+    list and turns off the firewall has done more damage than one who
+    uninstalls Neutron, and nothing in this product noticed any of it.
+
+    Reports only. Re-enabling a Windows security setting from a background
+    service, without being asked, is indistinguishable from malware to
+    anybody watching their own machine.
+    """
+    if os.name != "nt":
+        emit("posture-error", code="UNSUPPORTED_PLATFORM",
+             message="Güvenlik duruşu izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    emit("posture-ready", interval_seconds=POSTURE_POLL_INTERVAL_SECONDS)
+    reported: set[str] = set()
+    try:
+        while True:
+            problems = posture_problems()
+            codes = {problem["code"] for problem in problems}
+            for problem in problems:
+                if problem["code"] in reported:
+                    continue
+                reported.add(problem["code"])
+                finding = Finding(
+                    path=f"posture://{problem['code'].casefold()}",
+                    kind="security-posture", severity=problem["severity"],
+                    reason=problem["message"], sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("posture-alert", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                response = revert_posture_problem(problem["code"], event_id)
+                emit("posture-finding", event_id=event_id, code=problem["code"],
+                     file_name="Windows güvenlik ayarları", finding=asdict(finding),
+                     response=response, blocked=bool(response))
+            for code in sorted(reported - codes):
+                reported.discard(code)
+                emit("posture-recovered", code=code)
+            emit("posture-status", healthy=not problems, problem_count=len(problems))
+            time.sleep(POSTURE_POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        emit("posture-stopped")
+        return 0
+
+
+def machine_certificate_snapshot() -> dict[str, dict[str, str]]:
+    """SHA-1 thumbprint -> {store, subject, issuer} for machine trust stores.
+
+    crypt32 rather than a registry walk of SystemCertificates\\Root: the
+    registry holds the certificate as an opaque property blob that would have
+    to be parsed by hand to get a name out of, while CertGetNameStringW hands
+    over the display name Windows itself would show.
+    """
+    if os.name != "nt":
+        return {}
+    from ctypes import wintypes
+
+    try:
+        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    except OSError:
+        return {}
+
+    CERT_STORE_PROV_SYSTEM_W = 10
+    CERT_STORE_READONLY_FLAG = 0x00008000
+    CERT_SYSTEM_STORE_LOCAL_MACHINE = 0x00020000
+    CERT_HASH_PROP_ID = 3
+    CERT_NAME_SIMPLE_DISPLAY_TYPE = 4
+    CERT_NAME_ISSUER_FLAG = 0x1
+
+    crypt32.CertOpenStore.restype = wintypes.HANDLE
+    crypt32.CertOpenStore.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.HANDLE, wintypes.DWORD, wintypes.LPCWSTR,
+    ]
+    crypt32.CertEnumCertificatesInStore.restype = ctypes.c_void_p
+    crypt32.CertEnumCertificatesInStore.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    crypt32.CertGetCertificateContextProperty.restype = wintypes.BOOL
+    crypt32.CertGetCertificateContextProperty.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.LPVOID, ctypes.POINTER(wintypes.DWORD),
+    ]
+    crypt32.CertGetNameStringW.restype = wintypes.DWORD
+    crypt32.CertGetNameStringW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.LPWSTR, wintypes.DWORD,
+    ]
+    crypt32.CertCloseStore.restype = wintypes.BOOL
+    crypt32.CertCloseStore.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+    def name_of(context: Any, issuer: bool) -> str:
+        length = crypt32.CertGetNameStringW(
+            context, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            CERT_NAME_ISSUER_FLAG if issuer else 0, None, None, 0,
+        )
+        if length <= 1:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length)
+        crypt32.CertGetNameStringW(
+            context, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            CERT_NAME_ISSUER_FLAG if issuer else 0, None, buffer, length,
+        )
+        return buffer.value
+
+    snapshot: dict[str, dict[str, str]] = {}
+    for store_name in ("ROOT", "CA", "TrustedPublisher"):
+        store = crypt32.CertOpenStore(
+            CERT_STORE_PROV_SYSTEM_W, 0, None,
+            CERT_SYSTEM_STORE_LOCAL_MACHINE | CERT_STORE_READONLY_FLAG, store_name,
+        )
+        if not store:
+            continue
+        try:
+            context = crypt32.CertEnumCertificatesInStore(store, None)
+            while context:
+                size = wintypes.DWORD(20)
+                digest = ctypes.create_string_buffer(20)
+                if crypt32.CertGetCertificateContextProperty(
+                    context, CERT_HASH_PROP_ID, digest, ctypes.byref(size)
+                ):
+                    thumbprint = digest.raw[: size.value].hex()
+                    snapshot[f"{store_name}:{thumbprint}"] = {
+                        "store": store_name,
+                        "thumbprint": thumbprint,
+                        "subject": name_of(context, False),
+                        "issuer": name_of(context, True),
+                    }
+                context = crypt32.CertEnumCertificatesInStore(store, context)
+        finally:
+            crypt32.CertCloseStore(store, 0)
+    return snapshot
+
+
+def watch_certificates() -> int:
+    """Report certificates appearing in the machine trust stores.
+
+    A new certificate in LocalMachine\\Root means every TLS connection this
+    machine makes can be read by whoever holds the matching private key, and
+    nothing about the browsing experience changes -- no warning, no padlock
+    difference. It is how interception proxies work, legitimate ones included,
+    which is exactly why it has to be reported rather than blocked.
+
+    TrustedPublisher is watched for the same reason in a different shape: a
+    certificate there makes anything signed with it install without a prompt.
+
+    Only additions after startup are reported. The stores already contain a
+    few hundred entries on a clean install, and announcing those would be
+    noise that teaches the user to ignore this detector.
+    """
+    if os.name != "nt":
+        emit("certificate-error", code="UNSUPPORTED_PLATFORM",
+             message="Sertifika deposu izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    known = machine_certificate_snapshot()
+    if not known:
+        emit("certificate-error", code="CERT_STORE_UNREADABLE",
+             message="Makine sertifika depoları okunamadı.")
+        return 2
+    emit("certificate-ready", tracked=len(known),
+         interval_seconds=CERTIFICATE_POLL_INTERVAL_SECONDS)
+
+    try:
+        while True:
+            time.sleep(CERTIFICATE_POLL_INTERVAL_SECONDS)
+            current = machine_certificate_snapshot()
+            if not current:
+                continue
+            for identity, entry in current.items():
+                if identity in known:
+                    continue
+                store = entry["store"]
+                severity = "high" if store == "ROOT" else "medium"
+                where = {
+                    "ROOT": "Güvenilen Kök Sertifika Yetkilileri",
+                    "CA": "Ara Sertifika Yetkilileri",
+                    "TrustedPublisher": "Güvenilen Yayımcılar",
+                }.get(store, store)
+                subject = entry["subject"] or entry["thumbprint"]
+                finding = Finding(
+                    path=f"certificate://{store}/{entry['thumbprint']}",
+                    kind="trust-store", severity=severity,
+                    reason=(f"{where} deposuna yeni sertifika eklendi: {subject} "
+                            f"(veren: {entry['issuer'] or 'bilinmiyor'})"),
+                    sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("certificate-added", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                # Removed and kept: the certificate's DER bytes go into the
+                # ledger, so putting it back is exact rather than approximate.
+                # That matters more here than anywhere else in this file --
+                # a corporate MDM or an inspection proxy the organisation
+                # actually wants is indistinguishable from an attacker's
+                # certificate, and the right answer to that ambiguity is a
+                # reversible action, not a judgement call.
+                response = None
+                if response_allowed():
+                    encoded = delete_machine_certificate(store, entry["thumbprint"])
+                    if encoded:
+                        response = respond(
+                            event_id, f"{subject} sertifikası {store} deposundan otomatik olarak kaldırıldı",
+                            [("certificate-delete", f"{store}:{entry['thumbprint']}",
+                              {"store": store, "subject": subject},
+                              {"store": store, "der": base64.b64encode(encoded).decode("ascii")}, True)],
+                        )
+                emit("certificate-finding", event_id=event_id, store=store,
+                     thumbprint=entry["thumbprint"], file_name=subject,
+                     finding=asdict(finding), response=response, blocked=bool(response))
+            for identity in set(known) - set(current):
+                emit("certificate-removed", certificate=identity)
+            known = current
+    except KeyboardInterrupt:
+        emit("certificate-stopped")
+        return 0
+
+
+# One PowerShell call, three classes, one line per object. Deliberately not
+# ConvertTo-Json: the shape of that output changes with the number of results
+# (a single object is not wrapped in an array), which is a well-known way to
+# write a parser that works until the day there is exactly one result.
+WMI_SUBSCRIPTION_SCRIPT = (
+    "$ErrorActionPreference='SilentlyContinue';"
+    "foreach($c in '__EventFilter','__EventConsumer','__FilterToConsumerBinding'){"
+    "foreach($i in Get-CimInstance -Namespace root/subscription -ClassName $c){"
+    "$d=@($i.Query,$i.CommandLineTemplate,$i.ScriptText,$i.ExecutablePath,$i.Filter) "
+    "-ne $null -join ' ';"
+    "[Console]::Out.WriteLine(($c+'|'+$i.Name+'|'+$d) -replace '[\\r\\n]+',' ')}}"
+)
+
+
+def wmi_subscription_snapshot() -> dict[str, str] | None:
+    """identity -> payload for WMI event subscriptions, or None on failure.
+
+    None and {} mean different things here and the caller depends on the
+    difference: {} is "this machine has no WMI subscriptions", which is the
+    normal state and a valid baseline, while None is "the query did not run",
+    which must not be diffed against anything.
+
+    This is the one watcher that shells out. The WMI repository has no
+    documented on-disk format, so the alternatives were a COM client written
+    by hand in ctypes or this. The engine already spawns PowerShell for
+    process command lines (windows_process_command_line), so the dependency
+    is not a new one -- but it is a real one, and it is why this watcher runs
+    every five minutes rather than every twenty seconds.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WMI_SUBSCRIPTION_SCRIPT],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    snapshot: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) < 2 or not parts[1].strip():
+            continue
+        snapshot[f"{parts[0]}:{parts[1].strip()}"] = (parts[2] if len(parts) > 2 else "").strip()[:1000]
+    return snapshot
+
+
+def watch_wmi() -> int:
+    """Report WMI event subscriptions being created or changed.
+
+    This is the persistence store watch_tasks() documented as out of scope.
+    A filter bound to a CommandLineEventConsumer runs whatever it likes, as
+    SYSTEM, triggered by anything from a clock tick to a process start, and
+    it lives in the WMI repository -- not in a Run key, not in the Task
+    Scheduler store, not anywhere the other watchers look. It also survives
+    a reboot and outlives whatever installed it.
+
+    Subscriptions are rare on a normal machine; a handful of vendors use them
+    and nothing else does. That rarity is what makes reporting every change
+    affordable here, where it would be unaffordable for scheduled tasks.
+    """
+    if os.name != "nt":
+        emit("wmi-error", code="UNSUPPORTED_PLATFORM",
+             message="WMI abonelik izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    known = wmi_subscription_snapshot()
+    if known is None:
+        emit("wmi-error", code="WMI_QUERY_FAILED",
+             message="WMI abonelikleri sorgulanamadı; PowerShell veya WMI kullanılamıyor.")
+        return 2
+    emit("wmi-ready", tracked=len(known), interval_seconds=WMI_POLL_INTERVAL_SECONDS)
+
+    try:
+        while True:
+            time.sleep(WMI_POLL_INTERVAL_SECONDS)
+            current = wmi_subscription_snapshot()
+            if current is None:
+                continue
+            for identity, payload in current.items():
+                if identity in known and known[identity] == payload:
+                    continue
+                is_new = identity not in known
+                class_name, _, name = identity.partition(":")
+                severity = "high" if class_name == "__FilterToConsumerBinding" else "medium"
+                finding = Finding(
+                    path=f"wmi://{identity}",
+                    kind="wmi-persistence", severity=severity,
+                    reason=(f"WMI olay aboneliği {'oluşturuldu' if is_new else 'değiştirildi'}: "
+                            f"{class_name} '{name}'"
+                            + (f" — {payload[:200]}" if payload else "")),
+                    sha256=None,
+                )
+                try:
+                    event_id = save_protection_event("wmi-subscription", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+                # Deleted, not disabled: WMI subscriptions have no enabled
+                # flag. The definition is kept in the ledger so the user can
+                # see exactly what was removed -- but recreating a filter,
+                # consumer and binding from that text is not something this
+                # code can promise, so the action is recorded as
+                # irreversible rather than offering a rollback that fails.
+                response = None
+                if response_allowed() and delete_wmi_subscription(class_name, name):
+                    response = respond(
+                        event_id, f"{class_name} '{name}' WMI aboneliği otomatik olarak silindi",
+                        [("wmi-delete", identity, {"class": class_name, "name": name, "payload": payload}, None, False)],
+                    )
+                emit("wmi-finding", event_id=event_id, subscription=identity, is_new=is_new,
+                     file_name=name or class_name, finding=asdict(finding),
+                     response=response, blocked=bool(response))
+            for identity in set(known) - set(current):
+                emit("wmi-removed", subscription=identity)
+            known = current
+    except KeyboardInterrupt:
+        emit("wmi-stopped")
+        return 0
+
+
+# Parent -> child pairs that are almost never legitimate. A document reader or
+# a browser spawning a script host is the opening move of most phishing chains,
+# and it is visible by name alone -- no signature, no hash, no model needed.
+PROCESS_CHAIN_PARENTS = frozenset({
+    "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "msaccess.exe",
+    "visio.exe", "acrord32.exe", "acrobat.exe", "chrome.exe", "msedge.exe",
+    "firefox.exe", "opera.exe", "brave.exe", "wordpad.exe",
+})
+PROCESS_CHAIN_CHILDREN = frozenset({
+    "powershell.exe", "pwsh.exe", "cmd.exe", "wscript.exe", "cscript.exe",
+    "mshta.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe", "bitsadmin.exe",
+    "installutil.exe", "msbuild.exe", "curl.exe", "wmic.exe",
+})
+
+# Win32_ProcessStartTrace fires for every process start on the machine, which
+# is the entire point -- a process that lives 40 ms is invisible to
+# watch_behavior()'s three-second poll and perfectly visible here.
+PROCESS_TRACE_SCRIPT = (
+    "$ErrorActionPreference='Stop';"
+    "Register-CimIndicationEvent -ClassName Win32_ProcessStartTrace "
+    "-SourceIdentifier NeutronProcessStart | Out-Null;"
+    "while($true){"
+    "$e=Wait-Event -SourceIdentifier NeutronProcessStart;"
+    "$n=$e.SourceEventArgs.NewEvent;"
+    "[Console]::Out.WriteLine([string]$n.ProcessID+'|'+[string]$n.ParentProcessID+'|'+[string]$n.ProcessName);"
+    "[Console]::Out.Flush();"
+    "Remove-Event -EventIdentifier $e.EventIdentifier}"
+)
+
+PROCESS_ANCESTRY_LIMIT = 4096
+
+
+# Kept alive for the lifetime of the process on purpose: the job object dies
+# with its last handle, and the whole mechanism depends on that handle being
+# this process's. A local variable would be collected and the children freed.
+_CHILD_JOB_HANDLES: list[Any] = []
+
+
+def bind_child_to_this_process(process_id: int) -> bool:
+    """Make a child process die when this process dies, however it dies.
+
+    The PowerShell child in watch_processes() would otherwise outlive the
+    engine. Both of the ways this process actually ends skip every finally
+    block there is: os._exit(), used to apply a watcher setting change, and
+    the TerminateProcess() the service host issues on SERVICE_CONTROL_STOP.
+    Each restart would leak one PowerShell holding a live WMI subscription,
+    and nothing would ever collect them -- on a machine where the user toggles
+    a few settings that is a visible pile of orphaned processes shipped by the
+    antivirus.
+
+    A job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE closes that at the
+    kernel level: when this process ends, its handle to the job goes with it,
+    and Windows terminates everything inside.
+    """
+    if os.name != "nt":
+        return False
+    from ctypes import wintypes
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )]
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+    PROCESS_SET_QUOTA = 0x0100
+    PROCESS_TERMINATE = 0x0001
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+    ]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return False
+    limits = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        job, JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+        ctypes.byref(limits), ctypes.sizeof(limits),
+    ):
+        kernel32.CloseHandle(job)
+        return False
+    child = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, process_id)
+    if not child:
+        kernel32.CloseHandle(job)
+        return False
+    try:
+        if not kernel32.AssignProcessToJobObject(job, child):
+            kernel32.CloseHandle(job)
+            return False
+    finally:
+        kernel32.CloseHandle(child)
+    _CHILD_JOB_HANDLES.append(job)
+    return True
+
+
+def watch_processes() -> int:
+    """Push-based process-start watcher with an ancestry chain.
+
+    watch_behavior() samples the process table every three seconds, so any
+    process that starts and exits inside that window never existed as far as
+    Neutron is concerned -- and "start, do one thing, exit" describes most of
+    what a `powershell -enc` or `rundll32` invocation actually does. This
+    watcher sees each start as it happens.
+
+    It also keeps the ancestry: a parent that has already exited is still in
+    the chain, because the chain is built from the event stream rather than
+    from the live process table. "explorer.exe -> chrome.exe -> setup.exe ->
+    powershell.exe" is a sentence about what happened; a bare process name is
+    not.
+
+    When this runs, watch_behavior() drops its own process half (see
+    _running_as_service there) and keeps only persistence, so a single start
+    is never reported twice.
+    """
+    if os.name != "nt":
+        emit("process-error", code="UNSUPPORTED_PLATFORM",
+             message="Süreç izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    try:
+        child = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", PROCESS_TRACE_SCRIPT],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        emit("process-error", code="PROCESS_TRACE_UNAVAILABLE",
+             message=f"Süreç başlatma olayları dinlenemedi: {error}")
+        return 2
+
+    bound = bind_child_to_this_process(child.pid)
+    exclusions = load_exclusion_set()
+    own_roots = neutron_owned_roots()
+    ancestry: "OrderedDict[int, tuple[int, str]]" = OrderedDict()
+    snapshot: dict[int, str] = {}
+    snapshot_taken = 0.0
+
+    # watch_behavior() stands its own process polling down while this flag is
+    # set, so that one process start is never reported twice. It is set only
+    # after the child is actually running, and cleared in the finally below --
+    # if PowerShell is blocked by policy on this machine, the poll-based
+    # watcher keeps working instead of both of them going quiet.
+    global _process_watch_active
+    _process_watch_active = True
+    emit("process-ready", backend="wmi-process-trace", child_bound=bound)
+
+    def chain_for(process_id: int, name: str) -> list[str]:
+        names = [name]
+        current = process_id
+        for _depth in range(8):
+            parent = ancestry.get(current)
+            if parent is None:
+                break
+            current, parent_name = parent
+            names.append(parent_name)
+        return list(reversed(names))
+
+    try:
+        if child.stdout is None:
+            raise OSError("PowerShell çıktısı okunamadı")
+        for line in child.stdout:
+            parts = line.strip().split("|")
+            if len(parts) != 3:
+                continue
+            try:
+                process_id = int(parts[0])
+                parent_id = int(parts[1])
+            except ValueError:
+                continue
+            name = parts[2].strip()
+            if not name:
+                continue
+
+            ancestry[process_id] = (parent_id, name)
+            while len(ancestry) > PROCESS_ANCESTRY_LIMIT:
+                ancestry.popitem(last=False)
+
+            parent_name = (ancestry.get(parent_id) or (0, ""))[1].casefold()
+            chain = chain_for(process_id, name)
+
+            # The process table is only re-read when it is already stale.
+            # A Toolhelp snapshot per process start would cost more than the
+            # watcher saves on a machine that is busy compiling something.
+            now = time.monotonic()
+            if now - snapshot_taken > 2.0:
+                snapshot = windows_process_snapshot()
+                snapshot_taken = now
+            raw_path = snapshot.get(process_id, "")
+
+            finding: Finding | None = None
+            if raw_path:
+                image = Path(raw_path)
+                if any(path_is_inside(image, root) for root in own_roots):
+                    continue
+                if is_path_excluded(image, exclusions):
+                    continue
+                finding = suspicious_process_finding(
+                    image,
+                    command_line=process_command_line_for(image, process_id),
+                    parent_path=(snapshot.get(parent_id, "") if parent_id else ""),
+                )
+
+            chain_hit = (
+                parent_name in PROCESS_CHAIN_PARENTS
+                and name.casefold() in PROCESS_CHAIN_CHILDREN
+            )
+            if chain_hit and finding is None:
+                # Name-only detection, used exactly when the image could not
+                # be resolved -- which for a process this short-lived is the
+                # common case, and is also when the chain is the only
+                # evidence there is.
+                finding = Finding(
+                    path=raw_path or f"process://{name}",
+                    kind="process-chain", severity="high",
+                    reason=(f"Beklenmeyen süreç zinciri: {' → '.join(chain)}"),
+                    sha256=None,
+                )
+            elif chain_hit and finding is not None:
+                finding.severity = "high"
+                finding.reason = f"{finding.reason} · Zincir: {' → '.join(chain)}"
+
+            if finding is None:
+                continue
+            try:
+                event_id = save_protection_event("process-started", finding)
+            except (OSError, sqlite3.Error):
+                event_id = None
+
+            # Termination, not prevention, and the distinction is real:
+            # Win32_ProcessStartTrace fires after CreateProcess has already
+            # returned, so this stops what the process was about to do, not
+            # what it has done. Milliseconds, usually -- but not zero.
+            #
+            # Only high-severity findings are acted on. A medium finding is
+            # "this looks unusual", and killing a user's process on "unusual"
+            # is how a security product gets uninstalled.
+            #
+            # A validly signed image is never terminated on behavior score
+            # alone, even at high severity. chain_hit forces severity to
+            # "high" for any Office-to-script-host chain and the argument
+            # heuristics are deliberately not gated on signature (see
+            # suspicious_process_finding's own comment on that), so without
+            # this a signed, legitimate deployment script -- a corporate
+            # macro invoking a signed PowerShell tool with -EncodedCommand is
+            # an unremarkable pattern in managed environments -- would be
+            # killed on heuristics alone. Real malware is overwhelmingly
+            # unsigned; requiring that here is the same corroboration
+            # standard the auto-quarantine path already holds itself to.
+            response = None
+            image_trusted = bool(raw_path) and is_trusted_signed_image(Path(raw_path))
+            if finding.severity == "high" and raw_path and not image_trusted and response_allowed():
+                if terminate_process_by_id(process_id, raw_path):
+                    response = respond(
+                        event_id, f"{name} süreci otomatik olarak sonlandırıldı",
+                        [("terminate-process", raw_path,
+                          {"pid": process_id, "chain": chain}, {"terminated": True}, False)],
+                    )
+            emit(
+                "process-finding", event_id=event_id, process_id=process_id,
+                parent_process_id=parent_id, chain=chain, file_name=name,
+                finding=asdict(finding), response=response, blocked=bool(response),
+                block_skipped=("trusted-signed" if (finding.severity == "high" and image_trusted) else None),
+            )
+    except KeyboardInterrupt:
+        emit("process-stopped")
+        return 0
+    finally:
+        _process_watch_active = False
+        try:
+            child.terminate()
+            child.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                child.kill()
+            except OSError:
+                pass
+
+    # Falling out of the loop means the PowerShell child died -- WMI restarted,
+    # a policy killed it, the machine woke from sleep. supervise() in
+    # service_host() restarts a watcher that *raises*; it treats any return,
+    # zero or not, as an intentional stop. Returning here would leave process
+    # monitoring off for the rest of the service's life, so this raises.
+    #
+    # watch_behavior() picks the poll-based process scan back up on its next
+    # pass in the meantime, because the finally above already cleared
+    # _process_watch_active.
+    emit("process-error", code="PROCESS_TRACE_ENDED",
+         message="Süreç olay akışı beklenmedik biçimde sona erdi.")
+    raise OSError("Süreç olay akışı sona erdi")
+
+
+def lsass_process_id() -> int:
+    for process_id, path in windows_process_snapshot().items():
+        if Path(path).name.casefold() == "lsass.exe":
+            return process_id
+    return 0
+
+
+class _SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
+    _fields_ = [
+        ("Object", ctypes.c_void_p),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("HandleValue", ctypes.c_size_t),
+        ("GrantedAccess", ctypes.c_ulong),
+        ("CreatorBackTraceIndex", ctypes.c_ushort),
+        ("ObjectTypeIndex", ctypes.c_ushort),
+        ("HandleAttributes", ctypes.c_ulong),
+        ("Reserved", ctypes.c_ulong),
+    ]
+
+
+def system_handle_table() -> list[Any]:
+    """Every open handle on the machine, via SystemExtendedHandleInformation.
+
+    Needs SYSTEM to be complete; from a normal account most entries are
+    missing, which would turn "nobody is reading LSASS" into a statement the
+    caller has no right to make.
+    """
+    if os.name != "nt":
+        return []
+    from ctypes import wintypes
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    ntdll.NtQuerySystemInformation.restype = ctypes.c_long
+    ntdll.NtQuerySystemInformation.argtypes = [
+        ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(wintypes.ULONG),
+    ]
+    SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+    STATUS_INFO_LENGTH_MISMATCH = ctypes.c_long(0xC0000004).value
+
+    size = 1 << 20
+    for _attempt in range(8):
+        buffer = ctypes.create_string_buffer(size)
+        needed = wintypes.ULONG(0)
+        status = ntdll.NtQuerySystemInformation(
+            SYSTEM_EXTENDED_HANDLE_INFORMATION, buffer, size, ctypes.byref(needed),
+        )
+        if status == STATUS_INFO_LENGTH_MISMATCH:
+            size = max(size * 2, int(needed.value) + (1 << 16))
+            continue
+        if status < 0:
+            return []
+        count = ctypes.c_size_t.from_buffer(buffer, 0).value
+        entry_size = ctypes.sizeof(_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX)
+        offset = ctypes.sizeof(ctypes.c_size_t) * 2
+        if offset + count * entry_size > size:
+            return []
+        array = (_SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX * count).from_buffer(buffer, offset)
+        return list(array)
+    return []
+
+
+def process_object_type_index() -> int:
+    """Discover the Process object's type index for this boot.
+
+    Object type indices are not stable across Windows versions, so they are
+    found rather than hard-coded: open a handle to our own process, then look
+    that exact (pid, handle) pair up in the table and read its index back.
+    """
+    if os.name != "nt":
+        return 0
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    own_pid = os.getpid()
+    marker = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, own_pid)
+    if not marker:
+        return 0
+    try:
+        for entry in system_handle_table():
+            if int(entry.UniqueProcessId) == own_pid and int(entry.HandleValue) == int(marker):
+                return int(entry.ObjectTypeIndex)
+    finally:
+        kernel32.CloseHandle(marker)
+    return 0
+
+
+def lsass_readers(lsass_pid: int, type_index: int) -> list[tuple[int, int]]:
+    """(pid, granted access) for every process holding a readable LSASS handle.
+
+    The handle table says which process owns a handle and what access it was
+    granted, but not what the handle points at. Resolving that means
+    duplicating it into this process and asking -- which is why the candidate
+    list is narrowed first by object type and by access mask. Duplicating all
+    of a machine's handles, tens of thousands of them, every thirty seconds
+    would be a denial of service written by the antivirus.
+    """
+    if os.name != "nt" or lsass_pid <= 0 or type_index <= 0:
+        return []
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.DuplicateHandle.restype = wintypes.BOOL
+    kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+    ]
+    kernel32.GetProcessId.restype = wintypes.DWORD
+    kernel32.GetProcessId.argtypes = [wintypes.HANDLE]
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    PROCESS_DUP_HANDLE = 0x0040
+    PROCESS_VM_READ = 0x0010
+    PROCESS_QUERY_INFORMATION = 0x0400
+    DUPLICATE_SAME_ACCESS = 0x2
+    READ_MASK = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION
+
+    own_pid = os.getpid()
+    own_process = kernel32.GetCurrentProcess()
+    candidates: dict[int, list[tuple[int, int]]] = {}
+    for entry in system_handle_table():
+        if int(entry.ObjectTypeIndex) != type_index:
+            continue
+        access = int(entry.GrantedAccess)
+        if not access & PROCESS_VM_READ:
+            continue
+        owner = int(entry.UniqueProcessId)
+        if owner in {0, 4, own_pid, lsass_pid}:
+            continue
+        candidates.setdefault(owner, []).append((int(entry.HandleValue), access))
+
+    readers: list[tuple[int, int]] = []
+    for owner, handles in candidates.items():
+        source = kernel32.OpenProcess(PROCESS_DUP_HANDLE, False, owner)
+        if not source:
+            continue
+        try:
+            for handle_value, access in handles:
+                duplicate = wintypes.HANDLE()
+                if not kernel32.DuplicateHandle(
+                    source, wintypes.HANDLE(handle_value), own_process,
+                    ctypes.byref(duplicate), 0, False, DUPLICATE_SAME_ACCESS,
+                ):
+                    continue
+                try:
+                    if kernel32.GetProcessId(duplicate) == lsass_pid:
+                        readers.append((owner, access & READ_MASK))
+                        break
+                finally:
+                    kernel32.CloseHandle(duplicate)
+        finally:
+            kernel32.CloseHandle(source)
+    return readers
+
+
+def watch_credentials() -> int:
+    """Report processes holding a readable handle to LSASS.
+
+    Reading LSASS memory is how cached credentials leave a machine, and it is
+    the single most valuable thing a SYSTEM-level watcher can see without a
+    kernel driver. Neutron cannot stop it -- denying a handle needs a process
+    callback registered from ring 0 -- but the handle is visible from here,
+    and an unsigned process holding PROCESS_VM_READ on LSASS has no innocent
+    explanation.
+
+    Signed images under %SystemRoot% are suppressed: Windows itself, Defender
+    (MsMpEng), WER and a few others legitimately hold such handles, and
+    reporting them every thirty seconds would bury the one that matters. That
+    is a real gap and worth stating plainly -- a signed binary in System32
+    abused as a proxy will not be reported by this watcher.
+    """
+    if os.name != "nt":
+        emit("credential-error", code="UNSUPPORTED_PLATFORM",
+             message="LSASS erişim izleme yalnız Windows'ta kullanılabilir.")
+        return 2
+
+    type_index = process_object_type_index()
+    if type_index <= 0:
+        emit("credential-error", code="HANDLE_TABLE_UNREADABLE",
+             message="Sistem handle tablosu okunamadı; bu izleyici SYSTEM yetkisi gerektirir.")
+        return 2
+
+    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    own_roots = neutron_owned_roots()
+    reported: set[str] = set()
+    emit("credential-ready", interval_seconds=CREDENTIAL_POLL_INTERVAL_SECONDS)
+
+    try:
+        while True:
+            lsass_pid = lsass_process_id()
+            if lsass_pid <= 0:
+                time.sleep(CREDENTIAL_POLL_INTERVAL_SECONDS)
+                continue
+            processes = windows_process_snapshot()
+            current: set[str] = set()
+            for owner, access in lsass_readers(lsass_pid, type_index):
+                raw_path = processes.get(owner, "")
+                image = Path(raw_path) if raw_path else None
+                if image is not None and any(path_is_inside(image, root) for root in own_roots):
+                    continue
+                trusted_system = (
+                    image is not None
+                    and path_is_inside(image, system_root)
+                    and is_trusted_signed_image(image)
+                )
+                if trusted_system:
+                    continue
+
+                identity = raw_path.casefold() or f"pid:{owner}"
+                current.add(identity)
+                if identity in reported:
+                    continue
+                reported.add(identity)
+
+                size = 0
+                if image is not None:
+                    try:
+                        size = image.stat().st_size
+                    except OSError:
+                        size = 0
+                finding = Finding(
+                    path=raw_path or f"process://{owner}",
+                    kind="credential-access", severity="high",
+                    reason=(f"LSASS bellek okuma erişimi açık tutuluyor "
+                            f"(PID {owner}, erişim 0x{access:04x})"),
+                    sha256=sha256_for(image, size) if image is not None and size else None,
+                )
+                try:
+                    event_id = save_protection_event("credential-access", finding)
+                except (OSError, sqlite3.Error):
+                    event_id = None
+
+                # The handle cannot be revoked -- that needs ObRegisterCallbacks
+                # from a kernel driver. Terminating the process holding it is
+                # the whole of what user mode can do, and it is worth doing:
+                # a credential dumper that is killed before it finishes writing
+                # its output leaves with nothing.
+                #
+                # Termination still holds back from a validly signed image
+                # outside %SystemRoot% -- a signed incident-response tool
+                # (Sysinternals ProcDump, a debugger) legitimately opening
+                # LSASS for a memory dump is rare but real, and unlike the
+                # System32 case above it has no folder-based signal to lean
+                # on. It is still reported; a human decides whether to kill
+                # it. Unsigned or unresolved readers -- the overwhelming
+                # majority of actual credential theft tooling -- are killed
+                # as before.
+                response = None
+                reader_trusted = bool(raw_path) and is_trusted_signed_image(Path(raw_path))
+                if raw_path and not reader_trusted and response_allowed():
+                    if terminate_process_by_id(owner, raw_path):
+                        response = respond(
+                            event_id, f"LSASS belleğini okuyan {Path(raw_path).name} süreci sonlandırıldı",
+                            [("terminate-process", raw_path,
+                              {"pid": owner, "access": access}, {"terminated": True}, False)],
+                        )
+                emit("credential-finding", event_id=event_id, process_id=owner,
+                     file_name=(image.name if image is not None else f"PID {owner}"),
+                     finding=asdict(finding), response=response, blocked=bool(response),
+                     block_skipped=("trusted-signed" if reader_trusted else None))
+            for identity in sorted(reported - current):
+                reported.discard(identity)
+            time.sleep(CREDENTIAL_POLL_INTERVAL_SECONDS)
+    except KeyboardInterrupt:
+        emit("credential-stopped")
+        return 0
+
+
 class _SECURITY_ATTRIBUTES(ctypes.Structure):
     _fields_ = [
         ("nLength", ctypes.c_ulong),
@@ -7258,6 +10117,22 @@ def service_client_authorized(pipe: Any) -> bool:
 SERVICE_PIPE_NAME = r"\\.\pipe\neutron-service"
 
 
+# Settings that decide which watcher threads service_host() starts. Changing
+# one of these over the control pipe restarts the service process, because
+# stopping a running watch_*() loop is otherwise impossible -- see the
+# service_host() docstring.
+#
+# scheduled_scan_enabled is deliberately absent: watch_scheduler() is always
+# running and re-reads that preference on every pass, so it applies without a
+# restart. The four LocalSystem watchers are absent for a different reason --
+# they have no setting at all.
+WATCHER_SETTING_KEYS = frozenset({
+    "behavior_protection_enabled", "web_protection_enabled", "network_protection_enabled",
+    "amsi_protection_enabled", "memory_scan_enabled", "usb_protection_enabled",
+    "ransomware_protection_enabled",
+})
+
+
 def service_host() -> int:
     """Runs as LocalSystem under NeutronServiceHost.exe (see tools/service/).
     Consolidates the watch_* loops into daemon threads of one process
@@ -7267,17 +10142,20 @@ def service_host() -> int:
     unmodified -- they already call the module-level emit(), which this
     function retargets (via _emit_sink) to the pipe instead of stdout.
 
-    Known v1 limitation, documented rather than silently accepted: which
-    optional watchers (web/network/amsi) start is decided once at service
-    startup from the persisted settings. Toggling those settings from the
-    UI while the service is already running updates the database (so it
-    takes effect on the next service restart) but does not hot-start/stop
-    the corresponding thread -- the existing watch_*() functions have no
-    cooperative-cancellation support, and adding it to five functions
-    already built this session was out of scope for an already-large
-    architecture change. protection_enabled/behavior_protection_enabled
-    (the always-on-by-default core) start unconditionally.
+    Which optional watchers start is decided once, here, from the persisted
+    settings -- the watch_*() functions have no cooperative cancellation, so
+    a thread cannot be stopped once it is running. Toggling a watcher setting
+    from the UI therefore ends this process (see WATCHER_SETTING_KEYS in
+    handle_command below) and lets NeutronServiceHost.exe's supervisor
+    relaunch it, which is the one mechanism that applies both directions of
+    the toggle without adding cancellation to nine separate loops. The UI
+    reconnects on its own; connectServicePipe() in main.cjs already retries.
+    protection_enabled/behavior_protection_enabled (the always-on-by-default
+    core) start unconditionally.
     """
+    global _running_as_service
+    _running_as_service = True
+
     if os.name != "nt":
         return 2
 
@@ -7342,8 +10220,21 @@ def service_host() -> int:
             if action == "get_settings":
                 return {"type": "settings", "settings": read_app_settings()}
             if action == "update_setting":
-                settings = write_app_setting(str(command.get("key")), command.get("value"))
-                return {"type": "settings-updated", "settings": settings, "changed_key": command.get("key")}
+                key = str(command.get("key"))
+                settings = write_app_setting(key, command.get("value"))
+                if key in WATCHER_SETTING_KEYS:
+                    # Restart rather than hot-toggle: see the docstring. The
+                    # reply is broadcast before this fires, so the UI sees the
+                    # new settings and then a clean disconnect/reconnect
+                    # instead of a dropped command.
+                    threading.Thread(
+                        target=lambda: (time.sleep(0.5), os._exit(0)), daemon=True,
+                    ).start()
+                    return {
+                        "type": "settings-updated", "settings": settings,
+                        "changed_key": key, "service_restarting": True,
+                    }
+                return {"type": "settings-updated", "settings": settings, "changed_key": key}
             if action == "install_proton_archive":
                 package_path = Path(str(command.get("package_path") or "")).resolve(strict=True)
                 signature_path = Path(str(command.get("signature_path") or "")).resolve(strict=True)
@@ -7363,14 +10254,22 @@ def service_host() -> int:
                 threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0)), daemon=True).start()
                 return {"type": "service-signature-updated", "version": version}
             if action == "run_scan":
+                # Runs on the pipe reader thread, so no further command is
+                # processed until the scan finishes. Acceptable because the
+                # UI issues one scan at a time and every scan event still
+                # reaches it through emit()/broadcast() while this runs.
+                #
+                # quick/scheduled do not use quick_scan()/scheduled_quick_scan()
+                # here: those resolve Path.home(), which as LocalSystem is
+                # C:\Windows\System32\config\systemprofile. See
+                # machine_scan_targets().
                 mode = str(command.get("mode") or "quick")
                 if mode == "full" and command.get("drive"):
                     return {"type": "scan-result", "code": full_scan(str(command["drive"]))}
                 if mode == "custom" and command.get("path"):
                     return {"type": "scan-result", "code": scan_targets([Path(str(command["path"]))], "custom")}
-                if mode == "scheduled":
-                    return {"type": "scan-result", "code": scheduled_quick_scan()}
-                return {"type": "scan-result", "code": quick_scan()}
+                kind = "scheduled" if mode == "scheduled" else "quick"
+                return {"type": "scan-result", "code": scan_targets(machine_scan_targets(), kind)}
             return {"type": "error", "code": "UNKNOWN_COMMAND", "message": f"Bilinmeyen komut: {action}"}
         except Exception as error:  # noqa: BLE001 -- a bad command must never take the service down
             return {"type": "error", "code": "COMMAND_FAILED", "message": str(error)}
@@ -7442,6 +10341,27 @@ def service_host() -> int:
     watchers.append(("watch-memory", watch_memory, bool(settings.get("memory_scan_enabled"))))
     watchers.append(("watch-usb", watch_usb, bool(settings.get("usb_protection_enabled"))))
     watchers.append(("watch-ransomware", watch_ransomware, bool(settings.get("ransomware_protection_enabled"))))
+    # LocalSystem-only from here down: these four have no desktop-subprocess
+    # equivalent in main.cjs and exist solely because this process runs as
+    # SYSTEM. See the block comment above watch_drivers().
+    #
+    # Unconditional, and deliberately without a settings key of their own.
+    # Driver registration, scheduled-task persistence and tamper detection are
+    # not preferences: a switch that turns them off is a switch an intruder
+    # turns off first, and the service exists precisely to see what user-mode
+    # cannot. watch_scheduler still honours the existing scheduled_scan_enabled
+    # preference internally -- that toggle predates these watchers and belongs
+    # to the user.
+    watchers.append(("watch-drivers", watch_drivers, True))
+    watchers.append(("watch-tasks", watch_tasks, True))
+    watchers.append(("watch-integrity", watch_integrity, True))
+    watchers.append(("watch-scheduler", watch_scheduler, True))
+    watchers.append(("watch-eventlog", watch_eventlog, True))
+    watchers.append(("watch-posture", watch_posture, True))
+    watchers.append(("watch-certificates", watch_certificates, True))
+    watchers.append(("watch-wmi", watch_wmi, True))
+    watchers.append(("watch-processes", watch_processes, True))
+    watchers.append(("watch-credentials", watch_credentials, True))
 
     # A watcher thread that raised used to die silently: no event, nothing in
     # the UI, and service-ready still listed it as active, so protection was
@@ -8523,7 +11443,11 @@ def scheduled_quick_scan() -> int:
     show it was triggered automatically rather than by the user clicking
     Tara. Invoked by Electron's own daily timer (main.cjs), not by a Windows
     Scheduled Task -- Neutron is already tray-resident whenever protection is
-    on, so no extra elevated task registration is needed for this."""
+    on, so no extra elevated task registration is needed for this.
+
+    In service mode this is not the path taken at all: watch_scheduler() runs
+    the daily scan inside the service, over every user profile rather than
+    the calling account's own. main.cjs disables its timer in that mode."""
     return scan_targets(home_scan_targets(), "scheduled")
 
 
@@ -8606,6 +11530,16 @@ def main() -> int:
     action.add_argument("--watch-memory", action="store_true", help="Yeni başlayan süreçlerin belleğini YARA ve RWX-özel-bölge sezgisiyle tara")
     action.add_argument("--watch-usb", action="store_true", help="Takılan çıkarılabilir medyayı autorun.inf ve dosyalar için tara")
     action.add_argument("--watch-ransomware", action="store_true", help="Tuzak dosyalarını ve toplu şifreleme belirtilerini izle")
+    action.add_argument("--watch-drivers", action="store_true", help="Yeni veya değiştirilen çekirdek sürücülerini ve Windows servislerini izle (yönetici gerekir)")
+    action.add_argument("--watch-tasks", action="store_true", help="Yeni veya değiştirilen zamanlanmış görevleri izle (yönetici gerekir)")
+    action.add_argument("--watch-integrity", action="store_true", help="Neutron bileşenlerinin kurcalanmadığını sürekli doğrula")
+    action.add_argument("--watch-scheduler", action="store_true", help="Zamanlanmış hızlı taramayı servis içinden çalıştır")
+    action.add_argument("--watch-eventlog", action="store_true", help="Windows olay günlüğündeki güvenlik olaylarını izle (yönetici gerekir)")
+    action.add_argument("--watch-posture", action="store_true", help="Windows güvenlik ayarlarının kapatılmasını izle")
+    action.add_argument("--watch-certificates", action="store_true", help="Makine sertifika güven depolarına eklenen sertifikaları izle")
+    action.add_argument("--watch-wmi", action="store_true", help="WMI olay aboneliği kalıcılığını izle")
+    action.add_argument("--watch-processes", action="store_true", help="Süreç başlatmalarını anlık olarak ve soyağacıyla izle")
+    action.add_argument("--watch-credentials", action="store_true", help="LSASS belleğine açılan okuma erişimlerini izle (SYSTEM gerekir)")
     action.add_argument("--amsi-service", action="store_true", help="AMSI ön-çalıştırma koruma servisini başlat")
     action.add_argument("--check-url", metavar="URL", help="URL veya domain itibarını yerel Proton verisinde denetle")
     action.add_argument("--protection-history", action="store_true", help="Gerçek zamanlı koruma olaylarını oku")
@@ -8731,6 +11665,26 @@ def main() -> int:
         return watch_usb()
     if args.watch_ransomware:
         return watch_ransomware()
+    if args.watch_drivers:
+        return watch_drivers()
+    if args.watch_tasks:
+        return watch_tasks()
+    if args.watch_integrity:
+        return watch_integrity()
+    if args.watch_scheduler:
+        return watch_scheduler()
+    if args.watch_eventlog:
+        return watch_eventlog()
+    if args.watch_posture:
+        return watch_posture()
+    if args.watch_certificates:
+        return watch_certificates()
+    if args.watch_wmi:
+        return watch_wmi()
+    if args.watch_processes:
+        return watch_processes()
+    if args.watch_credentials:
+        return watch_credentials()
     if args.watch_web:
         return watch_web()
     if args.amsi_service:

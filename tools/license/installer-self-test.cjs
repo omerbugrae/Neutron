@@ -72,6 +72,60 @@ assert.match(main, /\['amsi', results\.amsi\]/);
 assert.match(main, /\['service', results\.service\]/);
 assert.match(main, /if \(failedCore\.length\) \{/);
 
+// --- Kaldırma sihirbazı ----------------------------------------------------
+//
+// Kaldırıcının veri sayfası, onay sayfasından sonra ve dosyalar silinmeye
+// başlamadan önce gelmeli: seçim, geri alınamaz silme işleminden önce
+// yapılmış olmalı.
+assert.ok(installer.indexOf('UninstPage custom un.OptionsPageCreate') > installer.indexOf('MUI_UNPAGE_CONFIRM'));
+assert.ok(installer.indexOf('UninstPage custom un.OptionsPageCreate') < installer.indexOf('MUI_UNPAGE_INSTFILES'));
+assert.match(installer, /Function un\.OptionsPageLeave/);
+
+// Sessiz kaldırma (QuietUninstallString, /S) özel sayfaları göstermez. O
+// durumda un.onInit varsayılanları geçerli olur ve ikisi de "silme" olmalı --
+// otomatik bir kaldırma kullanıcı verisi ya da lisans silmemeli.
+assert.match(installer, /StrCpy \$DeleteUserData "0"/);
+assert.match(installer, /StrCpy \$DeleteLicenseData "0"/);
+// Karantina kalıcı olarak silineceği için tek bir onay kutusu yeterli değil;
+// ayrıca açık bir onay sorulmalı.
+assert.match(installer, /MB_YESNO\|MB_ICONEXCLAMATION/);
+
+// Lisans, kişisel veriden ayrı bir karar: kullanıcı verisini silip lisansı
+// koruyabilmek için ProgramData\Neutron tek parça halinde silinmemeli.
+assert.match(installer, /RMDir \/r "\$ProgramDataDir\\\\Neutron\\\\data"/);
+assert.match(installer, /RMDir \/r "\$ProgramDataDir\\\\Neutron\\\\license"/);
+assert.doesNotMatch(installer, /RMDir \/r "\$ProgramDataDir\\\\Neutron"\s*$/m);
+
+// Kaldırma yardımcısı kurulumla birlikte gelmeli ve Başlat menüsünden
+// erişilebilmeli: ona ihtiyaç duyulan an, tam da Uninstall.exe çalışmadığı
+// andır.
+assert.match(installer, /File \/oname=remove-neutron-completely\.cmd/);
+assert.match(installer, /Neutron Kaldırma Yardımcısı \(yönetici\)\.lnk/);
+assert.match(installer, /Neutron'u Kaldır\.lnk/);
+// Yükseltmede eski düz kısayol kaldırılmazsa menüde iki Neutron görünür.
+assert.match(installer, /Delete "\$SMPROGRAMS\\\\Neutron\.lnk"/);
+assert.match(installer, /RMDir "\$SMPROGRAMS\\\\Neutron"/);
+
+// Denetim Masası kaydı: kaldırma yolu, boyut ve iletişim bilgisi.
+assert.match(installer, /"UninstallString"/);
+assert.match(installer, /"QuietUninstallString"/);
+assert.match(installer, /"EstimatedSize"/);
+assert.match(installer, /"HelpLink"/);
+assert.match(installer, /\$\{GetSize\}/);
+assert.match(installer, /!include "FileFunc\.nsh"/);
+
+// Kaldırma yardımcısının kendisi: Neutron'a ait olmayan hiçbir şeyi silmemeli
+// ve kurulum yolunu doğrulamadan hiçbir klasörü kaldırmamalı.
+const removalHelper = fs.readFileSync(
+  path.join(root, 'tools', 'security', 'remove-neutron-completely.cmd'), 'utf8');
+assert.match(removalHelper, /goto unsafe_path/);
+assert.match(removalHelper, /goto missing_markers/);
+assert.match(removalHelper, /sc\.exe delete NeutronService/);
+assert.match(removalHelper, /Start Menu\\Programs\\Neutron/);
+assert.match(removalHelper, /AppData\\Roaming\\Neutron/);
+// Kullanıcı verisi asla sorulmadan silinmemeli.
+assert.match(removalHelper, /set \/p "PURGE_DATA=/);
+
 const signingKeys = crypto.generateKeyPairSync('ed25519');
 const longestSupportedKey = generateLicense({
   license_id: 'x'.repeat(80),

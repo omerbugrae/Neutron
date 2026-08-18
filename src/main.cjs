@@ -484,6 +484,18 @@ function showFindingNotification(event, title) {
 // partially stood itself down, and until they look at Quarantine they have no
 // way of knowing. It ignores the notification preference for that reason --
 // this is a state change in the product, not a detection.
+function showProductStateNotification(title, body) {
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({
+    title,
+    body: body || 'Neutron koruma davranışını değiştirdi.',
+    icon: neutronImage(64),
+    silent: false,
+  });
+  notification.on('click', () => showMainWindow());
+  notification.show();
+}
+
 function showAutoQuarantineBrakeNotification(event) {
   if (!Notification.isSupported()) return;
   const notification = new Notification({
@@ -1097,17 +1109,100 @@ let serviceSocket = null;
 let serviceConnected = false;
 let serviceReconnectTimer = null;
 
+// --- Settings that cross the service boundary ----------------------------
+//
+// The service runs with NEUTRON_DATA_DIR pointed at %ProgramData%\Neutron\data
+// while the desktop app reads %APPDATA%\Neutron\data. They are two different
+// databases, and writeAppSetting() only ever writes the UI's copy -- so
+// turning a protection off in service mode used to change the switch in the
+// window and nothing else: the service kept the value it was provisioned
+// with, forever, including across restarts. Every key the service actually
+// reads has to be forwarded over the control pipe as well.
+//
+// service_mode_enabled is deliberately absent: it is a desktop-side decision
+// about whether to talk to the service at all, and the service has no use for
+// its own copy.
+const SERVICE_FORWARDED_SETTINGS = new Set([
+  'protection_enabled',
+  'behavior_protection_enabled',
+  'web_protection_enabled',
+  'amsi_protection_enabled',
+  'network_protection_enabled',
+  'memory_scan_enabled',
+  'usb_protection_enabled',
+  'ransomware_protection_enabled',
+  'scheduled_scan_enabled',
+  'cloud_lookup_enabled',
+  'ml_assisted_detection_enabled',
+  'malwarebazaar_api_key',
+  'virustotal_api_key',
+  'watch_paths',
+  'scan_max_files',
+]);
+
+// The mirror image of the list above: keys the service may report back that
+// must never overwrite the desktop copy. service_mode_enabled is the one that
+// matters -- the service's own row says false (provisioning writes it that
+// way), and merging that back would turn service mode off inside the running
+// app, at which point onDisconnect() stops reconnecting the pipe.
+const SERVICE_LOCAL_ONLY_SETTINGS = new Set([
+  'service_mode_enabled',
+  'start_with_windows',
+  'watchdog_protection_enabled',
+  'wsc_registration_enabled',
+  'notifications_enabled',
+  'signature_auto_update_enabled',
+  'signature_update_interval_hours',
+  'signature_update_last_check_at',
+  'signature_update_last_success_at',
+  'signature_update_last_error',
+]);
+
+function mergeServiceSettings(settings) {
+  for (const [key, value] of Object.entries(settings)) {
+    if (SERVICE_LOCAL_ONLY_SETTINGS.has(key)) continue;
+    appSettings[key] = value;
+  }
+}
+
 function handleServiceEvent(event) {
   if (!event || typeof event.type !== 'string') return;
   sendProtectionEvent(event);
-  if (event.settings) appSettings = { ...appSettings, ...event.settings };
+  if (event.settings) mergeServiceSettings(event.settings);
   if (event.type === 'auto-quarantine-brake') {
     if (event.ml_disabled) appSettings.ml_assisted_detection_enabled = false;
     showAutoQuarantineBrakeNotification(event);
     return;
   }
+  // Same class of event as the quarantine brake and shown the same way: the
+  // product has stood part of itself down, and the user has no other way of
+  // finding that out. Not gated on the notification preference for that
+  // reason -- this is a state change in Neutron, not a detection.
+  if (event.type === 'response-brake') {
+    showProductStateNotification('Neutron otomatik engellemeyi durdurdu', event.message);
+    return;
+  }
+  if (event.type === 'integrity-alert') {
+    showFindingNotification(event, 'Neutron bileşenlerinde sorun var');
+    return;
+  }
+  if (event.type === 'posture-finding') {
+    showFindingNotification(event, 'Windows güvenlik ayarı değişti');
+    return;
+  }
+  if (event.type === 'credential-finding') {
+    showFindingNotification(event, 'Kimlik bilgisi erişimi algılandı');
+    return;
+  }
+  if (event.type === 'certificate-finding') {
+    showFindingNotification(event, 'Yeni güvenilen sertifika eklendi');
+    return;
+  }
   if (
-    ['behavior-finding', 'network-finding', 'amsi-finding'].includes(event.type)
+    [
+      'behavior-finding', 'network-finding', 'amsi-finding', 'driver-finding',
+      'task-finding', 'eventlog-finding', 'wmi-finding', 'process-finding',
+    ].includes(event.type)
     || (event.type === 'watch-finding' && shouldNotifyWatchFinding(event))
   ) {
     showFindingNotification(event);
@@ -1886,6 +1981,11 @@ let scheduledScanTimer = null;
 
 function runScheduledScanIfDue() {
   if (!appSettings.scheduled_scan_enabled) return;
+  // In service mode the service owns the schedule (watch_scheduler in
+  // engine.py). Letting both run would mean two quick scans a day writing
+  // into two different databases -- the service's %ProgramData% copy and
+  // this one -- with neither timestamp able to suppress the other.
+  if (appSettings.service_mode_enabled) return;
   if (!licenseStatus().active) return;
   if (activeScan) return;
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -2591,6 +2691,15 @@ async function updateApplicationSetting(key, value) {
 
   const result = await writeAppSetting(key, value);
   if (!result.ok) return result;
+
+  // Service mode: the same change has to reach the service's own database,
+  // or the UI and the thing actually protecting the machine disagree. A
+  // watcher toggle makes the service restart itself to apply it (see
+  // WATCHER_SETTING_KEYS in engine.py) and the pipe client reconnects on its
+  // own, so this stays fire-and-forget like every other command here.
+  if (appSettings.service_mode_enabled && serviceConnected && SERVICE_FORWARDED_SETTINGS.has(key)) {
+    sendServiceCommand({ cmd: 'update_setting', key, value });
+  }
 
   // setLoginItemSettings writes a Run entry under HKCU, which survives long
   // after the development session that created it.
