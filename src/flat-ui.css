@@ -1002,8 +1002,17 @@ body.flat-ui.protection-pending {
 }
 
 .flat-ui .audit-hero__figure {
+  /* The figure is absolutely positioned over the whole 132px dial, so it needs
+     to be centred on both axes. `align-items: baseline` only lines the number
+     up with the "/ 100" beside it -- it does not centre the row, which left
+     the score sitting at the top of the ring instead of inside it.
+     flex-wrap turns this into a multi-line container so align-content can
+     centre that single line vertically, while align-items keeps the two
+     different font sizes sharing a baseline. */
+  align-content: center;
   align-items: baseline;
   display: flex;
+  flex-wrap: wrap;
   gap: 3px;
   inset: 0;
   justify-content: center;

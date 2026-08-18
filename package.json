@@ -9,6 +9,7 @@
     "postinstall": "patch-package",
     "prestart": "npm run icon:build && npm run archive:check",
     "start": "electron .",
+    "start:safe": "set NEUTRON_DEV_SAFE=1 && electron .",
     "prepackage": "npm run icon:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
     "package": "electron-forge package",
     "premake": "npm run icon:build && npm run installer-images:build && npm run archive:check && npm run engine:build && npm run engine:verify && npm run amsi:build && npm run amsi:verify && npm run service:build && npm run service:verify",
@@ -40,6 +41,8 @@
     "feature:pack": "node tools/feature-update/pack.cjs",
     "feature:verify": "node tools/feature-update/verify.cjs",
     "feature:publish": "node tools/feature-update/publish.cjs",
+    "killswitch:revoke": "node tools/killswitch/revoke.cjs",
+    "killswitch:test": "node tools/killswitch/self-test.cjs",
     "proton:collect": "node tools/proton/collect-abusech.cjs",
     "proton:collect-test": "node tools/proton/collect-self-test.cjs",
     "proton:sync": "node tools/proton/collect-and-publish.cjs",
@@ -47,7 +50,10 @@
     "license:issue": "node tools/license/issue.cjs",
     "license:gui": ".\\venv\\Scripts\\python.exe tools\\license\\gui.py",
     "license:test": "node tools/license/self-test.cjs",
-    "license:installer-test": "node tools/license/installer-self-test.cjs"
+    "license:installer-test": "node tools/license/installer-self-test.cjs",
+    "test:engine": ".\\venv\\Scripts\\python.exe -m unittest discover -s tests -v",
+    "test:node": "node tools/killswitch/self-test.cjs && node tools/proton/self-test.cjs && node tools/license/self-test.cjs",
+    "test": "npm run test:engine && npm run test:node"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",

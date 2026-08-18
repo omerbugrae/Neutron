@@ -23,6 +23,18 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 SetCompressorDictSize 64
 CRCCheck on
+; The progress bar only advances on NSIS instructions, and almost all of the
+; wall-clock time in this installer is spent inside three external calls
+; (licence activation, robocopy, security provisioning) that each count as a
+; single instruction. The result was a bar that filled while files were
+; extracted, then sat motionless for minutes with no explanation -- not a
+; hang, but a UI that stopped reporting.
+;
+; The fix is the status line above the bar, not the details list: the section
+; below uses SetDetailsPrint textonly so each DetailPrint replaces that one
+; line. The list pane stays hidden because a wall of file paths is noise to
+; someone installing an application -- it belongs in the robocopy log, which
+; is where the diagnostics actually live.
 ShowInstDetails nevershow
 ShowUninstDetails nevershow
 BrandingText "Neutron Security"
@@ -72,6 +84,26 @@ VIAddVersionKey /LANG=1055 "LegalCopyright" "Neutron"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
+
+; Risk acceptance, immediately before the activation page.
+;
+; Neutron quarantines files, registers Windows security components, writes
+; firewall rules and has not been independently audited -- the README says so
+; plainly, but nobody installing from the .exe ever sees the README. Consent
+; belongs where the risk is actually taken.
+;
+; MUI's own licence page is used rather than a hand-built nsDialogs page
+; because MUI_LICENSEPAGE_CHECKBOX already gates the Next button on the
+; checkbox, which is exactly the required behaviour and one less thing to get
+; subtly wrong.
+!define MUI_PAGE_HEADER_TEXT "Risk bildirimi ve sorumluluk reddi"
+!define MUI_PAGE_HEADER_SUBTEXT "Neutron'u kurmadan önce bu metni okuyun."
+!define MUI_LICENSEPAGE_TEXT_TOP "Neutron deneysel bir güvenlik yazılımıdır ve kendi sorumluluğunuzda kullanılır."
+!define MUI_LICENSEPAGE_TEXT_BOTTOM "Kuruluma devam edebilmek için aşağıdaki kutuyu işaretlemeniz gerekir."
+!define MUI_LICENSEPAGE_CHECKBOX
+!define MUI_LICENSEPAGE_CHECKBOX_TEXT "Okudum, anladım ve kabul ediyorum."
+!insertmacro MUI_PAGE_LICENSE "${PROJECT_ROOT}\\tools\\installer\\risk-bildirimi.txt"
+
 Page custom LicensePageCreate LicensePageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -181,8 +213,18 @@ FunctionEnd
 
 Section "Neutron" SEC_MAIN
   SetShellVarContext all
+  ; textonly: each DetailPrint below replaces the single status line above the
+  ; progress bar and writes nothing to the (hidden) list. "none" around the
+  ; File extraction stops NSIS printing one line per extracted file, which
+  ; would otherwise overwrite the status message thousands of times.
+  SetDetailsPrint textonly
+  DetailPrint "Kurulum dosyaları hazırlanıyor…"
+  SetDetailsPrint none
   SetOutPath "$PLUGINSDIR\\NeutronStage"
   File /r "${APP_DIR}\\*.*"
+  SetDetailsPrint textonly
+
+  DetailPrint "Lisans doğrulanıyor ve kaydediliyor… (birkaç dakika sürebilir)"
 
   ; nsExec reports failures as the literal strings "error" and "timeout", not
   ; as exit codes, and IntCmp reads "timeout" as 0 -- i.e. as success. Without
@@ -195,7 +237,7 @@ Section "Neutron" SEC_MAIN
   ; The timeout is generous because this is an Electron cold start from a
   ; freshly written temp staging directory, with the on-access scanner
   ; reading every file it touches. 30 s was not enough.
-  nsExec::ExecToStack /TIMEOUT=180000 '"$PLUGINSDIR\\NeutronStage\\Neutron.exe" --activate-license-file "$PLUGINSDIR\\activation.key"'
+  nsExec::ExecToStack /TIMEOUT=420000 '"$PLUGINSDIR\\NeutronStage\\Neutron.exe" --activate-license-file "$PLUGINSDIR\\activation.key"'
   Pop $0
   Pop $1
   StrCmp $0 "error" license_verification_failed
@@ -218,9 +260,78 @@ license_verification_failed:
   SetErrorLevel 2
   Quit
 license_verified:
+  DetailPrint "Lisans doğrulandı ve kaydedildi."
+  DetailPrint "Çalışan Neutron bileşenleri durduruluyor…"
+
+  ; A previous Neutron on this machine sits in the tray rather than exiting
+  ; (window.on('close') hides it while protection is on -- see main.cjs), so a
+  ; re-install or upgrade routinely finds Neutron.exe and its DLLs still
+  ; open. robocopy then reports code 9 (files copied + some copy failures)
+  ; with no indication of which file, because it was silently blamed on a
+  ; generic "kopyalanamadı" instead. The uninstaller already stops the old
+  ; process and service before touching files (see the comment in "Uninstall"
+  ; below); the installer needs the exact same sequence for the same reason.
+  ; Both calls are allowed to fail here -- there may be nothing running yet on
+  ; a first install, and that is not an error.
+  nsExec::Exec '"$SYSDIR\\taskkill.exe" /F /T /IM Neutron.exe'
+  Pop $0
+  nsExec::Exec '"$SYSDIR\\sc.exe" stop "NeutronService"'
+  Pop $0
+  Sleep 3000
 
   CreateDirectory "$INSTDIR"
-  nsExec::ExecToStack /TIMEOUT=180000 '"$SYSDIR\\robocopy.exe" "$PLUGINSDIR\\NeutronStage" "$INSTDIR" /E /COPY:DAT /DCOPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS'
+
+  ; robocopy exit code 9 on every upgrade traced to exactly one file:
+  ; NeutronAmsiProvider.dll, ERROR 32 "used by another process", four retries,
+  ; retry limit exceeded.
+  ;
+  ; The taskkill above cannot fix it, and understanding why is the whole
+  ; point: an AMSI provider is not loaded by Neutron. Windows loads it into
+  ; every process that hands a buffer to AMSI -- powershell.exe, wscript.exe,
+  ; Office, Explorer -- so the DLL is mapped into processes that have nothing
+  ; to do with Neutron and that the installer has no business terminating.
+  ; Unregistering it does not help either: that stops *new* loads, while every
+  ; process already holding it keeps the image mapped until it exits.
+  ;
+  ; Windows forbids overwriting a mapped image but permits renaming one
+  ; (image sections are opened with FILE_SHARE_DELETE, which is exactly why
+  ; a running .exe can be renamed). So: unregister so nothing new picks it up,
+  ; move the old copy aside so robocopy can write the new one in its place,
+  ; and let the OS drop the renamed file at the next reboot.
+  ;
+  ; The suffix is counted rather than fixed because two upgrades without a
+  ; reboot in between would otherwise collide on an .old that is itself still
+  ; mapped and therefore still undeletable.
+  StrCpy $4 "$INSTDIR\\resources\\runtime\\amsi\\${TARGET_ARCH}\\NeutronAmsiProvider.dll"
+  IfFileExists "$4" 0 amsi_unlock_done
+  DetailPrint "Önceki AMSI sağlayıcısı devre dışı bırakılıyor…"
+  nsExec::Exec '"$SYSDIR\\regsvr32.exe" /s /u "$4"'
+  Pop $0
+  StrCpy $5 0
+amsi_unlock_try:
+  ClearErrors
+  Rename "$4" "$4.old$5"
+  IfErrors 0 amsi_unlock_renamed
+  IntOp $5 $5 + 1
+  IntCmp $5 8 amsi_unlock_failed amsi_unlock_try amsi_unlock_failed
+amsi_unlock_renamed:
+  ; Best effort now, guaranteed at reboot. Neither is required for the install
+  ; to succeed -- the new DLL only needs the name to be free.
+  Delete /REBOOTOK "$4.old$5"
+  DetailPrint "Önceki AMSI sağlayıcısı kenara alındı."
+  Goto amsi_unlock_done
+amsi_unlock_failed:
+  DetailPrint "Uyarı: önceki AMSI sağlayıcısı kenara alınamadı; kopyalama yine de denenecek."
+amsi_unlock_done:
+
+  ; /NFL /NDL /NJH /NJS previously suppressed robocopy's own file-level output
+  ; entirely, so a failure produced nothing but a bare exit code -- which is
+  ; why the AMSI lock above went undiagnosed for as long as it did. The log
+  ; costs nothing on the success path (it is deleted below) and is the
+  ; difference between guessing and reading the actual robocopy report.
+  DetailPrint "Program dosyaları $INSTDIR klasörüne kopyalanıyor…"
+  Delete "$TEMP\\Neutron-install-copy.log"
+  nsExec::ExecToStack /TIMEOUT=900000 '"$SYSDIR\\robocopy.exe" "$PLUGINSDIR\\NeutronStage" "$INSTDIR" /E /COPY:DAT /DCOPY:DAT /R:3 /W:2 /LOG:"$TEMP\\Neutron-install-copy.log"'
   Pop $0
   Pop $1
   StrCmp $0 "error" install_copy_failed
@@ -236,12 +347,15 @@ remove_new_license:
   Delete "$ProgramDataDir\\Neutron\\license\\activation.key"
 install_copy_failure_done:
   RMDir /r "$PLUGINSDIR\\NeutronStage"
-  MessageBox MB_OK|MB_ICONSTOP "Kurulum dosyaları hedef klasöre kopyalanamadı (robocopy kodu $0). Güvenlik bileşenleri etkinleştirilmedi."
+  MessageBox MB_OK|MB_ICONSTOP "Kurulum dosyaları hedef klasöre kopyalanamadı (robocopy kodu $0). Güvenlik bileşenleri etkinleştirilmedi.$\r$\n$\r$\nTanılama: $TEMP\Neutron-install-copy.log"
   SetErrorLevel 3
   Quit
 install_copy_ok:
+  DetailPrint "Program dosyaları kopyalandı."
+  Delete "$TEMP\\Neutron-install-copy.log"
   RMDir /r "$PLUGINSDIR\\NeutronStage"
   Delete "$PLUGINSDIR\\activation.key"
+  DetailPrint "Kısayollar ve kayıt defteri girdileri oluşturuluyor…"
 
   SetOutPath "$INSTDIR\\Recovery"
   File /oname=recover-neutron-boot.ps1 "${PROJECT_ROOT}\\tools\\security\\recover-neutron-boot.ps1"
@@ -264,7 +378,8 @@ install_copy_ok:
   WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "NoModify" 1
   WriteRegDWORD HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Neutron" "NoRepair" 1
 
-  nsExec::ExecToStack /TIMEOUT=300000 '"$INSTDIR\\Neutron.exe" --provision-security'
+  DetailPrint "Güvenlik bileşenleri etkinleştiriliyor… (bu adım birkaç dakika sürebilir, lütfen bekleyin)"
+  nsExec::ExecToStack /TIMEOUT=1200000 '"$INSTDIR\\Neutron.exe" --provision-security'
   Pop $0
   Pop $1
   ; Same trap as the licence call above: "timeout" would parse as success and
@@ -277,7 +392,7 @@ provision_failed:
   FileOpen $3 "$TEMP\Neutron-install-error.txt" w
   FileWrite $3 "Neutron ${APP_VERSION} security provisioning failed (code $2).$\r$\n$1$\r$\n"
   FileClose $3
-  nsExec::ExecToStack /TIMEOUT=180000 '"$INSTDIR\\Neutron.exe" --prepare-uninstall'
+  nsExec::ExecToStack /TIMEOUT=420000 '"$INSTDIR\\Neutron.exe" --prepare-uninstall'
   Pop $0
   Pop $1
   Delete "$DESKTOP\\Neutron.lnk"
@@ -306,6 +421,9 @@ provision_rollback_done:
 provision_ok:
   Delete "$TEMP\Neutron-install-error.txt"
   Delete "$PLUGINSDIR\\previous-activation.key"
+  DetailPrint "Güvenlik bileşenleri etkinleştirildi."
+  DetailPrint "Kurulum tamamlandı."
+  SetDetailsPrint none
 SectionEnd
 
 Section "Uninstall"
@@ -327,7 +445,7 @@ Section "Uninstall"
 
   IfFileExists "$INSTDIR\\Neutron.exe" cleanup_retry cleanup_fallback
 cleanup_retry:
-  nsExec::ExecToStack /TIMEOUT=180000 '"$INSTDIR\\Neutron.exe" --prepare-uninstall'
+  nsExec::ExecToStack /TIMEOUT=420000 '"$INSTDIR\\Neutron.exe" --prepare-uninstall'
   Pop $0
   Pop $1
   ; A timeout here would parse as success and skip the fallback cleanup

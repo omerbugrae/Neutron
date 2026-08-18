@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white)](#requirements)
 [![Electron](https://img.shields.io/badge/Electron-Desktop%20App-47848F?style=for-the-badge&logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![Python](https://img.shields.io/badge/Python-Scan%20Engine-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-red?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial-red?style=for-the-badge)](LICENSE.md)
 
 [Features](#-features) ·
 [Risk notice](#-important-security-notice) ·
@@ -115,7 +115,7 @@ Use Neutron only on systems and files that you own or are explicitly authorized 
 
 ## 📄 License
 
-Neutron is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+Neutron is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
 
 Commercial use is not permitted. Any commercial use, resale, commercial distribution, paid service, or use as part of a commercial product requires prior written permission from the copyright holder.
 

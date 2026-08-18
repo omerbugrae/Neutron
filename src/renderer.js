@@ -2,11 +2,6 @@
   'use strict';
 
   const engine = window.neutronEngine;
-  const licenseGate = document.querySelector('[data-role="license-gate"]');
-  const licenseForm = document.querySelector('[data-role="license-form"]');
-  const licenseInput = document.querySelector('[data-role="license-key-input"]');
-  const licenseMessage = document.querySelector('[data-role="license-message"]');
-  const licenseDeviceHash = document.querySelector('[data-role="license-device-hash"]');
   const licenseAccountCard = document.querySelector('[data-role="license-account-card"]');
   const dashboard = document.querySelector('.dashboard');
   const pages = [...document.querySelectorAll('.app-page[data-page]')];
@@ -61,16 +56,13 @@
   let selectedFullScanDrive = null;
   let activeThreatDetected = false;
 
+  // Activation itself now lives in its own window, opened by the main process
+  // (see openActivationWindow in main.cjs). This is only a read: the main UI
+  // still needs to know whether it is licensed so it can say so, but it no
+  // longer owns the activation flow.
   const initializeLicense = async () => {
     const status = await engine?.getLicenseStatus?.();
-    if (status?.active) {
-      licenseGate?.setAttribute('hidden', '');
-      return true;
-    }
-    if (licenseGate) licenseGate.removeAttribute('hidden');
-    if (licenseDeviceHash) licenseDeviceHash.textContent = status?.deviceHash || 'Cihaz kimliği alınamadı';
-    if (licenseMessage && status?.message && !/ENOENT/.test(status.message)) licenseMessage.textContent = status.message;
-    return false;
+    return Boolean(status?.active);
   };
 
   const maskLicenseKey = (key) => {
@@ -121,25 +113,6 @@
     const result = await engine?.revealLicense?.();
     if (!result?.ok) return;
     output.textContent = result.key; output.hidden = false; target.textContent = 'Lisansı gizle';
-  });
-
-  licenseForm?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    if (!licenseInput?.value.trim() || !engine?.activateLicense) return;
-    const button = licenseForm.querySelector('button');
-    button.disabled = true;
-    licenseMessage?.classList.remove('is-error');
-    if (licenseMessage) licenseMessage.textContent = 'Lisans doğrulanıyor…';
-    const result = await engine.activateLicense(licenseInput.value);
-    button.disabled = false;
-    if (!result?.ok) {
-      if (licenseMessage) { licenseMessage.textContent = result?.message || 'Etkinleştirme başarısız.'; licenseMessage.classList.add('is-error'); }
-      return;
-    }
-    licenseInput.value = '';
-    licenseGate?.setAttribute('hidden', '');
-    window.location.hash = '#overview';
-    window.location.reload();
   });
 
   const setText = (role, value) => textTargets(role).forEach((element) => {
@@ -335,7 +308,7 @@
     setText('scan-summary', !protectionKnown
       ? 'Koruma motorunun durumu kontrol ediliyor.'
       : protectionEnabled
-      ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.'
+      ? 'Kullanıcı profilinizdeki ve geçici klasörlerdeki yeni ve değişen dosyalar izleniyor.'
       : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.');
     setText('scan-page-heading', 'Kritik alanlar');
     setText('scan-page-summary', `${scanLimitText(currentSettings?.scan_max_files)} dosya incelenir. Dosyalar silinmez, taşınmaz veya karantinaya alınmaz.`);
@@ -401,7 +374,7 @@
     setText('scan-heading', activeThreatDetected ? 'Tehdit bulundu ve engellendi.' : (enabled ? 'Neutron seni koruyor.' : 'Korumayı açın.'));
     setText('scan-summary', activeThreatDetected
       ? 'Son tespit karantinaya taşındı. Karantina sayfasından inceleyebilir veya geri yükleyebilirsin.'
-      : (enabled ? 'Masaüstü ve İndirilenler klasörlerindeki yeni ve değişen dosyalar izleniyor.' : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.'));
+      : (enabled ? 'Kullanıcı profilinizdeki ve geçici klasörlerdeki yeni ve değişen dosyalar izleniyor.' : 'Gerçek zamanlı dosya izleme kapalı. Koruma sayfasından yeniden açabilirsiniz.'));
     setText('protection-toggle-label', enabled ? 'Kapat' : 'Aç');
     if (protectionToggle) {
       protectionToggle.classList.toggle('is-active', enabled);
@@ -554,7 +527,7 @@
       if (!status?.ok) throw new Error('Koruma durumu okunamadı');
       if (status.enabled) {
         setProtectionState(true, status.ready ? 'Koruma etkin' : 'Koruma başlatılıyor', status.ready
-          ? 'Masaüstü ve İndirilenler klasörleri izleniyor.'
+          ? 'Kullanıcı profiliniz ve geçici klasörler izleniyor.'
           : 'İzlenecek klasörlerin ilk görüntüsü hazırlanıyor.');
       } else {
         setProtectionState(false, 'Koruma kapalı', 'Yeni ve değişen dosyalar şu anda izlenmiyor.');
@@ -750,7 +723,8 @@
             : event.finding_kind === 'yara' ? 'YARA'
               : event.finding_kind === 'pe-analysis' ? 'PE İNCELEMESİ'
             : event.finding_kind === 'behavior' ? 'DAVRANIŞ'
-              : event.finding_kind === 'persistence' ? 'KALICILIK' : 'İNCELEME';
+              : event.finding_kind === 'persistence' ? 'KALICILIK'
+                : event.finding_kind === 'service-tamper' ? 'SERVİS KURCALAMA' : 'İNCELEME';
       const stamp = document.createElement('time');
       stamp.textContent = formatScanDate(event.occurred_at);
       const dispositionLabel = document.createElement('strong');
@@ -778,7 +752,11 @@
         ];
         actionDefinitions.forEach(([actionName, label]) => {
           if (reviewOnly && actionName === 'remediate') return;
-          if (event.finding_kind === 'persistence' && actionName !== 'ignore') return;
+          // Both of these describe an event rather than a file Neutron holds:
+          // a registry autostart entry, and a process that was already refused
+          // at the pipe. There is nothing to quarantine or restore, so the
+          // only honest action is to dismiss the notice.
+          if (['persistence', 'service-tamper'].includes(event.finding_kind) && actionName !== 'ignore') return;
           if (actionName === 'remediate' && (!event.file_path || event.file_path.startsWith('registry://') || event.file_path.startsWith('startup://'))) return;
           if (actionName === 'trust' && !/^[a-f0-9]{64}$/i.test(event.sha256 || '')) return;
           if (actionName === 'trust-publisher' && !/^[a-f0-9]{40,64}$/i.test(event.publisher_thumbprint || '')) return;
@@ -914,7 +892,7 @@
     if (!paths.length) {
       const empty = document.createElement('p');
       empty.className = 'settings-empty';
-      empty.textContent = 'Varsayılan olarak Masaüstü ve İndirilenler izleniyor.';
+      empty.textContent = 'Varsayılan olarak kullanıcı profilinizin tamamı ve geçici klasörler izlenir.';
       list.append(empty);
       return;
     }
@@ -1886,13 +1864,16 @@
       installing: ['Kuruluyor…', 'Proton güncellemesi uygulanıyor.'],
       current: ['Proton güncel', `Kurulu Proton ${event.version || ''} en yeni sürüm.`],
       complete: ['Proton güncel', `Proton ${event.version || ''} başarıyla kuruldu.`],
+      revoked: ['Geri alınıyor…', `Proton ${event.version || ''} geri çekildi; doğrulanmış ${event.target || ''} sürümüne dönülüyor.`],
+      'revoked-no-target': ['Tekrar dene', event.message || 'Kurulu Proton sürümü geri çekildi.'],
+      'rolled-back': ['Proton güncel', `Doğrulanmış Proton ${event.version || ''} sürümüne dönüldü.`],
       error: ['Tekrar dene', event.message || 'Proton güncellenemedi.'],
     };
     const state = states[event.stage];
     if (!state) return;
     if (signatureUpdateButton) signatureUpdateButton.textContent = state[0];
     setText('signature-detail', state[1]);
-    if (event.stage === 'complete' || event.stage === 'current') {
+    if (['complete', 'current', 'rolled-back', 'revoked-no-target'].includes(event.stage)) {
       applyEngineStatus();
       applySettings();
       applySignatureStatus();
@@ -1909,13 +1890,14 @@
       installing: ['Installing…', 'The verified Feature Update is being activated.'],
       current: ['Up to date', `Machine Learning Feature Update ${event.version || ''} is current.`],
       complete: ['Up to date', `Machine Learning Feature Update ${event.version || ''} was installed successfully.`],
+      revoked: ['Disabled', `Machine Learning Feature Update ${event.version || ''} was revoked and has been disabled on this device.`],
       error: ['Try Again', event.message || 'Feature Update could not be installed.'],
     };
     const state = states[event.stage];
     if (!state) return;
     if (featureUpdateButton) featureUpdateButton.textContent = state[0];
     setText('feature-update-detail', state[1]);
-    if (event.stage === 'complete' || event.stage === 'current') applyFeatureUpdateStatus();
+    if (event.stage === 'complete' || event.stage === 'current' || event.stage === 'revoked') applyFeatureUpdateStatus();
   });
 
   protectionToggle?.addEventListener('click', async () => {

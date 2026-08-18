@@ -34,7 +34,7 @@ async function main() {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'neutron-proton-feed-'));
   try {
     const candidatePath = path.join(temporaryRoot, 'definitions.json');
-    const result = await collect({ source, version: resolvedVersion, limit: argument('--limit'), bulkLimit: argument('--bulk-limit'), threatfoxDays: argument('--threatfox-days'), concurrency: argument('--concurrency') });
+    const result = await collect({ source, version: resolvedVersion, limit: argument('--limit'), bulkLimit: argument('--bulk-limit'), maxBulkQueries: argument('--max-bulk-queries'), threatfoxDays: argument('--threatfox-days'), concurrency: argument('--concurrency') });
     materializeCandidate(result.source, path.resolve(source), candidatePath);
     const published = publish({ source: candidatePath, keys, output, repository });
     console.log(`Gercek kaynaklardan Proton ${published.version} toplandi, imzalandi ve yayimlandi.`);

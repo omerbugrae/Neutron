@@ -153,6 +153,7 @@ async function collect(options, dependencies = {}) {
     ...(options.tags || MALWAREBAZAAR_TAGS).map((value) => ({ axis: 'tag', query: 'get_taginfo', key: 'tag', value })),
     ...(options.fileTypes || MALWAREBAZAAR_FILE_TYPES).map((value) => ({ axis: 'file_type', query: 'get_file_type', key: 'file_type', value })),
   ];
+  const maxBulkQueries = boundedInteger(options.maxBulkQueries, bulkQueries.length, 0, bulkQueries.length, '--max-bulk-queries');
   const rawSource = readJsonFile(sourcePath);
   if (!rawSource || typeof rawSource !== 'object' || Array.isArray(rawSource)
     || rawSource.database_name !== 'Proton'
@@ -198,7 +199,7 @@ async function collect(options, dependencies = {}) {
   }
   // Tek bir sorgunun duşmesi tum toplamayi iptal etmemeli; ancak sessizce 1000 hash kaybetmemek icin once yeniden denenir.
   const failedQueries = [];
-  const bulkResponses = await mapWithConcurrency(bulkQueries, concurrency, async (descriptor) => {
+  const bulkResponses = await mapWithConcurrency(bulkQueries.slice(0, maxBulkQueries), concurrency, async (descriptor) => {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         return assertQueryStatus(
@@ -216,16 +217,16 @@ async function collect(options, dependencies = {}) {
     for (const entry of response.data || []) if (addSignature(signatures, entry, 'MalwareBazaar')) malwareBazaarFamilyCount += 1;
   }
   const collected = { ...rawSource, database_name: base.database_name, minimum_engine_version: base.minimum_engine_version, version, provenance: {
-    source_name: 'Neutron curated abuse.ch threat intelligence', source_url: 'https://urlhaus.abuse.ch/api/', collected_at: new Date().toISOString(),
-    license: 'abuse.ch Community API terms and fair-use principles apply',
-    review_policy: `Automated intake: URLhaus online malware_download URLs, URLhaus/MalwareBazaar hashes with valid SHA-256 and byte size, ThreatFox url/domain at confidence >= ${THREATFOX_MINIMUM_CONFIDENCE}. Every candidate must pass package validation before signing.`,
+    source_name: 'Neutron curated abuse.ch and ReversingLabs threat intelligence', source_url: 'https://urlhaus.abuse.ch/api/', collected_at: new Date().toISOString(),
+    license: 'abuse.ch Community API terms and fair-use principles; bundled ReversingLabs YARA rules: MIT',
+    review_policy: `URLhaus/MalwareBazaar SHA-256 and size; ThreatFox URL/domain confidence >= ${THREATFOX_MINIMUM_CONFIDENCE}; bundled ReversingLabs MIT YARA rules. Package validation is required before signing.`,
   }, signatures: [...signatures.values()], web_indicators: [...indicators.values()] };
-  return { source: collected, statistics: { urlhausUrlCount, urlhausPayloadCount, malwareBazaarCount, malwareBazaarFamilyCount, threatFoxCount, bulkQueryCount: bulkQueries.length, failedQueries } };
+  return { source: collected, statistics: { urlhausUrlCount, urlhausPayloadCount, malwareBazaarCount, malwareBazaarFamilyCount, threatFoxCount, bulkQueryCount: maxBulkQueries, failedQueries } };
 }
 
 async function main() {
   const source = argument('--source'), output = argument('--output'), version = argument('--version');
-  if (!source || !output) throw new Error('Kullanim: npm run proton:collect -- --source <definitions.json> --output <definitions.json> [--version x.xx.xxx] [--repo OWNER/REPO] [--limit 1000] [--bulk-limit 1000] [--threatfox-days 7] [--concurrency 4]');
+  if (!source || !output) throw new Error('Kullanim: npm run proton:collect -- --source <definitions.json> --output <definitions.json> [--version x.xx.xxx] [--repo OWNER/REPO] [--limit 1000] [--bulk-limit 1000] [--max-bulk-queries 12] [--threatfox-days 7] [--concurrency 4]');
   const outputPath = path.resolve(output);
   if (fs.existsSync(outputPath)) throw new Error(`Cikti zaten var, uzerine yazilmaz: ${outputPath}`);
   // --version verilmezse yayimlanmis en yuksek surumun derleme hanesi bir artirilir (docs/proton-versioning.md).
@@ -235,7 +236,7 @@ async function main() {
     resolvedVersion = next.version;
     console.log(`Surum otomatik belirlendi: ${next.previousVersion ? `${next.previousVersion} -> ` : 'ilk yayin -> '}${next.version}`);
   }
-  const result = await collect({ source, version: resolvedVersion, limit: argument('--limit'), bulkLimit: argument('--bulk-limit'), threatfoxDays: argument('--threatfox-days'), concurrency: argument('--concurrency') });
+  const result = await collect({ source, version: resolvedVersion, limit: argument('--limit'), bulkLimit: argument('--bulk-limit'), maxBulkQueries: argument('--max-bulk-queries'), threatfoxDays: argument('--threatfox-days'), concurrency: argument('--concurrency') });
   materializeCandidate(result.source, path.resolve(source), outputPath);
   console.log(`Aday Proton kaynagi olusturuldu: ${outputPath}`);
   console.log(`URLhaus URL: +${result.statistics.urlhausUrlCount}; ThreatFox gostergesi: +${result.statistics.threatFoxCount}`);

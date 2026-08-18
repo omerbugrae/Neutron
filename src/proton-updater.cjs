@@ -8,14 +8,17 @@ const {
   readEncryptionKey,
   verifyPackageSignature,
 } = require('./proton-format.cjs');
+const { channelConfig, validateKillSwitch, verifyKillSwitchSignature } = require('./killswitch-format.cjs');
 
 const DEFAULT_RELEASES_URL = 'https://api.github.com/repos/omerbugrae/NeutronProton/releases?per_page=30';
 const RELEASE_TAG_PATTERN = /^proton-v(\d+\.\d{2}\.\d{3})$/;
 const MAX_API_BYTES = 2 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 72 * 1024 * 1024;
 const MAX_SIGNATURE_BYTES = 64 * 1024;
+const MAX_KILLSWITCH_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REDIRECTS = 5;
+const PROTON_KILLSWITCH = channelConfig('proton');
 
 class ProtonUpdateError extends Error {
   constructor(code, message) {
@@ -145,8 +148,86 @@ async function fetchBytes(rawUrl, options = {}) {
   throw new ProtonUpdateError('TOO_MANY_REDIRECTS', 'Proton indirmesi tamamlanamadı.');
 }
 
-function selectLatestRelease(releases) {
+// --- Tag-based release discovery (fallback for the list endpoint) ---------
+//
+// GitHub's list endpoint, GET /repos/:owner/:repo/releases, was observed
+// returning an empty array for NeutronProton while the releases demonstrably
+// existed: /releases/latest returned a published, non-draft release with all
+// its assets, /releases/tags/<tag> returned each one, and /tags listed nine
+// tags. Same 200, no rate limiting, no authentication difference -- the list
+// endpoint simply did not report them.
+//
+// The updaters read only that one endpoint, so the app reported "no updates
+// available" on a repository full of updates, and nothing in the error path
+// could have revealed why: an empty list is indistinguishable from a
+// repository that has never published anything.
+//
+// Tags and per-tag lookups are therefore used as a second source. This is not
+// a workaround for a transient outage -- it removes a single point of failure
+// from the only mechanism that ships new detection rules.
+const MAX_TAG_CANDIDATES = 5;
+
+function repositoryApiBase(releasesUrl) {
+  const url = new URL(releasesUrl);
+  url.search = '';
+  return `${url.origin}${url.pathname.replace(/\/releases\/?$/, '')}`;
+}
+
+async function fetchReleaseByTag(base, tag, options = {}) {
+  try {
+    const bytes = await fetchBytes(`${base}/releases/tags/${encodeURIComponent(tag)}`, {
+      maximumBytes: MAX_API_BYTES,
+      accept: 'application/vnd.github+json',
+      userAgent: options.userAgent,
+      allowLoopback: options.allowLoopback,
+    });
+    const release = JSON.parse(bytes.toString('utf8'));
+    // A draft or prerelease is excluded here exactly as it is in the list
+    // path, so the fallback cannot install something the primary path would
+    // have refused.
+    return release && !release.draft && !release.prerelease ? release : null;
+  } catch {
+    // A tag with no release attached 404s. That is ordinary, not an error.
+    return null;
+  }
+}
+
+// Returns { release, version } for the newest tag matching `pattern` that
+// actually has a published release behind it, or null.
+async function discoverLatestTaggedRelease(base, pattern, options = {}) {
+  let tags;
+  try {
+    const bytes = await fetchBytes(`${base}/tags?per_page=100`, {
+      maximumBytes: MAX_API_BYTES,
+      accept: 'application/vnd.github+json',
+      userAgent: options.userAgent,
+      allowLoopback: options.allowLoopback,
+    });
+    tags = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(tags)) return null;
+  const revoked = new Set(options.revokedVersions || []);
+  const candidates = tags
+    .map((tag) => {
+      const match = pattern.exec(String(tag?.name || ''));
+      return match ? { tag: tag.name, version: match[1] } : null;
+    })
+    .filter(Boolean)
+    .filter((candidate) => !revoked.has(candidate.version))
+    .sort((left, right) => compareVersions(right.version, left.version))
+    .slice(0, MAX_TAG_CANDIDATES);
+  for (const candidate of candidates) {
+    const release = await fetchReleaseByTag(base, candidate.tag, options);
+    if (release) return { release, version: candidate.version };
+  }
+  return null;
+}
+
+function selectLatestRelease(releases, revokedVersions = []) {
   if (!Array.isArray(releases)) throw new ProtonUpdateError('INVALID_RELEASES', 'GitHub sürüm yanıtı geçersiz.');
+  const revoked = new Set(revokedVersions);
   const candidates = releases
     .filter((release) => release && !release.draft && !release.prerelease)
     .map((release) => {
@@ -154,6 +235,10 @@ function selectLatestRelease(releases) {
       return match ? { release, version: match[1] } : null;
     })
     .filter(Boolean)
+    // A revoked version is never a candidate. Installing it and rolling it
+    // back a moment later would work, but it would also briefly arm the exact
+    // rules the revocation exists to disarm.
+    .filter((candidate) => !revoked.has(candidate.version))
     .sort((left, right) => compareVersions(right.version, left.version));
   return candidates[0] || null;
 }
@@ -261,6 +346,45 @@ class ProtonUpdater {
     this.onEvent({ stage, ...detail });
   }
 
+  // Verifies the signed revocation list for the Proton channel. Failures are
+  // never fatal: a machine that cannot reach or verify the kill switch must
+  // keep updating normally rather than freeze, so callers get
+  // killSwitchCheckFailed and can surface it without losing the update path.
+  async checkKillSwitch(releases, currentVersion) {
+    try {
+      // Same fallback as the update check, and for the same reason: a kill
+      // switch that silently fails to load is worse than one that does not
+      // exist, because it fails open on the machines it was meant to protect.
+      const release = (Array.isArray(releases) ? releases : [])
+        .find((item) => item && !item.draft && item.tag_name === PROTON_KILLSWITCH.tag)
+        || await fetchReleaseByTag(
+          repositoryApiBase(this.releasesUrl), PROTON_KILLSWITCH.tag,
+          { userAgent: this.userAgent, allowLoopback: this.allowLoopback },
+        );
+      if (!release) return { revoked: false, revokedVersions: [] };
+      const assets = Array.isArray(release.assets) ? release.assets : [];
+      const documentAsset = assets.find((item) => item?.name === PROTON_KILLSWITCH.assetName);
+      const signatureAsset = assets.find((item) => item?.name === `${PROTON_KILLSWITCH.assetName}.sig`);
+      if (!documentAsset?.browser_download_url || !signatureAsset?.browser_download_url) return { revoked: false, revokedVersions: [] };
+      const documentBytes = await fetchBytes(documentAsset.browser_download_url, {
+        maximumBytes: MAX_KILLSWITCH_BYTES, userAgent: this.userAgent, allowLoopback: this.allowLoopback,
+      });
+      const signatureBytes = await fetchBytes(signatureAsset.browser_download_url, {
+        maximumBytes: MAX_SIGNATURE_BYTES, userAgent: this.userAgent, allowLoopback: this.allowLoopback,
+      });
+      const publicKey = fs.readFileSync(this.publicKeyPath);
+      verifyKillSwitchSignature(documentBytes, parseSignatureDocument(signatureBytes), publicKey);
+      const document = validateKillSwitch(JSON.parse(documentBytes.toString('utf8')), 'proton');
+      return {
+        revoked: document.revoked_versions.includes(currentVersion),
+        revokedVersions: document.revoked_versions,
+      };
+    } catch (error) {
+      this.emit('killswitch-check-failed', { message: error?.message || String(error) });
+      return { revoked: false, revokedVersions: [], killSwitchCheckFailed: true };
+    }
+  }
+
   async check(currentVersion) {
     this.emit('checking');
     const apiBytes = await fetchBytes(this.releasesUrl, {
@@ -275,12 +399,27 @@ class ProtonUpdater {
     } catch {
       throw new ProtonUpdateError('INVALID_RELEASES', 'GitHub sürüm listesi okunamadı.');
     }
-    const latest = selectLatestRelease(releases);
-    if (!latest) return { available: false, reason: 'no-release', currentVersion };
-    if (compareVersions(latest.version, currentVersion) <= 0) {
-      return { available: false, reason: 'current', currentVersion, latestVersion: latest.version };
+    const killSwitch = await this.checkKillSwitch(releases, currentVersion);
+    let latest = selectLatestRelease(releases, killSwitch.revokedVersions);
+    if (!latest) {
+      // Nothing in the list. That is either a genuinely empty repository or
+      // the list endpoint under-reporting, and only the tag lookup can tell
+      // the two apart -- so ask rather than assume the former.
+      latest = await discoverLatestTaggedRelease(
+        repositoryApiBase(this.releasesUrl), RELEASE_TAG_PATTERN,
+        {
+          userAgent: this.userAgent,
+          allowLoopback: this.allowLoopback,
+          revokedVersions: killSwitch.revokedVersions,
+        },
+      );
+      if (latest) this.emit('release-list-fallback', { source: 'tags', version: latest.version });
     }
-    return { available: true, currentVersion, latestVersion: latest.version, candidate: latest };
+    if (!latest) return { available: false, reason: 'no-release', currentVersion, ...killSwitch };
+    if (compareVersions(latest.version, currentVersion) <= 0) {
+      return { available: false, reason: 'current', currentVersion, latestVersion: latest.version, ...killSwitch };
+    }
+    return { available: true, currentVersion, latestVersion: latest.version, candidate: latest, ...killSwitch };
   }
 
   async downloadAndDecrypt(checkResult) {
@@ -361,7 +500,10 @@ module.exports = {
   ProtonUpdateError,
   ProtonUpdater,
   compareVersions,
+  discoverLatestTaggedRelease,
   fetchBytes,
+  fetchReleaseByTag,
   releaseAssets,
+  repositoryApiBase,
   selectLatestRelease,
 };

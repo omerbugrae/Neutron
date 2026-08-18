@@ -22,6 +22,7 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import stat as stat_module
 import struct
 import subprocess
 import sys
@@ -1676,9 +1677,151 @@ def read_scan_history(limit: int) -> list[dict[str, Any]]:
     ]
 
 
+def current_user_sid() -> str | None:
+    """SID string of the account this process runs as, or None."""
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    TOKEN_QUERY = 0x0008
+    TOKEN_USER_CLASS = 1
+
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)
+    ):
+        return None
+    try:
+        size = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, TOKEN_USER_CLASS, None, 0, ctypes.byref(size))
+        if not size.value:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+            token, TOKEN_USER_CLASS, buffer, size, ctypes.byref(size)
+        ):
+            return None
+        # TOKEN_USER starts with SID_AND_ATTRIBUTES, whose first member is the
+        # PSID -- read it directly rather than redeclaring the whole struct.
+        sid_pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR),
+        ]
+        advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+        text = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(sid_pointer, ctypes.byref(text)):
+            return None
+        try:
+            return str(text.value) if text.value else None
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+# Quarantine store access control (plan.md item 6).
+#
+# The store inherited whatever the parent data directory allowed. On a shared
+# machine that can mean other user accounts, and it always means a permissive
+# ACL set anywhere above us silently widens access to the malware corpus and
+# to the per-item keys' plaintext targets.
+#
+# The DACL below is protected (inheritance disabled) and lists only SYSTEM,
+# the local Administrators group, and the account Neutron runs as.
+#
+# What this does NOT do, stated plainly because the same limit is documented
+# for self-protection: Windows ACLs are per-account, so this is no defence
+# against malware already running as the same user -- that process has the
+# owner's rights by definition. It keeps *other* users and other unprivileged
+# processes out, and stops an over-broad inherited ACL from applying. That is
+# the honest scope.
+#
+# Service-mode note: as LocalSystem the store lives under %ProgramData% and
+# the account SID resolves to SYSTEM, so the resulting DACL is SYSTEM plus
+# Administrators. That is intended there -- the service owns that store and
+# the desktop app keeps its own under %APPDATA% -- but it does mean a
+# non-admin user cannot reach the machine-wide store directly.
+QUARANTINE_DACL_TEMPLATE = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+
+
+def harden_quarantine_directory(directory: Path) -> None:
+    """Apply a protected DACL to the store. Best effort by design: a failure
+    here must never stop a detection from being quarantined, since an
+    inherited-ACL store is still far better than leaving malware in place."""
+    if os.name != "nt":
+        return
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    SE_FILE_OBJECT = 1
+    DACL_SECURITY_INFORMATION = 0x00000004
+    PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+
+    # Hard requirement, not a nicety: the DACL is protected, so it replaces
+    # inherited access outright. Applying one that does not name the account
+    # this process runs as would lock Neutron out of its own quarantine store
+    # -- no restore, no listing, no cleanup. If the SID cannot be resolved the
+    # correct move is to leave the inherited ACL alone.
+    sid = current_user_sid()
+    if not sid:
+        return
+    sddl = f"{QUARANTINE_DACL_TEMPLATE}(A;OICI;FA;;;{sid})"
+
+    convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.restype = wintypes.BOOL
+    convert.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    descriptor = ctypes.c_void_p()
+    descriptor_size = wintypes.DWORD(0)
+    if not convert(sddl, 1, ctypes.byref(descriptor), ctypes.byref(descriptor_size)):
+        return
+    try:
+        dacl_present = wintypes.BOOL()
+        dacl_defaulted = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        advapi32.GetSecurityDescriptorDacl.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+        ]
+        advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor, ctypes.byref(dacl_present), ctypes.byref(dacl),
+            ctypes.byref(dacl_defaulted),
+        ) or not dacl_present.value:
+            return
+        advapi32.SetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ]
+        advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+        advapi32.SetNamedSecurityInfoW(
+            str(directory), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            None, None, dacl, None,
+        )
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+_quarantine_directory_hardened = False
+
+
 def quarantine_directory() -> Path:
+    global _quarantine_directory_hardened
     directory = data_directory() / "quarantine"
+    existed = directory.is_dir()
     directory.mkdir(parents=True, exist_ok=True)
+    # Applied once per process, and always on first creation. Re-running it on
+    # every call would mean a SetNamedSecurityInfoW round trip per quarantined
+    # file for no benefit -- the DACL is protected, so nothing re-widens it.
+    if not _quarantine_directory_hardened or not existed:
+        harden_quarantine_directory(directory)
+        _quarantine_directory_hardened = True
     return directory.resolve()
 
 
@@ -1709,15 +1852,19 @@ QUARANTINE_PAYLOAD_VERSION = 1
 QUARANTINE_PAYLOAD_CHUNK = 1024 * 1024
 
 
-def quarantine_stream_transform(source: Path, destination: Path, key: bytes) -> tuple[str, str]:
-    """Streams source -> destination through the keystream, returning the
-    (plain, transformed) SHA-256 digests. Streamed rather than read whole so a
-    large quarantined file cannot exhaust memory."""
+def quarantine_stream_transform(reader: Any, destination: Path, key: bytes) -> tuple[str, str]:
+    """Streams an already-open reader -> destination through the keystream,
+    returning the (plain, transformed) SHA-256 digests. Streamed rather than
+    read whole so a large quarantined file cannot exhaust memory.
+
+    Takes an open reader rather than a path so the caller can guarantee the
+    bytes hashed here came from the exact file that was inspected -- see
+    opened_for_quarantine()."""
     plain = hashlib.sha256()
     stored = hashlib.sha256()
     key_length = len(key)
     offset = 0
-    with source.open("rb") as reader, destination.open("wb") as writer:
+    with destination.open("wb") as writer:
         while True:
             chunk = reader.read(QUARANTINE_PAYLOAD_CHUNK)
             if not chunk:
@@ -1731,6 +1878,176 @@ def quarantine_stream_transform(source: Path, destination: Path, key: bytes) -> 
             stored.update(transformed)
             writer.write(transformed)
     return plain.hexdigest(), stored.hexdigest()
+
+
+# --- TOCTOU-safe access to the detected file (plan.md item 6) --------------
+#
+# Quarantine used to resolve the path, sanity-check it, then separately reopen
+# it to copy and separately unlink it by path. Three path resolutions, and
+# malware only has to win the gap between any two of them: replace the file (or
+# swap the directory for a junction) after the checks and Neutron faithfully
+# copies one file and deletes a different one -- with SYSTEM rights, in service
+# mode, on a path the attacker chose. Retry-on-lock made the window wider, not
+# narrower, because it reopened by path each attempt.
+#
+# The fix is to stop naming the file more than once. Open it exactly once,
+# deny other writers for as long as we hold it, and drive every later step --
+# reading, and the deletion itself -- off that one handle.
+#
+# On Windows this is exact:
+#   * dwShareMode = FILE_SHARE_READ alone means no other process may write,
+#     rename or delete the file while the handle is open. The file cannot
+#     change under us at all, so there is no window left to race.
+#   * FILE_FLAG_OPEN_REPARSE_POINT means a symlink or junction is opened as
+#     itself and never followed, so a redirected path is rejected instead of
+#     silently obeyed.
+#   * Deletion goes through SetFileInformationByHandle(FileDispositionInfo),
+#     which deletes the object the handle refers to. No path is re-resolved,
+#     so there is nothing left to substitute.
+#
+# On POSIX (development only -- this engine is Windows-targeted) the same
+# shape is approximated with O_NOFOLLOW plus an fstat identity check before
+# unlinking. That is weaker, and is documented as such rather than presented
+# as equivalent.
+@contextmanager
+def opened_for_quarantine(path: Path) -> Iterator[tuple[Any, Any]]:
+    """Yield (reader, delete_original) for a file opened exactly once.
+
+    `delete_original()` removes the very object the reader read, not whatever
+    the path happens to name later. Raises OSError if the file cannot be
+    opened exclusively, is a directory, or is a reparse point.
+    """
+    if os.name != "nt":
+        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            identity = os.fstat(descriptor)
+            if not stat_module.S_ISREG(identity.st_mode):
+                raise OSError(f"Karantina kaynağı normal dosya değil: {path}")
+
+            def delete_original() -> None:
+                current = os.lstat(str(path))
+                if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                    raise OSError(f"Karantina kaynağı işlem sırasında değişti: {path}")
+                os.unlink(str(path))
+
+            with open(descriptor, "rb", closefd=False) as reader:
+                yield reader, delete_original
+        finally:
+            os.close(descriptor)
+        return
+
+    import msvcrt
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    DELETE = 0x00010000
+    FILE_SHARE_READ = 0x00000001
+    OPEN_EXISTING = 3
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    FILE_DISPOSITION_INFO_CLASS = 4
+
+    class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    class FILE_DISPOSITION_INFO(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION),
+    ]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+
+    handle = kernel32.CreateFileW(
+        str(path), GENERIC_READ | DELETE, FILE_SHARE_READ, None,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        # Carries .winerror, so the caller's sharing-violation hint still works.
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    descriptor = None
+    try:
+        information = BY_HANDLE_FILE_INFORMATION()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
+            raise OSError(f"Karantina kaynağı bir klasör: {path}")
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError(f"Karantina kaynağı bir bağlantı noktası: {path}")
+
+        # Confirm the handle actually landed on the path that was validated.
+        # Opening by name re-walks every directory component, and
+        # FILE_FLAG_OPEN_REPARSE_POINT only protects the last one -- an
+        # intermediate directory swapped for a junction would otherwise
+        # redirect this open somewhere else entirely. Asking the handle where
+        # it ended up is the only answer that cannot be raced, and it is the
+        # same API Path.resolve() used to produce the expected value, so the
+        # two are directly comparable.
+        kernel32.GetFinalPathNameByHandleW.argtypes = [
+            wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ]
+        kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        name_buffer = ctypes.create_unicode_buffer(32768)
+        name_length = kernel32.GetFinalPathNameByHandleW(
+            handle, name_buffer, len(name_buffer) - 1, 0,
+        )
+        if not name_length or name_length >= len(name_buffer) - 1:
+            raise ctypes.WinError(ctypes.get_last_error())
+        opened_path = name_buffer.value
+        if opened_path.startswith("\\\\?\\UNC\\"):
+            opened_path = "\\\\" + opened_path[len("\\\\?\\UNC\\"):]
+        elif opened_path.startswith("\\\\?\\"):
+            opened_path = opened_path[len("\\\\?\\"):]
+        if os.path.normcase(opened_path) != os.path.normcase(str(path)):
+            raise OSError(
+                f"Karantina kaynağı beklenenden farklı bir dosyaya çözüldü: {path} -> {opened_path}"
+            )
+
+        def delete_original() -> None:
+            disposition = FILE_DISPOSITION_INFO(True)
+            if not kernel32.SetFileInformationByHandle(
+                handle, FILE_DISPOSITION_INFO_CLASS,
+                ctypes.byref(disposition), ctypes.sizeof(disposition),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+        # open_osfhandle transfers ownership of the handle to the CRT
+        # descriptor, so from here the handle must be released via os.close()
+        # and never CloseHandle(). closefd=False keeps the descriptor (and
+        # therefore the handle) alive after the reader is closed, because
+        # delete_original() still needs it.
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        with open(descriptor, "rb", closefd=False) as reader:
+            yield reader, delete_original
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        else:
+            kernel32.CloseHandle(handle)
 
 
 def restore_quarantine_payload(
@@ -1801,6 +2118,12 @@ def quarantine_file(raw_path: str, reason: str) -> int:
     except (OSError, RuntimeError):
         emit("error", code="QUARANTINE_SOURCE_MISSING", message="Dosya artık bulunamıyor.")
         return 2
+    # These two are fast pre-filters for a clear error message, NOT the
+    # security boundary -- every one of them is a path lookup that can be
+    # raced. The authoritative checks run against the open handle inside
+    # opened_for_quarantine(), which also proves the handle landed on exactly
+    # this resolved path, so the data-directory rule below cannot be dodged by
+    # substituting a component afterwards.
     if not original.is_file() or original.is_symlink():
         emit("error", code="QUARANTINE_SOURCE_INVALID", message="Yalnız normal dosyalar karantinaya alınabilir.")
         return 2
@@ -1817,45 +2140,48 @@ def quarantine_file(raw_path: str, reason: str) -> int:
     key = secrets.token_bytes(32)
     last_error: OSError | sqlite3.Error | None = None
     for attempt in range(5):
-        transformed = False
+        stored_written = False
+        inserted_id: int | None = None
         try:
-            # Copy-transform first, and only unlink the original once the
-            # store copy is complete and recorded. The previous version moved
-            # first and rolled back on failure, which left a window where the
-            # file existed in neither place.
-            digest, stored_digest = quarantine_stream_transform(original, destination, key)
-            transformed = True
-            original.unlink()
-            with open_database() as connection:
-                cursor = connection.execute(
-                """
-                INSERT INTO quarantine_items (
-                  original_path, stored_path, file_name, sha256, reason, quarantined_at,
-                  payload_version, payload_key, stored_sha256
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (str(original), str(destination), original.name, digest, reason[:500],
-                 datetime.now(timezone.utc).isoformat(),
-                 QUARANTINE_PAYLOAD_VERSION, key.hex(), stored_digest),
-                )
-            emit("quarantined", item_id=int(cursor.lastrowid), file_name=original.name)
+            # Ordering is chosen so that no failure can destroy the user's
+            # file. The store copy is completed first, the database row is
+            # written second, and only then is the original removed -- through
+            # the same handle it was read from. The worst outcome of a failure
+            # at any step is a redundant copy that gets cleaned up below,
+            # never a file that exists in neither place.
+            with opened_for_quarantine(original) as (reader, delete_original):
+                digest, stored_digest = quarantine_stream_transform(reader, destination, key)
+                stored_written = True
+                with open_database() as connection:
+                    cursor = connection.execute(
+                    """
+                    INSERT INTO quarantine_items (
+                      original_path, stored_path, file_name, sha256, reason, quarantined_at,
+                      payload_version, payload_key, stored_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(original), str(destination), original.name, digest, reason[:500],
+                     datetime.now(timezone.utc).isoformat(),
+                     QUARANTINE_PAYLOAD_VERSION, key.hex(), stored_digest),
+                    )
+                    inserted_id = int(cursor.lastrowid)
+                delete_original()
+            emit("quarantined", item_id=inserted_id, file_name=original.name)
             return 0
         except (OSError, sqlite3.Error) as error:
             last_error = error
-            if transformed and original.exists():
-                # The original survived, so the store copy is redundant.
+            # The original is still on disk in every failure path, so the only
+            # cleanup needed is undoing whatever partial bookkeeping was done.
+            if inserted_id is not None:
+                try:
+                    with open_database() as connection:
+                        connection.execute("DELETE FROM quarantine_items WHERE id = ?", (inserted_id,))
+                except (OSError, sqlite3.Error):
+                    pass
+            if stored_written:
                 try:
                     destination.unlink(missing_ok=True)
                 except OSError:
-                    pass
-            elif transformed:
-                # The original is already gone: the store copy is now the only
-                # copy. Put it back rather than deleting the user's file.
-                try:
-                    restore_quarantine_payload(destination, original, key,
-                                               QUARANTINE_PAYLOAD_VERSION, None)
-                    destination.unlink(missing_ok=True)
-                except (OSError, ValueError):
                     pass
             if attempt < 4:
                 time.sleep(0.4 * (attempt + 1))
@@ -3101,6 +3427,63 @@ def windows_signature_details(path: Path) -> tuple[str, str | None, str | None]:
     return mapped, thumbprint, subject
 
 
+# --- Signed-image trust gate ----------------------------------------------
+#
+# Every process watcher below (memory, behaviour, hidden-process) needs the
+# same question answered for each process that starts: "is this executable
+# validly signed by a publisher Windows already trusts?"
+#
+# This matters more than any single heuristic in the file. The largest source
+# of false positives in this engine was behavioural checks firing on ordinary
+# signed software -- the textbook case being a browser's JIT compiler
+# allocating RWX memory, which is indistinguishable from shellcode injection
+# by memory layout alone (Edge/Chrome's V8, .NET, and Java all do it). A
+# structural indicator that fires on Microsoft Edge every time a tab opens is
+# not a detection, it is noise, and noise trains the user to ignore real
+# findings.
+#
+# WinVerifyTrust is not free and a watcher polling every few seconds would
+# otherwise re-verify the same handful of images forever, so verdicts are
+# cached on identity-plus-content: (path, mtime, size). Any rewrite of the
+# file changes mtime or size and invalidates the entry, which is what stops a
+# cached "trusted" verdict from covering a binary swapped underneath it.
+TRUSTED_IMAGE_CACHE_LIMIT = 512
+_trusted_image_cache: dict[tuple[str, int, int], bool] = {}
+
+
+def is_trusted_signed_image(path: Path | str) -> bool:
+    """True only when Windows itself validates the file's Authenticode chain.
+
+    Deliberately conservative in both directions: an unreadable, missing or
+    unverifiable file is reported as untrusted (so a failure to check never
+    silently suppresses a finding), and only a full WinVerifyTrust success
+    counts as trusted (so a merely *present* signature does not).
+    """
+    if os.name != "nt":
+        return False
+    try:
+        resolved = Path(path)
+        stat_result = resolved.stat()
+        key = (os.path.normcase(str(resolved)), int(stat_result.st_mtime_ns), int(stat_result.st_size))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    cached = _trusted_image_cache.get(key)
+    if cached is not None:
+        return cached
+    # has_embedded_signature=True unconditionally: WinVerifyTrust reports an
+    # unsigned file as an error, which maps to "invalid" here, so letting it
+    # make the call is both correct and one less PE parse than checking the
+    # security directory ourselves.
+    try:
+        verdict = verify_authenticode(resolved, True) == "trusted"
+    except (OSError, ValueError):
+        verdict = False
+    if len(_trusted_image_cache) >= TRUSTED_IMAGE_CACHE_LIMIT:
+        _trusted_image_cache.clear()
+    _trusted_image_cache[key] = verdict
+    return verdict
+
+
 def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysis | None:
     if pefile is None or size < 64 or size > MAX_PE_BYTES:
         return None
@@ -3386,6 +3769,13 @@ def analyze_pe(path: Path, size: int, payload: bytes | None = None) -> PEAnalysi
             ))
             risk_score = ML_AUTONOMOUS_RISK_SCORE
 
+        # A trusted signature discounts the structural score but deliberately
+        # does NOT floor it: this value is also written to
+        # ml_shadow_observations.heuristic_score, which is the corpus the
+        # false-positive calibration in plan.md item 2 has to measure. Zeroing
+        # or capping it here would hide exactly the behaviour that work needs
+        # to see. Suppressing the user-facing finding is pe_finding()'s job,
+        # and it drops trusted-signed files outright.
         if signature_status == "trusted" and risk_score:
             risk_score = max(0, risk_score - 18)
         if signature_status == "trusted" and publisher_thumbprint:
@@ -3471,22 +3861,109 @@ def severity_for_risk(score: int) -> str:
     return "critical" if score >= 85 else "high" if score >= 60 else "medium" if score >= 35 else "low"
 
 
+# --- Independent evidence categories --------------------------------------
+#
+# Two findings about the same file only corroborate each other when they could
+# have failed independently. Counting *findings* instead of independent
+# evidence is how a detector talks itself into confidence it has not earned:
+# the five EMBER classifiers share a feature space and a training set, so their
+# agreement is one opinion repeated, not five. The same trap sits one level up
+# -- three YARA rules matching the same packer stub is one piece of content
+# evidence, not three.
+#
+# So every finding kind is mapped to the category of evidence it actually
+# comes from, and consensus is counted over categories, taking only the
+# strongest finding within each.
+#
+# `planned` categories are named here on purpose. They are the ones plan.md
+# item 3 says must exist before Neutron may claim genuinely diverse consensus,
+# and writing them down as *absent* is what keeps that gap visible instead of
+# letting a future adapter quietly inherit confidence it has not been measured
+# for. A planned category has no adapter and can never contribute evidence.
+DETECTION_CATEGORY_STATUS = {
+    "reputation-exact": "armed",     # exact hash known to Proton
+    "reputation-cloud": "armed",     # third-party hash verdict
+    "content-pattern": "armed",      # byte/text patterns in the content itself
+    "static-pe": "armed",            # PE structure heuristics AND the EMBER models
+    "filename": "armed",             # naming and metadata only
+    "container": "armed",            # archive structure abuse
+    "behaviour": "armed",            # runtime watchers, never available to a static scan
+    "raw-byte-ml": "planned",        # no adapter yet -- see plan.md item 3
+}
+
+DETECTION_CATEGORY_BY_KIND = {
+    "signature": "reputation-exact",
+    "test-signature": "reputation-exact",
+    "cloud-reputation": "reputation-cloud",
+    "network-reputation": "reputation-cloud",
+    "yara": "content-pattern",
+    "script-analysis": "content-pattern",
+    "document-analysis": "content-pattern",
+    # Deliberately the same category as the models: both read PE structure, so
+    # a heuristic agreeing with EMBER is not independent confirmation.
+    "pe-analysis": "static-pe",
+    "review": "filename",
+    "usb-autorun": "filename",
+    "archive-structure": "container",
+    "behavior": "behaviour",
+    "memory-injection": "behaviour",
+    "hidden-process": "behaviour",
+    "persistence": "behaviour",
+    "ransomware-canary": "behaviour",
+    "ransomware-bulk": "behaviour",
+    "service-tamper": "behaviour",
+}
+
+# Categories a static file scan can actually produce. "behaviour" is armed but
+# never appears here: it comes from the live watchers, so a file sitting on
+# disk cannot earn behavioural corroboration at scan time.
+STATIC_SCAN_CATEGORIES = frozenset({
+    "reputation-exact", "reputation-cloud", "content-pattern", "static-pe",
+    "filename", "container",
+})
+
+
+def detection_category(kind: str) -> str | None:
+    """Evidence category for a finding kind, or None when it carries no
+    independent evidence (informational notices such as archive-warning)."""
+    category = DETECTION_CATEGORY_BY_KIND.get(kind)
+    if category is None or DETECTION_CATEGORY_STATUS.get(category) != "armed":
+        return None
+    return category
+
+
 def combine_static_risk(findings: list[Finding]) -> None:
-    analytical = [
-        finding for finding in findings
-        if finding.kind in {"review", "yara", "pe-analysis"} and finding.risk_score is not None
-    ]
-    if len({finding.kind for finding in analytical}) < 2:
+    """Raise the leading finding's score when independent categories agree.
+
+    Only the strongest finding per category contributes, so repeated evidence
+    of the same kind cannot inflate the result -- previously three YARA hits
+    were summed as three separate confirmations of each other.
+    """
+    best_by_category: dict[str, Finding] = {}
+    for finding in findings:
+        if finding.risk_score is None:
+            continue
+        category = detection_category(finding.kind)
+        if category is None or category not in STATIC_SCAN_CATEGORIES:
+            continue
+        current = best_by_category.get(category)
+        if current is None or (finding.risk_score or 0) > (current.risk_score or 0):
+            best_by_category[category] = finding
+    if len(best_by_category) < 2:
         return
+    contributors = list(best_by_category.values())
     primary = next(
-        (finding for finding in analytical if finding.kind == "pe-analysis"),
-        max(analytical, key=lambda finding: finding.risk_score or 0),
+        (finding for finding in contributors if finding.kind == "pe-analysis"),
+        max(contributors, key=lambda finding: finding.risk_score or 0),
     )
-    scores = sorted((finding.risk_score or 0 for finding in analytical), reverse=True)
+    scores = sorted((finding.risk_score or 0 for finding in contributors), reverse=True)
     combined = min(100, round(scores[0] + sum(scores[1:]) * 0.35))
     primary.risk_score = combined
     primary.severity = severity_for_risk(combined)
-    primary.reason = f"Birleşik statik risk {combined}/100 · {primary.reason}"
+    primary.reason = (
+        f"Birleşik statik risk {combined}/100 · {len(best_by_category)} bağımsız kanıt kategorisi "
+        f"({', '.join(sorted(best_by_category))}) · {primary.reason}"
+    )
 
 
 def append_archive_notice(
@@ -4668,6 +5145,38 @@ def inspect_file(
     return findings
 
 
+def windows_process_image_path(process_id: int) -> str | None:
+    """Image path for one PID, without enumerating every process.
+
+    Used on the service control pipe, where a full snapshot per connection
+    would be a needless sweep of the machine just to identify one caller.
+    """
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(process_id))
+    if not handle:
+        return None
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buffer))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return None
+        return buffer.value or None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def windows_process_snapshot() -> dict[int, str]:
     """Return readable Windows process image paths without admin privileges."""
     if os.name != "nt":
@@ -4850,14 +5359,25 @@ def detect_hidden_processes() -> list["Finding"]:
     # PID 0 ("System Idle Process") is a permanent, universal case: Toolhelp32
     # always reports it, EnumProcesses never does -- not a hiding indicator.
     hidden = set.intersection(*samples) - {0}
-    return [
-        Finding(
+    if not hidden:
+        return []
+    # A process whose image is still resolvable AND validly signed is not
+    # hiding from anything: protected-process-light and cross-session images
+    # (anti-malware services, DRM and browser sandbox helpers) routinely fail
+    # to open for one enumeration API while succeeding for the other. Real
+    # user-mode hiding leaves nothing legitimately signed behind to find.
+    process_paths = windows_process_snapshot()
+    findings: list[Finding] = []
+    for pid in sorted(hidden):
+        raw_path = process_paths.get(pid, "")
+        if raw_path and is_trusted_signed_image(Path(raw_path)):
+            continue
+        findings.append(Finding(
             path=f"pid://{pid}", kind="hidden-process", severity="critical",
             reason=f"PID {pid} yalnızca bir process listeleme API'sinde görünüyor (olası kullanıcı-modu gizleme)",
             sha256=None, risk_score=90,
-        )
-        for pid in hidden
-    ]
+        ))
+    return findings
 
 
 def active_tcp_connections() -> list[tuple[int, str, int]]:
@@ -5092,6 +5612,16 @@ def is_neutron_process_or_descendant(
     return False
 
 
+# How many private RWX regions a process must hold before that fact alone is
+# worth reporting. The original 3 was chosen from the injection side of the
+# problem without measuring the benign side, and it fired on essentially every
+# JIT-hosting process on a normal desktop. Raising it does not weaken
+# injection detection meaningfully -- shellcode loaders allocate RWX, but so
+# does the browser they inject into, so the count was never the discriminator.
+# The signing check in watch_memory() is what actually separates the two.
+MEMORY_RWX_REPORT_THRESHOLD = 12
+
+
 def watch_memory() -> int:
     """Runs as a service_host() thread: on each newly-started process
     (same new-process detection approach as watch_behavior(), kept as its
@@ -5153,15 +5683,28 @@ def watch_memory() -> int:
                     except Exception:  # noqa: BLE001 -- a process can exit/deny access mid-scan
                         pass
 
+                # A YARA hit in live memory is a targeted malware signature and
+                # is reported whatever the file's signing status says -- signed
+                # malware exists, and a stolen certificate must not buy silence.
+                #
+                # An RWX region count on its own is the opposite: weak, purely
+                # structural evidence that legitimate JIT compilers produce by
+                # design. It is therefore gated on the image NOT being validly
+                # signed, and on a much higher count than the original 3, which
+                # every Chromium tab, .NET app and JVM on the machine cleared.
                 rwx_count = rwx_private_region_count(pid)
-                if not yara_hits and rwx_count < 3:
+                rwx_alone_reportable = (
+                    rwx_count >= MEMORY_RWX_REPORT_THRESHOLD
+                    and not is_trusted_signed_image(image_path)
+                )
+                if not yara_hits and not rwx_alone_reportable:
                     continue
 
                 severity = "critical" if yara_hits else "medium"
                 reason_parts = []
                 if yara_hits:
                     reason_parts.append(f"YARA belleği eşleşmesi: {', '.join(yara_hits[:3])}")
-                if rwx_count >= 3:
+                if rwx_alone_reportable or (yara_hits and rwx_count >= MEMORY_RWX_REPORT_THRESHOLD):
                     reason_parts.append(f"{rwx_count} adet şüpheli RWX özel bellek bölgesi (process hollowing/injection izi olabilir)")
                 finding = Finding(
                     path=str(image_path), kind="memory-injection", severity=severity,
@@ -5208,6 +5751,44 @@ def autorun_startup_directories() -> list[Path]:
     if program_data:
         directories.append(Path(program_data) / "Microsoft/Windows/Start Menu/Programs/StartUp")
     return directories
+
+
+def command_line_executable(value: str) -> Path | None:
+    """Best-effort extraction of the program a Run-key command line invokes.
+
+    Handles the two shapes Windows actually stores: a quoted path followed by
+    arguments, and a bare path where the arguments start at the first switch.
+    Returns None rather than guessing when neither yields an existing file --
+    callers use this to *suppress* a finding, so an unparseable value must
+    fall through to being reported, not silently trusted.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.startswith('"'):
+        closing = text.find('"', 1)
+        candidates = [text[1:closing] if closing > 1 else text[1:]]
+    else:
+        # An unquoted path containing spaces is genuinely ambiguous, so try
+        # the whole string first and then each cut at a switch marker,
+        # keeping the first candidate that names a real file.
+        candidates = [text]
+        for marker in (" /", " -"):
+            index = text.find(marker)
+            while index > 0:
+                candidates.append(text[:index])
+                index = text.find(marker, index + 1)
+    for candidate in candidates:
+        try:
+            resolved = Path(os.path.expandvars(candidate.strip()))
+        except (OSError, RuntimeError, ValueError):
+            continue
+        try:
+            if resolved.is_file():
+                return resolved
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def persistence_snapshot() -> dict[str, str]:
@@ -5987,7 +6568,17 @@ def suspicious_process_finding(
     reasons: list[tuple[int, str]] = []
     if double_extension:
         reasons.append((45, "belge uzantısını taklit eden çalıştırılabilir dosya"))
-    elif location is not None:
+    elif location is not None and not is_trusted_signed_image(resolved):
+        # Running from Temp or Downloads is only suspicious for something
+        # nobody vouched for. Practically every Windows installer unpacks
+        # itself into Temp and runs from there, and every browser download is
+        # launched from Downloads -- penalising validly signed software for
+        # the folder it happens to sit in is a pure false-positive generator.
+        # The command-line checks below are deliberately NOT gated this way:
+        # they judge what a process is doing, not who signed it, and the
+        # LOLBins they cover (powershell, mshta, regsvr32, certutil) are all
+        # signed by Microsoft precisely because that is what makes them useful
+        # to an attacker.
         reasons.append((22, f"{location} içinden çalıştırıldı"))
 
     suspicious_arguments = {
@@ -6083,6 +6674,15 @@ def watch_behavior() -> int:
             current_persistence = persistence_snapshot()
             for identity, value in current_persistence.items():
                 if identity in persistence and persistence[identity] == value:
+                    continue
+                # Autostart entries change constantly on a healthy machine:
+                # every updater rewrites its own Run value on each version
+                # bump. Reporting those taught the user that this detector
+                # means nothing. An entry pointing at a validly signed
+                # executable is therefore not news -- an entry pointing at
+                # something unsigned, unreadable or unparseable still is.
+                target = command_line_executable(value)
+                if target is not None and is_trusted_signed_image(target):
                     continue
                 finding = Finding(
                     path=identity,
@@ -6519,13 +7119,7 @@ class _SECURITY_ATTRIBUTES(ctypes.Structure):
     ]
 
 
-def authenticated_user_pipe_security() -> tuple[_SECURITY_ATTRIBUTES | None, ctypes.c_void_p | None]:
-    """Allow SYSTEM/admin full access and signed-in users pipe read/write.
-
-    A service running as LocalSystem otherwise inherits a restrictive default
-    DACL. That prevented the normal desktop UI and user processes hosting the
-    AMSI provider from connecting to the service-created named pipes.
-    """
+def _pipe_security_from_sddl(sddl: str) -> tuple[_SECURITY_ATTRIBUTES | None, ctypes.c_void_p | None]:
     if os.name != "nt":
         return None, None
     from ctypes import wintypes
@@ -6536,14 +7130,129 @@ def authenticated_user_pipe_security() -> tuple[_SECURITY_ATTRIBUTES | None, cty
     convert.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
     descriptor = ctypes.c_void_p()
     descriptor_size = wintypes.DWORD(0)
-    # Protected DACL: SYSTEM/admins full access, authenticated users read/write.
-    sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
     if not convert(sddl, 1, ctypes.byref(descriptor), ctypes.byref(descriptor_size)):
         return None, None
     attributes = _SECURITY_ATTRIBUTES(
         ctypes.sizeof(_SECURITY_ATTRIBUTES), descriptor.value, False,
     )
     return attributes, descriptor
+
+
+def authenticated_user_pipe_security() -> tuple[_SECURITY_ATTRIBUTES | None, ctypes.c_void_p | None]:
+    """DACL for the AMSI scan pipe: SYSTEM/admins full, authenticated users
+    read/write.
+
+    This pipe is deliberately reachable by any signed-in account, because the
+    processes that use it are not ours: Windows loads the AMSI provider into
+    whatever script host is running (powershell.exe, wscript.exe, Office), and
+    those may belong to any logged-in user. Broad access is safe *here* because
+    the protocol is scan-only -- a buffer goes in, a verdict comes back, and no
+    command on this pipe changes any state. The control pipe is a completely
+    different proposition; see service_pipe_security().
+    """
+    return _pipe_security_from_sddl("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)")
+
+
+def service_pipe_security() -> tuple[_SECURITY_ATTRIBUTES | None, ctypes.c_void_p | None]:
+    """DACL for the service *control* pipe (plan.md item 9, "IPC yetkisi").
+
+    This pipe previously shared the AMSI pipe's DACL, which granted
+    Authenticated Users read/write. Because the service runs as LocalSystem
+    and the command handler dispatched purely on the "cmd" field with no idea
+    who was calling, any signed-in non-admin account -- or any malware running
+    as that account -- could send update_setting and turn protection off,
+    bypassing the tamper-confirmation dialogs entirely, or drive full-disk
+    scans as SYSTEM at will.
+
+    INTERACTIVE (IU) replaces Authenticated Users: the desktop UI runs in the
+    user's interactive session and still connects, while service accounts,
+    network logons and scheduled-task identities no longer can.
+
+    A DACL alone cannot finish the job, because every interactive user still
+    qualifies. It is the coarse first layer; service_client_authorized()
+    below is the one that actually decides.
+    """
+    return _pipe_security_from_sddl("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)")
+
+
+def named_pipe_client_process_id(pipe: Any) -> int | None:
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetNamedPipeClientProcessId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG)]
+    kernel32.GetNamedPipeClientProcessId.restype = wintypes.BOOL
+    client_id = wintypes.ULONG(0)
+    if not kernel32.GetNamedPipeClientProcessId(pipe, ctypes.byref(client_id)):
+        return None
+    return int(client_id.value) or None
+
+
+# Rejected connections are recorded, not just dropped: a process trying to
+# drive the antivirus service is exactly the kind of thing the user should be
+# able to see afterwards. It is rate-limited because the trigger is entirely
+# attacker-controlled -- an unauthorized caller can reconnect in a tight loop,
+# and a detector that writes a database row per attempt is a way to fill the
+# disk, not a way to report an intrusion.
+SERVICE_REJECTION_REPORT_INTERVAL_SECONDS = 300
+_last_service_rejection_report = 0.0
+_suppressed_service_rejections = 0
+
+
+def report_rejected_service_client(client_id: int | None) -> None:
+    global _last_service_rejection_report, _suppressed_service_rejections
+    now = time.monotonic()
+    if now - _last_service_rejection_report < SERVICE_REJECTION_REPORT_INTERVAL_SECONDS:
+        _suppressed_service_rejections += 1
+        return
+    suppressed = _suppressed_service_rejections
+    _suppressed_service_rejections = 0
+    _last_service_rejection_report = now
+    image_path = windows_process_image_path(client_id) if client_id else None
+    extra = f" Son {SERVICE_REJECTION_REPORT_INTERVAL_SECONDS // 60} dakikada {suppressed} benzer deneme daha engellendi." if suppressed else ""
+    try:
+        save_protection_event("service-client-rejected", Finding(
+            path=image_path or f"pid://{client_id or 0}",
+            kind="service-tamper",
+            severity="high",
+            reason=(
+                "Yetkisiz bir süreç Neutron servis denetim kanalına bağlanmayı denedi ve reddedildi."
+                f"{extra}"
+            ),
+            sha256=None,
+            risk_score=70,
+        ))
+    except (OSError, sqlite3.Error):
+        # Reporting must never take the pipe server down; the connection has
+        # already been refused, which is the part that matters.
+        pass
+
+
+def service_client_authorized(pipe: Any) -> bool:
+    """True only when the control-pipe client is a Neutron process.
+
+    Identity comes from the pipe itself (GetNamedPipeClientProcessId), not
+    from anything the caller sends, so it cannot be spoofed by the protocol.
+    The image path is then required to sit inside this build's own install
+    root -- the same anchor the watchers already use to recognise Neutron
+    helpers, and a meaningful one because an unprivileged user cannot write a
+    binary into that directory.
+
+    Fails closed: an unresolvable PID or image path is refused. The honest
+    limit, identical to the one documented for self-protection: this does not
+    stop malware that has already compromised a genuine Neutron process, since
+    that process *is* the legitimate client by any measure available here.
+    """
+    if os.name != "nt":
+        return True
+    client_id = named_pipe_client_process_id(pipe)
+    if client_id is None:
+        return False
+    image_path = windows_process_image_path(client_id)
+    if not image_path:
+        return False
+    return is_neutron_owned_process_path(image_path)
 
 
 SERVICE_PIPE_NAME = r"\\.\pipe\neutron-service"
@@ -6621,7 +7330,7 @@ def service_host() -> int:
     kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    pipe_security, _pipe_security_descriptor = authenticated_user_pipe_security()
+    pipe_security, _pipe_security_descriptor = service_pipe_security()
     pipe_security_pointer = ctypes.byref(pipe_security) if pipe_security is not None else None
 
     global _emit_sink
@@ -6682,6 +7391,16 @@ def service_host() -> int:
                 continue
             connected = kernel32.ConnectNamedPipe(pipe, None)
             if not connected and ctypes.get_last_error() != ERROR_PIPE_CONNECTED:
+                kernel32.CloseHandle(pipe)
+                continue
+            # Authorize once per connection, before a single byte is read and
+            # before this handle is published as the broadcast target. Checking
+            # per command would be both slower and weaker: an unauthorized
+            # client would still be receiving every protection event this
+            # service emits while its commands were being rejected.
+            if not service_client_authorized(pipe):
+                report_rejected_service_client(named_pipe_client_process_id(pipe))
+                kernel32.DisconnectNamedPipe(pipe)
                 kernel32.CloseHandle(pipe)
                 continue
             with pipe_lock:
@@ -7732,6 +8451,30 @@ def scan_targets(
         finding for finding in findings
         if finding.kind in {"review", "yara", "pe-analysis", "archive-warning", "archive-structure"}
     ]
+
+    # Act on what was found, do not merely report it.
+    #
+    # Automatic quarantine used to live only in the real-time watchers, so a
+    # scan could say "signature matched" while leaving the file exactly where
+    # it was. That is indefensible for an antivirus: the user asked it to
+    # scan, it identified known malware by exact hash, and then did nothing.
+    #
+    # The same gate the watchers use is reused rather than reimplemented, so
+    # every existing safety rule still applies unchanged: nothing under a
+    # protected system folder, nothing belonging to Neutron itself, nothing
+    # excluded, and the burst brake that stops a bad signature batch sweeping
+    # a directory. Findings it declines stay pending for the user, exactly as
+    # before.
+    quarantined: list[dict[str, Any]] = []
+    for finding in confirmed:
+        try:
+            event_id = save_protection_event(f"{mode}-scan", finding)
+            quarantine_item_id = auto_quarantine_confirmed_finding(event_id, finding)
+        except (OSError, sqlite3.Error):
+            continue
+        if quarantine_item_id is not None:
+            quarantined.append({"path": finding.path, "quarantine_item_id": quarantine_item_id})
+
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
     limited = scanned >= max_files
     history_saved = False
@@ -7758,6 +8501,8 @@ def scan_targets(
         scanned=scanned,
         confirmed_count=len(confirmed),
         review_count=len(review),
+        quarantined_count=len(quarantined),
+        quarantined=quarantined[:25],
         findings=[asdict(finding) for finding in findings[:25]],
         elapsed_ms=elapsed_ms,
         limited=limited,

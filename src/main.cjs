@@ -6,7 +6,9 @@ const { existsSync, readFileSync, writeFileSync, mkdirSync } = require('fs');
 const path = require('path');
 const { ProtonUpdater } = require('./proton-updater.cjs');
 const { FeatureUpdater } = require('./feature-updater.cjs');
-const { deviceHash, parseLicense } = require('./license.cjs');
+const {
+  decryptStoredLicense, deviceHash, encryptStoredLicense, parseLicense,
+} = require('./license.cjs');
 const {
   amsiRegistrationCommand,
   psQuoteSingle,
@@ -26,6 +28,12 @@ const isProvisionSecurityMode = process.argv.includes('--provision-security');
 const isInstallProtonArchiveMode = process.argv.includes('--install-proton-archive');
 const isActivateLicenseFileMode = process.argv.includes('--activate-license-file');
 const isMaintenanceMode = isPrepareUninstallMode || isProvisionSecurityMode || isInstallProtonArchiveMode || isActivateLicenseFileMode;
+
+// See startEnabledWatchers() for the rationale. Read through a function rather
+// than captured once so tools that spawn the app inherit it predictably.
+function isDevSafeMode() {
+  return process.env.NEUTRON_DEV_SAFE === '1';
+}
 
 app.setName('Neutron');
 if (process.platform === 'win32') app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
@@ -194,6 +202,9 @@ function readMachineLicenseFromRegistry() {
 
 function writeMachineLicenseToRegistry(key) {
   if (process.platform !== 'win32') return false;
+  // Dev-safe mode never touches HKLM. The file copy still works, so the app
+  // remains usable for development without leaving machine-wide state behind.
+  if (isDevSafeMode()) return false;
   try {
     execFileSync(
       regExePath(),
@@ -259,21 +270,25 @@ function computeLicenseStatus() {
   // both of which the app can only read, never repair; a profile copy is one
   // this account always owns. Best effort -- failing to mirror must never
   // turn a working licence into a blocked app.
+  // The mirror is written in the same envelope it was read in, never in the
+  // clear: this copy lands in the user's profile, which is the least
+  // protected of the three locations.
   const mirrorToUserProfile = (key) => {
     try {
       const target = userLicensePath();
       if (existsSync(target)) return;
       mkdirSync(path.dirname(target), { recursive: true });
-      writeFileSync(target, `${String(key).trim()}\n`, { encoding: 'utf8' });
+      writeFileSync(target, `${encryptStoredLicense(key)}\n`, { encoding: 'utf8', mode: 0o600 });
     } catch { /* the machine-wide copy still works */ }
   };
 
   const registryKey = readMachineLicenseFromRegistry();
   if (registryKey) {
     try {
-      activeLicense = parseLicense(registryKey);
+      const key = decryptStoredLicense(registryKey);
+      activeLicense = parseLicense(key);
       activeLicensePath = LICENSE_REGISTRY_KEY;
-      mirrorToUserProfile(registryKey);
+      mirrorToUserProfile(key);
       return { ok: true, active: true, license: activeLicense };
     } catch (error) {
       failures.push({ path: LICENSE_REGISTRY_KEY, reason: error.message });
@@ -288,7 +303,7 @@ function computeLicenseStatus() {
       continue;
     }
     try {
-      const stored = readFileSync(candidate, 'utf8').trim();
+      const stored = decryptStoredLicense(readFileSync(candidate, 'utf8').trim());
       activeLicense = parseLicense(stored);
       activeLicensePath = candidate;
       mirrorToUserProfile(stored);
@@ -314,15 +329,24 @@ function computeLicenseStatus() {
   // A licence file that exists but did not parse is a different situation
   // from no licence at all, and the user needs to be told which one it is.
   const presentButRejected = failures.find((failure) => failure.reason !== 'Dosya yok.');
+  // Expiry is singled out because it is the only failure the user can fix by
+  // renewing rather than by re-entering something. parseLicense reports it as
+  // a message, so it is matched here rather than being re-derived -- there is
+  // exactly one place that decides a licence has expired (license.cjs) and it
+  // should stay that way.
+  const expired = failures.some((failure) => /suresi dolmus/i.test(failure.reason || ''));
   return {
     ok: true,
     active: false,
+    expired,
     deviceHash: currentDeviceHash,
     failures,
     message: deviceHashError
-      || (presentButRejected
-        ? `Lisans dosyası bulundu ama kabul edilmedi (${presentButRejected.path}): ${presentButRejected.reason}`
-        : 'Kurulum sırasında geçerli bir lisans girilmesi gerekiyor.'),
+      || (expired
+        ? 'Neutron lisansınızın süresi doldu. Korumaların yeniden başlaması için lisansı yenileyin.'
+        : presentButRejected
+          ? `Lisans dosyası bulundu ama kabul edilmedi (${presentButRejected.path}): ${presentButRejected.reason}`
+          : 'Kurulum sırasında geçerli bir lisans girilmesi gerekiyor.'),
   };
 }
 
@@ -347,11 +371,16 @@ function saveLicense(key, options = {}) {
     const license = parseLicense(String(key || ''));
     const target = options.machineWide ? machineLicensePath() : userLicensePath();
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-    writeFileSync(target, `${String(key).trim()}\n`, { encoding: 'utf8', mode: 0o600 });
+    // Both copies go down in the same envelope. The registry one especially:
+    // HKLM\Software\Neutron is world-readable by design (every account has to
+    // be able to see the activation), so a plaintext key there was readable by
+    // any process on the machine.
+    const stored = encryptStoredLicense(key);
+    writeFileSync(target, `${stored}\n`, { encoding: 'utf8', mode: 0o600 });
     // Machine-wide activation is the installer's path, and it runs elevated,
     // so this is where the registry copy every account can read gets written.
     // The file above stays as the fallback and for unelevated in-app activation.
-    if (options.machineWide) writeMachineLicenseToRegistry(key);
+    if (options.machineWide) writeMachineLicenseToRegistry(stored);
     activeLicense = license;
     activeLicensePath = target;
     invalidateLicenseStatusCache();
@@ -400,16 +429,19 @@ function revealStoredLicense() {
   // activeLicensePath is a registry key, not a file path, when the licence
   // came from HKLM -- reading it as a file would throw.
   if (activeLicensePath === LICENSE_REGISTRY_KEY) {
-    const key = readMachineLicenseFromRegistry();
-    return key
-      ? { ok: true, key }
-      : { ok: false, message: 'Kayıtlı lisans okunamadı.' };
+    const stored = readMachineLicenseFromRegistry();
+    if (!stored) return { ok: false, message: 'Kayıtlı lisans okunamadı.' };
+    try {
+      return { ok: true, key: decryptStoredLicense(stored) };
+    } catch (error) {
+      return { ok: false, message: `Kayıtlı lisans okunamadı: ${error.message}` };
+    }
   }
   // The file was readable when licenseStatus() ran, but that may have been up
   // to the cache lifetime ago; an unguarded read here throws through the IPC
   // handler instead of returning a result the renderer can display.
   try {
-    return { ok: true, key: readFileSync(activeLicensePath, 'utf8').trim() };
+    return { ok: true, key: decryptStoredLicense(readFileSync(activeLicensePath, 'utf8').trim()) };
   } catch (error) {
     return { ok: false, message: `Lisans dosyası okunamadı: ${error.message}` };
   }
@@ -627,6 +659,15 @@ function runRegsvr32Directly(dllPath, unregister) {
 }
 
 function runElevatedRegsvr32(dllPath, unregister, options = {}) {
+  // The other privileged choke point: registering the AMSI provider COM
+  // object machine-wide. See runElevatedPowerShell for the same reasoning.
+  if (isDevSafeMode()) {
+    return Promise.resolve({
+      ok: false,
+      code: 'DEV_SAFE_MODE',
+      message: 'NEUTRON_DEV_SAFE=1: AMSI kaydı yapılmadı (geliştirme modu).',
+    });
+  }
   if (!existsSync(dllPath)) {
     return Promise.resolve({
       ok: false,
@@ -644,8 +685,30 @@ function runElevatedRegsvr32(dllPath, unregister, options = {}) {
 // If it does not, the registration is rolled back immediately: a machine
 // whose PowerShell has been made unusable is a far worse outcome than an
 // installation without AMSI protection.
-function probeAmsiHostSurvivesScan() {
+// The probe runs during installation, immediately after ~500 MB has been
+// written to Program Files -- so the disk is busy, Defender is scanning the
+// freshly written tree, and a PowerShell cold start is far slower than it
+// would ever be on an idle machine. 30 s was not enough, and the failure was
+// then reported as a provider crash.
+//
+// That misreport mattered: Node gives close() a null code when the child was
+// killed by a signal, which is exactly what our own timeout does. So "kod
+// null" meant "we killed it", not "it died" -- and a healthy registration was
+// rolled back on the strength of it. A timeout and a heap corruption are now
+// distinguished, because they call for opposite conclusions.
+// Ceiling for the baseline measurement, and the floor for the verification
+// budget derived from it. A machine that cannot start PowerShell at all
+// inside two minutes has a problem this code cannot diagnose.
+const AMSI_PROBE_CEILING_MS = 120_000;
+const AMSI_PROBE_FLOOR_MS = 45_000;
+// How much slower than the unmodified baseline the provider is allowed to
+// make a PowerShell start before we call it hung rather than slow.
+const AMSI_PROBE_SLACK_FACTOR = 4;
+
+function runAmsiProbeOnce(timeoutMs) {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let timedOut = false;
     const child = spawn(
       'powershell.exe',
       ['-NoProfile', '-NonInteractive', '-Command', "& { Write-Output 'neutron-amsi-probe' }"],
@@ -655,31 +718,97 @@ function probeAmsiHostSurvivesScan() {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { stdout = `${stdout}${chunk}`.slice(-4_000); });
     child.stderr.resume();
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* best effort */ } }, 30_000);
-    child.once('error', (error) => { clearTimeout(timer); resolve({ ok: false, message: error.message }); });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch { /* best effort */ }
+    }, timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, timedOut: false, message: error.message });
+    });
     child.once('close', (code) => {
       clearTimeout(timer);
-      if (code === 0 && stdout.includes('neutron-amsi-probe')) return resolve({ ok: true });
+      const elapsedMs = Date.now() - startedAt;
+      const elapsedSeconds = Math.round(elapsedMs / 1000);
+      if (code === 0 && stdout.includes('neutron-amsi-probe')) {
+        return resolve({ ok: true, elapsedMs, elapsedSeconds });
+      }
+      if (timedOut) {
+        return resolve({
+          ok: false,
+          timedOut: true,
+          elapsedSeconds,
+          message: `Windows PowerShell ${elapsedSeconds} saniye içinde yanıt vermedi.`,
+        });
+      }
       const status = Number(code) >>> 0;
-      const crashed = status === 0xC0000374
-        ? 'Windows PowerShell işlemi çöktü (STATUS_HEAP_CORRUPTION / 0xC0000374).'
-        : `Windows PowerShell beklenmedik biçimde sonlandı (kod ${code}).`;
       resolve({
         ok: false,
-        code: 'AMSI_PROVIDER_UNSAFE',
+        timedOut: false,
         exitCode: code,
-        message: `AMSI sağlayıcısı yüklendikten sonra Windows PowerShell çalışamadı, kayıt geri alındı. ${crashed}`,
+        message: status === 0xC0000374
+          ? 'Windows PowerShell işlemi çöktü (STATUS_HEAP_CORRUPTION / 0xC0000374).'
+          : `Windows PowerShell beklenmedik biçimde sonlandı (kod ${code}).`,
       });
     });
   });
 }
 
+// Every AMSI host in the system -- PowerShell, wscript, Office -- loads this
+// DLL in-process from now on, so a provider that faults takes those hosts
+// with it. Before leaving a fresh registration in place, spend one throwaway
+// PowerShell process proving that an AMSI-scanned statement still survives.
+// If it does not, the registration is rolled back immediately: a machine
+// whose PowerShell has been made unusable is a far worse outcome than an
+// installation without AMSI protection.
+async function probeAmsiHostSurvivesScan(baseline) {
+  // Any fixed timeout is a guess about hardware we have never seen. The
+  // baseline measured before registration says how long a PowerShell cold
+  // start costs on *this* machine with *this* disk under *these* conditions,
+  // so the budget is derived from it instead: the question worth asking is
+  // "did the provider make this dramatically slower", not "did it beat a
+  // number someone picked on a fast laptop".
+  const budget = baseline?.ok
+    ? Math.min(AMSI_PROBE_CEILING_MS, Math.max(AMSI_PROBE_FLOOR_MS, baseline.elapsedMs * AMSI_PROBE_SLACK_FACTOR))
+    : AMSI_PROBE_CEILING_MS;
+
+  let attempt = await runAmsiProbeOnce(budget);
+  // A timeout is retried once; a crash is not. A provider that corrupts the
+  // host heap does so immediately and deterministically, so retrying tells us
+  // nothing and only doubles the damage. A timeout is the opposite: the most
+  // likely cause is transient disk contention from the install that just
+  // finished, and by the retry the relevant pages are usually cached.
+  if (!attempt.ok && attempt.timedOut) attempt = await runAmsiProbeOnce(budget);
+  if (attempt.ok) return { ok: true };
+
+  const baselineNote = baseline?.ok
+    ? ` Sağlayıcı kaydedilmeden önce aynı ölçüm ${baseline.elapsedSeconds} saniye sürmüştü.`
+    : '';
+  return {
+    ok: false,
+    code: attempt.timedOut ? 'AMSI_PROBE_TIMEOUT' : 'AMSI_PROVIDER_UNSAFE',
+    exitCode: attempt.exitCode ?? null,
+    budgetSeconds: Math.round(budget / 1000),
+    baselineSeconds: baseline?.ok ? baseline.elapsedSeconds : null,
+    message: attempt.timedOut
+      ? `AMSI sağlayıcısı doğrulanamadı, kayıt geri alındı: ${attempt.message}${baselineNote} `
+        + 'Bu bir çökme değil, yanıt gecikmesidir.'
+      : `AMSI sağlayıcısı yüklendikten sonra Windows PowerShell çalışamadı, kayıt geri alındı. ${attempt.message}`,
+  };
+}
+
 // Registers the provider and keeps it only if the probe above passes.
 async function registerAmsiProviderVerified(options = {}) {
   const dllPath = amsiDllPath();
+  // Measured before the provider is registered, so it reflects the machine
+  // and not the thing under test. Also pays the PowerShell cold-start cost
+  // once up front, which is the single largest term on a slow disk -- the
+  // verification run afterwards then starts from a warm cache, exactly as the
+  // comparison assumes.
+  const baseline = await runAmsiProbeOnce(AMSI_PROBE_CEILING_MS);
   const registration = await runElevatedRegsvr32(dllPath, false, options);
   if (!registration.ok) return registration;
-  const probe = await probeAmsiHostSurvivesScan();
+  const probe = await probeAmsiHostSurvivesScan(baseline);
   if (probe.ok) return registration;
   await runElevatedRegsvr32(dllPath, true, options);
   return probe;
@@ -699,7 +828,18 @@ function watchdogExecPath() {
   return { exe: process.execPath, args: app.isPackaged ? ['--hidden'] : [app.getAppPath(), '--hidden'] };
 }
 
+// Single choke point for every privileged system change Neutron makes:
+// watchdog scheduled task, Windows service install/uninstall, firewall rules,
+// system-audit fixes. Guarding it here covers all of them at once, instead of
+// relying on remembering to guard each IPC handler that leads to one.
 function runElevatedPowerShell(psCommand, options = {}) {
+  if (isDevSafeMode()) {
+    return Promise.resolve({
+      ok: false,
+      code: 'DEV_SAFE_MODE',
+      message: 'NEUTRON_DEV_SAFE=1: sistem değişikliği yapılmadı (geliştirme modu).',
+    });
+  }
   return runPowerShell(psCommand, options);
 }
 
@@ -1187,6 +1327,18 @@ async function writeProvisionSettings(settings) {
 // second UAC prompt (elevated:false), persists the same settings for both
 // the desktop app and LocalSystem service, and reports every component.
 async function provisionDefaultSecurityComponents() {
+  // Provisioning registers an AMSI COM provider machine-wide, installs a
+  // Windows service and writes HKLM. None of that belongs on a development
+  // machine, and all of it is awkward to undo by hand.
+  if (isDevSafeMode()) {
+    return {
+      ok: true,
+      skipped: true,
+      results: {},
+      warnings: ['NEUTRON_DEV_SAFE=1: güvenlik bileşenleri bilerek kurulmadı.'],
+      message: 'Geliştirme modu: sistem değişikliği yapılmadı.',
+    };
+  }
   const disabledSettings = {
     amsi_protection_enabled: false,
     watchdog_protection_enabled: false,
@@ -1426,15 +1578,22 @@ async function performFeatureUpdate() {
     try {
       const updater = createFeatureUpdater();
       const check = await updater.check();
+      if (check.revoked && check.currentVersion !== '0.00.000') {
+        updater.quarantineCurrentFeature('killswitch');
+        sendFeatureUpdateEvent({ stage: 'revoked', version: check.currentVersion });
+      }
       if (!check.available) {
         const status = updater.status();
         sendFeatureUpdateEvent({ stage: 'current', version: check.latestVersion || status.version });
         return {
           ...status,
           updated: false,
-          message: check.reason === 'no-release'
-            ? 'No Machine Learning Feature Update has been published yet.'
-            : 'Machine Learning Feature Update is current.',
+          revoked: Boolean(check.revoked),
+          message: check.revoked
+            ? 'This Machine Learning Feature Update was revoked and has been disabled. No replacement version is published yet.'
+            : check.reason === 'no-release'
+              ? 'No Machine Learning Feature Update has been published yet.'
+              : 'Machine Learning Feature Update is current.',
         };
       }
       return await updater.downloadAndInstall(check);
@@ -1472,6 +1631,36 @@ function protonUpdateMessage(error) {
   return 'Proton güncellenemedi. Lütfen daha sonra yeniden deneyin.';
 }
 
+// Reaction to a signed Proton revocation: get off the bad version immediately
+// by rolling back to the newest archived version that is not itself revoked.
+//
+// Rolling back rather than simply disabling is what keeps this safe to fire
+// automatically -- the scanner ends up on the last known-good rule set instead
+// of on nothing at all. If every archived version is revoked there is no safe
+// target, and the honest move is to say so rather than to leave the user
+// believing a rollback happened.
+async function rollBackRevokedProton(status, check) {
+  const revoked = new Set(check.revokedVersions || []);
+  const target = (status.rollback_versions || []).find((version) => !revoked.has(version));
+  if (!target) {
+    const message = 'Kurulu Proton sürümü geri çekildi ancak geri dönülebilecek doğrulanmış bir sürüm yok. '
+      + 'Lütfen güncellemeleri kontrol edin.';
+    await writeAppSetting('signature_update_last_error', message);
+    sendProtonUpdateEvent({ stage: 'revoked-no-target', version: check.currentVersion, message });
+    return { ok: false, code: 'PROTON_REVOKED_NO_TARGET', revoked: true, message };
+  }
+  sendProtonUpdateEvent({ stage: 'revoked', version: check.currentVersion, target });
+  const result = await rollbackProtonUpdate(target);
+  return {
+    ...result,
+    revoked: true,
+    revoked_version: check.currentVersion,
+    message: result.ok
+      ? `Kurulu Proton sürümü geri çekildi; doğrulanmış ${target} sürümüne dönüldü.`
+      : (result.message || 'Geri çekilen Proton sürümünden geri dönülemedi.'),
+  };
+}
+
 async function performProtonUpdate(options = {}) {
   if (protonUpdatePromise) return protonUpdatePromise;
   protonUpdatePromise = (async () => {
@@ -1482,6 +1671,9 @@ async function performProtonUpdate(options = {}) {
       if (!status.ok) throw new Error(status.message || 'Proton sürümü okunamadı.');
       const updater = createProtonUpdater();
       const check = await updater.check(status.version || '1.00.001');
+      // Revocation is handled before anything else: whether or not a newer
+      // release exists, the machine must not stay on a withdrawn rule set.
+      if (check.revoked) return await rollBackRevokedProton(status, check);
       if (!check.available) {
         sendProtonUpdateEvent({ stage: 'current', version: check.latestVersion || status.version });
         await writeAppSetting('signature_update_last_success_at', Date.now());
@@ -1725,6 +1917,10 @@ function runScheduledScanIfDue() {
 }
 
 function startScheduledScanTimer() {
+  // A scheduled quick scan walks the whole user profile, writes scan history
+  // and -- since automatic quarantine now applies to scans -- can move files.
+  // None of that on a development machine.
+  if (isDevSafeMode()) return;
   if (scheduledScanTimer) return;
   scheduledScanTimer = setInterval(runScheduledScanIfDue, SCHEDULED_SCAN_CHECK_INTERVAL_MS);
   setTimeout(runScheduledScanIfDue, 2 * 60 * 1000);
@@ -1743,10 +1939,44 @@ function runAutomaticSignatureUpdateIfDue() {
   });
 }
 
+// Piggybacks on the hourly signature timer instead of a dedicated interval:
+// Feature Update (ML models) has no download-new-version auto-timer today
+// (installing 200+ MB unattended is opt-in only), but a revoked model set
+// must still get disabled automatically even if the user never opens the
+// Feature Update card again. The kill switch document itself is a few KB,
+// so this stays cheap regardless.
+const FEATURE_KILLSWITCH_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+let lastFeatureKillSwitchCheckAt = 0;
+
+async function runAutomaticFeatureKillSwitchCheckIfDue() {
+  if (featureUpdatePromise) return;
+  if (Date.now() - lastFeatureKillSwitchCheckAt < FEATURE_KILLSWITCH_CHECK_INTERVAL_MS) return;
+  const updater = createFeatureUpdater();
+  if (!updater.status().ready) return;
+  lastFeatureKillSwitchCheckAt = Date.now();
+  try {
+    const check = await updater.check();
+    if (check.revoked) {
+      updater.quarantineCurrentFeature('killswitch');
+      sendFeatureUpdateEvent({ stage: 'revoked', version: check.currentVersion });
+    }
+  } catch (error) {
+    console.error('Automatic Feature Update kill switch check failed:', error);
+  }
+}
+
 function startAutomaticSignatureUpdateTimer() {
+  // Downloads Proton and installs it into the local database, and runs the
+  // Feature Update kill switch check which can quarantine the model
+  // directory. Both write state; neither belongs on a development machine.
+  if (isDevSafeMode()) return;
   if (signatureUpdateTimer) return;
-  signatureUpdateTimer = setInterval(runAutomaticSignatureUpdateIfDue, SIGNATURE_UPDATE_TIMER_INTERVAL_MS);
-  setTimeout(runAutomaticSignatureUpdateIfDue, 90 * 1000);
+  const tick = () => {
+    runAutomaticSignatureUpdateIfDue();
+    runAutomaticFeatureKillSwitchCheckIfDue().catch(() => {});
+  };
+  signatureUpdateTimer = setInterval(tick, SIGNATURE_UPDATE_TIMER_INTERVAL_MS);
+  setTimeout(tick, 90 * 1000);
 }
 
 function protectionStatus() {
@@ -2362,7 +2592,9 @@ async function updateApplicationSetting(key, value) {
   const result = await writeAppSetting(key, value);
   if (!result.ok) return result;
 
-  if (key === 'start_with_windows') {
+  // setLoginItemSettings writes a Run entry under HKCU, which survives long
+  // after the development session that created it.
+  if (key === 'start_with_windows' && !isDevSafeMode()) {
     const openAtLogin = Boolean(appSettings.start_with_windows);
     app.setLoginItemSettings({
       openAtLogin,
@@ -2419,7 +2651,162 @@ function noteWatcherHealthy(key) {
   watcherRestartCounts.delete(key);
 }
 
+// --- Activation window ----------------------------------------------------
+//
+// A separate top-level window rather than an overlay inside the main UI. The
+// overlay it replaces could only ever appear if the main window was already
+// open and loaded, which is the wrong dependency: the situations that need
+// activation most are the ones where the main UI is blocked, hidden in the
+// tray, or was never shown because the app started with --hidden.
+let activationWindow = null;
+
+function openActivationWindow(reason = 'missing') {
+  if (activationWindow && !activationWindow.isDestroyed()) {
+    if (activationWindow.isMinimized()) activationWindow.restore();
+    activationWindow.show();
+    activationWindow.focus();
+    return activationWindow;
+  }
+  const applicationIcon = neutronImage();
+  activationWindow = new BrowserWindow({
+    width: 560,
+    height: 620,
+    resizable: false,
+    minimizable: true,
+    maximizable: false,
+    frame: false,
+    backgroundColor: '#050a18',
+    show: false,
+    icon: applicationIcon || NEUTRON_ICON_PATH,
+    // Not parented to mainWindow on purpose: mainWindow may not exist, and a
+    // child window would be hidden along with a tray-minimised parent.
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      spellcheck: false,
+      preload: path.join(__dirname, 'activation-preload.cjs'),
+    },
+  });
+  if (applicationIcon && process.platform === 'win32') activationWindow.setIcon(applicationIcon);
+  activationWindow.once('ready-to-show', () => {
+    activationWindow?.show();
+    activationWindow?.focus();
+  });
+  activationWindow.on('closed', () => { activationWindow = null; });
+  activationWindow.loadFile(path.join(__dirname, 'activation.html'), {
+    query: { reason: String(reason) },
+  });
+  return activationWindow;
+}
+
+function closeActivationWindow() {
+  if (activationWindow && !activationWindow.isDestroyed()) activationWindow.close();
+  activationWindow = null;
+}
+
+// --- Licence enforcement while the app is running -------------------------
+//
+// The licence used to be checked once, at startup, by an in-app overlay. That
+// left the case nobody had covered: a licence that expires while Neutron is
+// running. Every watcher had already been started, so protection carried on
+// indefinitely past the expiry date, the user was never told, and the only
+// symptom was that IPC calls began returning LICENSE_REQUIRED.
+//
+// Enforcement now runs on a timer instead. On expiry the watchers are stopped
+// (an unlicensed Neutron must not keep scanning), the user is told plainly
+// that the machine is no longer protected, and the activation window opens.
+// While the machine stays unlicensed the reminder repeats, because a single
+// notification at the moment of expiry is easy to miss and the consequence --
+// running with no protection at all -- is not a quiet one.
+const LICENSE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const LICENSE_REMINDER_INTERVAL_MS = 4 * 60 * 60 * 1000;
+let licenseCheckTimer = null;
+let lastLicenseReminderAt = 0;
+let licenseWasActive = null;
+
+function stopAllWatchers(options = { silent: true }) {
+  disconnectServicePipe();
+  stopProtectionWatcher(options);
+  stopBehaviorWatcher(options);
+  stopWebWatcher(options);
+  stopAmsiService(options);
+  stopNetworkWatcher(options);
+  stopMemoryWatcher(options);
+  stopUsbWatcher(options);
+  stopRansomwareWatcher(options);
+}
+
+function notifyLicenseLapsed(reason) {
+  if (!appSettings.notifications_enabled || !Notification.isSupported()) return;
+  new Notification({
+    title: reason === 'expired' ? 'Neutron lisansı sona erdi' : 'Neutron etkinleştirilmedi',
+    body: 'Tüm korumalar durduruldu. Bu bilgisayar şu anda Neutron tarafından korunmuyor.',
+    icon: neutronImage(64),
+    urgency: 'critical',
+  }).show();
+}
+
+// Returns true when the licence is valid. Called on startup, on the timer,
+// and after any change to the stored licence.
+function enforceLicenseState(options = {}) {
+  const status = licenseStatus();
+  if (status.active) {
+    if (licenseWasActive === false) {
+      // Recovered: close the activation window and bring protection back.
+      closeActivationWindow();
+      startEnabledWatchers();
+      updateTrayMenu();
+    }
+    licenseWasActive = true;
+    lastLicenseReminderAt = 0;
+    return true;
+  }
+
+  // Distinguishing expiry from a missing licence matters to the user: one is
+  // "renew", the other is "you never activated this".
+  const reason = status.expired ? 'expired' : (status.license || status.failures?.length ? 'invalid' : 'missing');
+  const justLapsed = licenseWasActive !== false;
+  licenseWasActive = false;
+
+  stopAllWatchers();
+  updateTrayMenu();
+
+  const now = Date.now();
+  if (justLapsed || now - lastLicenseReminderAt >= LICENSE_REMINDER_INTERVAL_MS) {
+    lastLicenseReminderAt = now;
+    notifyLicenseLapsed(reason);
+    openActivationWindow(justLapsed ? reason : 'reminder');
+  } else if (options.forceWindow) {
+    openActivationWindow(reason);
+  }
+  return false;
+}
+
+function startLicenseWatchdog() {
+  if (licenseCheckTimer) return;
+  licenseCheckTimer = setInterval(() => {
+    invalidateLicenseStatusCache();
+    enforceLicenseState();
+  }, LICENSE_CHECK_INTERVAL_MS);
+}
+
 function startEnabledWatchers() {
+  // Development safety switch. Running `npm start` on a development machine
+  // otherwise turns on real-time protection over the whole user profile,
+  // plants ransomware canary files in Documents/Desktop/Pictures/Downloads,
+  // and starts watchers that write scan history and quarantine entries -- on
+  // the machine the developer is working from, not the test machine.
+  //
+  // NEUTRON_DEV_SAFE=1 makes the app inert: it opens, the UI works, nothing
+  // observes or modifies the machine. Deliberately env-driven rather than a
+  // setting, so it cannot be left switched on in a shipped build by accident.
+  if (isDevSafeMode()) {
+    sendProtectionEvent({
+      type: 'watch-error',
+      message: 'NEUTRON_DEV_SAFE=1: korumalar bilerek başlatılmadı (geliştirme modu).',
+    });
+    return;
+  }
   if (!licenseStatus().active) return;
   if (appSettings.service_mode_enabled) {
     connectServicePipe();
@@ -2495,6 +2882,12 @@ async function createWindow() {
   // UI even though the process behind them was running fine.
   await window.loadFile(path.join(__dirname, 'neutron-ui.html'));
 
+  // Runs before the watchers: if the licence has lapsed this stops them being
+  // started at all and opens the activation window, rather than starting
+  // protection and tearing it down again a moment later.
+  enforceLicenseState({ forceWindow: true });
+  startLicenseWatchdog();
+
   startEnabledWatchers();
   startUpdateChecks();
   startScheduledScanTimer();
@@ -2517,12 +2910,21 @@ ipcMain.on('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close();
 });
 
+ipcMain.on('activation:close', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.close();
+});
+
 ipcMain.handle('license:status', () => licenseStatus());
 ipcMain.handle('license:activate', (_event, key) => {
   const result = saveLicense(key);
   if (result.ok) {
-    startEnabledWatchers();
-    updateTrayMenu();
+    // enforceLicenseState does the whole recovery -- restart the watchers,
+    // refresh the tray and close the activation window -- so the success path
+    // is the same one the watchdog takes. Duplicating it here is how the two
+    // drift apart.
+    invalidateLicenseStatusCache();
+    licenseWasActive = false;
+    enforceLicenseState();
   }
   return result;
 });
@@ -3065,12 +3467,13 @@ app.on('before-quit', () => {
   usbWatcher = null;
   ransomwareWatcher = null;
 
-  for (const timer of [updateCheckTimer, scheduledScanTimer, signatureUpdateTimer]) {
+  for (const timer of [updateCheckTimer, scheduledScanTimer, signatureUpdateTimer, licenseCheckTimer]) {
     if (timer) clearInterval(timer);
   }
   updateCheckTimer = null;
   scheduledScanTimer = null;
   signatureUpdateTimer = null;
+  licenseCheckTimer = null;
 
   if (serviceSocket) {
     try {

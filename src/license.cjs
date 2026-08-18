@@ -97,4 +97,83 @@ function generateLicense(payload, privateKey) {
   const length = Buffer.alloc(2); length.writeUInt16BE(body.length);
   return formatActivationKey(Buffer.concat([length, body, signature]));
 }
-module.exports = { LICENSE_FORMAT, PUBLIC_KEY_PATH, deviceHash, generateLicense, parseLicense };
+
+// --- Licence storage at rest ----------------------------------------------
+//
+// The activation key used to be written to disk and to HKLM verbatim, so any
+// process or account able to read the file could lift a working key straight
+// out of it. It is signed and device-bound, so it is worthless on another
+// machine -- but on *this* machine it is still the credential, and leaving a
+// credential lying around in plaintext is not something to do just because
+// the blast radius is small.
+//
+// Keying: AES-256-GCM under a key derived from the machine's own MachineGuid,
+// the same material the device binding already uses. That choice is what
+// makes the elevated installer, the desktop app and the LocalSystem service
+// all able to read the same file -- a per-user secret would break exactly the
+// hand-off the installer depends on.
+//
+// Be precise about what this is and is not: the key material sits in the
+// registry on the same machine, so this is not confidentiality against
+// someone who already controls the box, and it is not DPAPI. It raises the
+// cost of casual key harvesting and keeps the credential out of plaintext at
+// rest. Claiming more would be dishonest.
+const STORAGE_PREFIX = 'NTRENC1';
+const STORAGE_KDF_SALT = 'Neutron license storage v1';
+let storageKeyCache = null;
+
+function storageKey() {
+  // scrypt is intentionally slow, and the licence is read on a 5 s cache miss
+  // from every IPC guard -- deriving it per read would be a self-inflicted
+  // stall. The material cannot change while the process lives.
+  if (!storageKeyCache) storageKeyCache = crypto.scryptSync(deviceMaterial(), STORAGE_KDF_SALT, 32);
+  return storageKeyCache;
+}
+
+function encryptStoredLicense(key) {
+  const nonce = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', storageKey(), nonce, { authTagLength: 16 });
+  const ciphertext = Buffer.concat([cipher.update(String(key).trim(), 'utf8'), cipher.final()]);
+  return [
+    STORAGE_PREFIX,
+    nonce.toString('base64'),
+    cipher.getAuthTag().toString('base64'),
+    ciphertext.toString('base64'),
+  ].join(':');
+}
+
+// Accepts both envelopes and bare keys. Installations made before this existed
+// hold plaintext, and refusing to read them would lock working machines out
+// over a storage-format change; they are re-encrypted the next time anything
+// calls saveLicense (which every install and activation does).
+function decryptStoredLicense(stored) {
+  const text = String(stored || '').trim();
+  if (!text.startsWith(`${STORAGE_PREFIX}:`)) return text;
+  const parts = text.split(':');
+  if (parts.length !== 4) throw new Error('Lisans deposu bicimi gecersiz.');
+  const [, nonce, authTag, ciphertext] = parts;
+  try {
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm', storageKey(), Buffer.from(nonce, 'base64'), { authTagLength: 16 },
+    );
+    decipher.setAuthTag(Buffer.from(authTag, 'base64'));
+    return Buffer.concat([
+      decipher.update(Buffer.from(ciphertext, 'base64')), decipher.final(),
+    ]).toString('utf8').trim();
+  } catch {
+    // Wrong machine, tampered envelope, or a MachineGuid that changed under
+    // us. All three mean the same thing to every caller: there is no usable
+    // licence here.
+    throw new Error('Kayitli lisans bu bilgisayarda cozulemedi.');
+  }
+}
+
+module.exports = {
+  LICENSE_FORMAT,
+  PUBLIC_KEY_PATH,
+  decryptStoredLicense,
+  deviceHash,
+  encryptStoredLicense,
+  generateLicense,
+  parseLicense,
+};

@@ -1,0 +1,61 @@
+﻿NEUTRON - RISK BILDIRIMI VE SORUMLULUK REDDI
+
+Neutron DENEYSEL bir guvenlik yazilimidir. KENDI SORUMLULUGUNUZDA KULLANIRSINIZ.
+
+Neutron; Microsoft Defender'in, kurumsal uc nokta korumasinin, duzenli yedeklemenin veya profesyonel guvenlik danismanliginin yerini TUTMAZ.
+
+
+NEUTRON NE YAPAR
+
+Neutron dosyalarinizi inceleyebilir, sistem etkinligini izleyebilir, istege bagli Windows guvenlik bilesenlerini kaydedebilir, guvenlik duvari kurallari olusturabilir ve supheli dosyalari karantinaya alabilir. Bu islemler uygulamalarin ve isletim sisteminin normal calismasini etkileyebilir.
+
+
+KURMADAN ONCE
+
+- Onemli verilerinizi yedekleyin.
+- Once bir sanal makinede veya uretim disi bir ortamda deneyin.
+- Dosyalari karantinaya almadan, silmeden veya kalici olarak kaldirmadan once tespitleri gozden gecirin.
+- Hem yanlis pozitif hem yanlis negatif sonuclar bekleyin.
+- Ne yaptiginizi tam olarak bilmiyorsaniz Microsoft Defender'i veya baska bir guvenilir guvenlik urununu devre disi birakmayin.
+- Yalnizca guvendiginiz surumleri ve guncellemeleri kullanin.
+
+
+RISKLER VE SINIRLAMALAR
+
+- Tespit, imza ve sezgisel analize dayanir; zararli yazilim atlanabilir.
+- Mesru dosyalar isaretlenebilir, engellenebilir veya karantinaya alinabilir.
+- Gercek zamanli izleme performansi, pil kullanimini ve uygulama uyumlulugunu etkileyebilir.
+- Yonetici duzeyindeki ozellikler Windows ayarlarini, servisleri, kayit defteri girdilerini, AMSI kaydini ve guvenlik duvari kurallarini degistirebilir.
+- Guncellemeler, kurallar ve makine ogrenmesi modelleri beklenmedik tespitlere yol acabilir.
+- Bu proje bagimsiz bir guvenlik denetiminden GECMEMISTIR.
+
+
+DESTEK VE GARANTI YOKTUR
+
+Yazilim "OLDUGU GIBI" saglanir, hicbir turde garanti verilmez.
+
+- Teknik, kurulum veya kullanim destegi saglanmaz.
+- Bakim, guncelleme, yama veya uyumluluk garantisi verilmez.
+- SLA, yanit suresi taahhudu veya acil durum mudahalesi sunulmaz.
+- Tespit orani, tehdit onleme etkinligi, veri butunlugu veya sistem uyumlulugu garantisi verilmez.
+- Neutron'u tek guvenlik onleminiz olarak ya da kritik sistemlerde ve hassas verilerde kullanmayin.
+
+Yedekleme, test etme, tespitleri gozden gecirme ve ek guvenlik onlemleri almaktan yalnizca kullanici sorumludur.
+
+Yururlukteki yasalarin izin verdigi azami olcude; yazarlar ve katkida bulunanlar veri kaybindan, yanlis tespitlerden, atlanan tehditlerden, guvenlik olaylarindan, hizmet kesintisinden, uyumsuzluktan veya bu yazilimin kullanimindan ya da kullanilamamasindan dogan zararlardan SORUMLU DEGILDIR.
+
+
+SORUMLU KULLANIM
+
+Neutron'u yalnizca sahibi oldugunuz veya yonetmeye acikca yetkili oldugunuz sistemlerde ve dosyalarda kullanin. Guvenlik denetimlerini asmak, baskalarina mudahale etmek veya yururlukteki yasa ya da politikalari ihlal etmek icin kullanmayin.
+
+
+LISANS
+
+Neutron, PolyForm Noncommercial License 1.0.0 ile kaynak kodu erisilebilir olarak sunulur. Ticari kullanim izni YOKTUR. Her turlu ticari kullanim, yeniden satis, ticari dagitim, ucretli hizmet veya ticari bir urunun parcasi olarak kullanim, telif hakki sahibinin onceden yazili iznini gerektirir.
+
+Bu, OSI onayli bir acik kaynak lisansi degildir.
+
+
+Kuruluma devam ederek yukaridakileri okudugunuzu, anladiginizi ve kabul ettiginizi beyan edersiniz.
+

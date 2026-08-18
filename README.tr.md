@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4?style=for-the-badge&logo=windows&logoColor=white)](#-gereksinimler)
 [![Electron](https://img.shields.io/badge/Electron-Desktop%20App-47848F?style=for-the-badge&logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![Python](https://img.shields.io/badge/Python-Scan%20Engine-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Lisans](https://img.shields.io/badge/Lisans-PolyForm%20Noncommercial-red?style=for-the-badge)](LICENSE)
+[![Lisans](https://img.shields.io/badge/Lisans-PolyForm%20Noncommercial-red?style=for-the-badge)](LICENSE.md)
 
 [Özellikler](#-özellikler) ·
 [Riskler](#-önemli-güvenlik-uyarısı) ·
@@ -115,7 +115,7 @@ Neutron’u yalnızca sahibi olduğunuz veya açık yetkinizin bulunduğu sistem
 
 ## 📄 Lisans
 
-Neutron, [PolyForm Noncommercial License 1.0.0](LICENSE) ile kaynak kodu erişilebilir olarak sunulmaktadır.
+Neutron, [PolyForm Noncommercial License 1.0.0](LICENSE.md) ile kaynak kodu erişilebilir olarak sunulmaktadır.
 
 Ticari kullanım yasaktır. Ticari kullanım, yeniden satış, ticari dağıtım, ücretli hizmet içinde kullanım veya ticari bir ürünün parçası olarak kullanım için telif hakkı sahibinden önceden yazılı izin alınmalıdır.
 

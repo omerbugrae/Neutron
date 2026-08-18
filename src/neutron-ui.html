@@ -84,21 +84,12 @@
     </svg>
 
     <div class="css-fallback-background" aria-hidden="true"></div>
-    <section class="license-gate" data-role="license-gate" aria-labelledby="license-title">
-      <div class="license-gate__card">
-        <img src="../assets/neutron-logo.png" alt="Neutron" class="license-gate__logo" />
-        <p>NEUTRON SECURITY</p>
-        <h1 id="license-title">Neutron'u etkinleştir</h1>
-        <span data-role="license-device-label">Cihaz kimliği hazırlanıyor</span>
-        <code data-role="license-device-hash"></code>
-        <form data-role="license-form">
-          <label for="license-key">Aktivasyon anahtarı</label>
-          <textarea id="license-key" data-role="license-key-input" rows="5" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="NTR1-XXXXX-XXXXX-..."></textarea>
-          <button type="submit">Etkinleştir</button>
-        </form>
-        <p class="license-gate__message" data-role="license-message">Geçerli bir lisans olmadan koruma başlatılmaz.</p>
-      </div>
-    </section>
+    <!-- The in-app activation overlay that used to live here was removed:
+         it could only appear once the main window was already open and
+         loaded, which is the wrong dependency for a screen whose whole job is
+         to handle the app being unusable. Activation now happens in its own
+         top-level window (src/activation.html), opened by the main process
+         whenever the licence is missing or has expired. -->
     <div class="ambient-cube-light" aria-hidden="true">
       <div class="rendered-cube" aria-hidden="true">
         <i class="rendered-cube__face rendered-cube__face--front"></i>
@@ -495,7 +486,7 @@
             <div>
               <p class="section-eyebrow">GERÇEK ZAMANLI DOSYA KORUMASI</p>
               <h2 data-role="realtime-protection-state">Başlatılıyor</h2>
-              <p data-role="realtime-protection-detail">Masaüstü ve İndirilenler için yerel izleyici hazırlanıyor.</p>
+              <p data-role="realtime-protection-detail">Kullanıcı profiliniz ve geçici klasörler için yerel izleyici hazırlanıyor.</p>
             </div>
             <button class="protection-toggle" type="button" data-action="toggle-protection" aria-pressed="false">
               <span class="protection-toggle__track" aria-hidden="true"><i></i></span>
@@ -765,7 +756,7 @@
             </article>
             <article class="settings-card settings-card--wide">
               <div class="settings-card-heading"><div><p class="section-eyebrow">İZLENEN KLASÖRLER</p><h2>Gerçek zamanlı kapsam</h2></div><button class="settings-action" type="button" data-action="add-watch-folder">Klasör ekle</button></div>
-              <p>Liste boşsa Masaüstü ve İndirilenler otomatik olarak izlenir.</p>
+              <p>Liste boşsa kullanıcı profilinizin tamamı (<code>C:\Users\...</code>) ve geçici klasörler otomatik olarak izlenir. Buraya klasör eklerseniz yalnızca eklediğiniz klasörler izlenir.</p>
               <div class="watch-path-list" data-role="watch-path-list"><p class="settings-empty">Varsayılan klasörler kullanılıyor.</p></div>
             </article>
             <article class="settings-card settings-card--wide exclusions-settings-card">

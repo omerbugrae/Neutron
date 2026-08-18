@@ -9,13 +9,23 @@ const {
   validateManifest,
   verifyManifestSignature,
 } = require('./feature-update-format.cjs');
-const { compareVersions, fetchBytes } = require('./proton-updater.cjs');
+const { channelConfig, validateKillSwitch, verifyKillSwitchSignature } = require('./killswitch-format.cjs');
+const {
+  compareVersions, discoverLatestTaggedRelease, fetchBytes, fetchReleaseByTag, repositoryApiBase,
+} = require('./proton-updater.cjs');
 
 const DEFAULT_RELEASES_URL = 'https://api.github.com/repos/omerbugrae/NeutronProton/releases?per_page=30';
 const RELEASE_TAG_PATTERN = /^feature-v(\d+\.\d{2}\.\d{3})$/;
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_SIGNATURE_BYTES = 64 * 1024;
 const MAX_ASSET_BYTES = 40 * 1024 * 1024;
+
+// The kill switch lives in its own mutable GitHub release (not a normal
+// feature-vX.XX.XXX release, which is immutable once published) so a
+// revocation can be pushed in seconds by re-uploading a few KB, without
+// re-packing and re-uploading hundreds of MB of model chunks.
+const FEATURE_KILLSWITCH = channelConfig('feature');
+const MAX_KILLSWITCH_BYTES = 64 * 1024;
 
 class FeatureUpdateError extends Error {
   constructor(code, message) {
@@ -39,6 +49,10 @@ function selectLatestFeatureRelease(releases) {
     })
     .filter(Boolean)
     .sort((left, right) => compareVersions(right.version, left.version))[0] || null;
+}
+
+function findReleaseByTag(releases, tag) {
+  return (Array.isArray(releases) ? releases : []).find((release) => release && !release.draft && release.tag_name === tag) || null;
 }
 
 function assetByName(release, name) {
@@ -104,14 +118,73 @@ class FeatureUpdater {
     return { ok: true, ready, version: ready ? version : null, model_count: ready ? fs.readdirSync(this.featureDirectory).filter((name) => name.endsWith('.model')).length : 0 };
   }
 
+  // Verifies the small, separately-published kill switch document and
+  // reports whether the currently installed version has been revoked.
+  // Failures here (network, missing release, bad signature) never throw:
+  // a broken kill switch check must not block normal update checks, so
+  // callers get killSwitchCheckFailed instead and can surface that.
+  async checkKillSwitch(releases, currentVersion) {
+    try {
+      const release = findReleaseByTag(releases, FEATURE_KILLSWITCH.tag)
+        || await fetchReleaseByTag(
+          repositoryApiBase(this.releasesUrl), FEATURE_KILLSWITCH.tag,
+          { userAgent: this.userAgent, allowLoopback: this.allowLoopback },
+        );
+      if (!release) return { revoked: false, revokedVersions: [] };
+      const assets = Array.isArray(release.assets) ? release.assets : [];
+      const documentAsset = assets.find((item) => item?.name === FEATURE_KILLSWITCH.assetName);
+      const signatureAsset = assets.find((item) => item?.name === `${FEATURE_KILLSWITCH.assetName}.sig`);
+      if (!documentAsset?.browser_download_url || !signatureAsset?.browser_download_url) return { revoked: false, revokedVersions: [] };
+      const documentBytes = await fetchBytes(documentAsset.browser_download_url, { maximumBytes: MAX_KILLSWITCH_BYTES, userAgent: this.userAgent, allowLoopback: this.allowLoopback });
+      const signatureBytes = await fetchBytes(signatureAsset.browser_download_url, { maximumBytes: MAX_SIGNATURE_BYTES, userAgent: this.userAgent, allowLoopback: this.allowLoopback });
+      const publicKey = fs.readFileSync(this.publicKeyPath);
+      verifyKillSwitchSignature(documentBytes, parseJson(signatureBytes, 'INVALID_SIGNATURE_DOCUMENT', 'Feature Update kill switch signature could not be read.'), publicKey);
+      const document = validateKillSwitch(parseJson(documentBytes, 'INVALID_KILLSWITCH', 'Feature Update kill switch document could not be read.'), 'feature');
+      return { revoked: document.revoked_versions.includes(currentVersion), revokedVersions: document.revoked_versions };
+    } catch (error) {
+      this.emit('killswitch-check-failed', { message: error?.message || String(error) });
+      return { revoked: false, revokedVersions: [], killSwitchCheckFailed: true };
+    }
+  }
+
   async check() {
     this.emit('checking');
     const bytes = await fetchBytes(this.releasesUrl, { maximumBytes: 2 * 1024 * 1024, accept: 'application/vnd.github+json', userAgent: this.userAgent, allowLoopback: this.allowLoopback });
-    const latest = selectLatestFeatureRelease(parseJson(bytes, 'INVALID_RELEASES', 'Feature Update release list could not be read.'));
+    const releases = parseJson(bytes, 'INVALID_RELEASES', 'Feature Update release list could not be read.');
     const currentVersion = currentFeatureVersion(this.featureDirectory);
-    if (!latest) return { available: false, reason: 'no-release', currentVersion };
-    if (compareVersions(latest.version, currentVersion) <= 0) return { available: false, reason: 'current', currentVersion, latestVersion: latest.version };
-    return { available: true, currentVersion, latestVersion: latest.version, candidate: latest };
+    const killSwitch = await this.checkKillSwitch(releases, currentVersion);
+    // See the block comment in proton-updater.cjs: the list endpoint has been
+    // seen returning nothing for a repository that does have releases, so an
+    // empty list is treated as a question rather than an answer.
+    let latest = selectLatestFeatureRelease(releases);
+    if (!latest) {
+      latest = await discoverLatestTaggedRelease(
+        repositoryApiBase(this.releasesUrl), RELEASE_TAG_PATTERN,
+        {
+          userAgent: this.userAgent,
+          allowLoopback: this.allowLoopback,
+          revokedVersions: killSwitch.revokedVersions,
+        },
+      );
+      if (latest) this.emit('release-list-fallback', { source: 'tags', version: latest.version });
+    }
+    if (!latest) return { available: false, reason: 'no-release', currentVersion, ...killSwitch };
+    if (compareVersions(latest.version, currentVersion) <= 0) return { available: false, reason: 'current', currentVersion, latestVersion: latest.version, ...killSwitch };
+    return { available: true, currentVersion, latestVersion: latest.version, candidate: latest, ...killSwitch };
+  }
+
+  // Disables a revoked, already-installed model set without deleting it
+  // (kept alongside for forensics/support). status() then reports
+  // ready:false, the same signal the engine already treats as "no ML
+  // models available" -- so revocation fails closed into the existing
+  // fail-open-shadow-mode path rather than needing new engine states.
+  quarantineCurrentFeature(reason) {
+    if (!fs.existsSync(this.featureDirectory)) return null;
+    const version = currentFeatureVersion(this.featureDirectory);
+    const quarantinePath = `${this.featureDirectory}.revoked-${version}-${Date.now()}`;
+    fs.renameSync(this.featureDirectory, quarantinePath);
+    this.emit('revoked', { version, reason, quarantinePath });
+    return quarantinePath;
   }
 
   async downloadAndInstall(checkResult) {

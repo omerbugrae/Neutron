@@ -1299,7 +1299,12 @@ svg {
 }
 
 .app-page[hidden] {
-  display: none;
+  display: none !important;
+}
+
+/* Keep independently bordered page sections visually separate. */
+.app-page > article + article {
+  margin-top: 14px;
 }
 
 .page-header {
@@ -1470,6 +1475,10 @@ svg {
   align-content: center;
   padding: 40px;
   text-align: center;
+}
+
+.empty-page-panel[hidden] {
+  display: none !important;
 }
 
 .empty-page-panel p {
